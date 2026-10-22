@@ -29,3 +29,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Historical local deployment/rollback executables and migration snapshots
+/TaskBoard.*.exe
+/artifacts/migrations/*.zip

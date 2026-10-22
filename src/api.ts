@@ -16,6 +16,13 @@ export const updateTask = (task: Task, path?: string) =>
 export const archiveTask = (id: string, path?: string) =>
   invoke<Task>("archive_task", { path, id });
 
+export const archiveColumn = (columnId: string, expected: Array<[string, string]>, path?: string) =>
+  invoke<BoardSnapshot>("archive_column", { columnId, expected, path });
+
+export const archiveColumnOlderThan = (
+  columnId: string, cutoffIso: string, expected: Array<[string, string]>, path?: string,
+) => invoke<BoardSnapshot>("archive_column_older_than", { columnId, cutoffIso, expected, path });
+
 export const saveBoardConfig = (config: BoardConfig, path?: string) =>
   invoke<BoardConfig>("save_board_config", { path, config });
 

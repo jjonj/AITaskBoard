@@ -48,6 +48,25 @@ fn archive_task(path: Option<String>, id: String) -> Result<Task, String> {
 }
 
 #[tauri::command]
+fn archive_column(path: Option<String>, column_id: String, expected: Vec<(String, String)>) -> Result<BoardSnapshot, String> {
+    FsTaskStore::default()
+        .archive_column(&root(path), &column_id, &expected)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn archive_column_older_than(
+    path: Option<String>,
+    column_id: String,
+    cutoff_iso: String,
+    expected: Vec<(String, String)>,
+) -> Result<BoardSnapshot, String> {
+    FsTaskStore::default()
+        .archive_column_older_than(&root(path), &column_id, &cutoff_iso, &expected)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn save_board_config(path: Option<String>, config: BoardConfig) -> Result<BoardConfig, String> {
     FsTaskStore::default()
         .save_config(&root(path), config)
@@ -127,6 +146,8 @@ pub fn run() {
             create_task,
             update_task,
             archive_task,
+            archive_column,
+            archive_column_older_than,
             save_board_config,
             restore_snapshot,
             highlight_in_fomni,

@@ -1,0 +1,151 @@
+{
+  "backup": "D:\\SSDProjects\\Tools\\TaskBoard\\artifacts\\migrations\\20261015T150514_epic_only_hierarchy_before.zip",
+  "total": 203,
+  "changed": [
+    {
+      "id": "WT-0020",
+      "reasons": [
+        "preserved_acceptance_ai_notes_in_notes"
+      ]
+    },
+    {
+      "id": "WT-0052",
+      "reasons": [
+        "preserved_acceptance_ai_notes_in_notes"
+      ]
+    },
+    {
+      "id": "WT-0059",
+      "reasons": [
+        "epic_deparented",
+        "preserved_acceptance_ai_notes_in_notes"
+      ]
+    },
+    {
+      "id": "WT-0072",
+      "reasons": [
+        "epic_deparented",
+        "cleared_epic_icon",
+        "preserved_acceptance_ai_notes_in_notes"
+      ]
+    },
+    {
+      "id": "WT-0074",
+      "reasons": [
+        "epic_deparented",
+        "preserved_acceptance_ai_notes_in_notes"
+      ]
+    },
+    {
+      "id": "WT-0075",
+      "reasons": [
+        "preserved_acceptance_ai_notes_in_notes"
+      ]
+    },
+    {
+      "id": "WT-0086",
+      "reasons": [
+        "preserved_acceptance_ai_notes_in_notes"
+      ]
+    },
+    {
+      "id": "WT-0096",
+      "reasons": [
+        "preserved_acceptance_ai_notes_in_notes"
+      ]
+    },
+    {
+      "id": "WT-0102",
+      "reasons": [
+        "cleared_epic_icon",
+        "preserved_acceptance_ai_notes_in_notes"
+      ]
+    },
+    {
+      "id": "WT-0126",
+      "reasons": [
+        "detached_no_epic_ancestor",
+        "original_parent_preserved_as_related"
+      ]
+    },
+    {
+      "id": "WT-0128",
+      "reasons": [
+        "detached_no_epic_ancestor",
+        "original_parent_preserved_as_related"
+      ]
+    },
+    {
+      "id": "WT-0132",
+      "reasons": [
+        "preserved_acceptance_ai_notes_in_notes"
+      ]
+    },
+    {
+      "id": "WT-0145",
+      "reasons": [
+        "preserved_acceptance_ai_notes_in_notes"
+      ]
+    },
+    {
+      "id": "WT-0162",
+      "reasons": [
+        "preserved_acceptance_ai_notes_in_notes"
+      ]
+    },
+    {
+      "id": "WT-0163",
+      "reasons": [
+        "preserved_acceptance_ai_notes_in_notes"
+      ]
+    },
+    {
+      "id": "WT-0187",
+      "reasons": [
+        "preserved_acceptance_ai_notes_in_notes"
+      ]
+    },
+    {
+      "id": "WT-0204",
+      "reasons": [
+        "reparented_to_epic:WT-0075",
+        "original_parent_preserved_as_related"
+      ]
+    },
+    {
+      "id": "WT-0205",
+      "reasons": [
+        "reparented_to_epic:WT-0052",
+        "original_parent_preserved_as_related"
+      ]
+    },
+    {
+      "id": "WT-0009",
+      "reasons": [
+        "preserved_acceptance_ai_notes_in_notes"
+      ]
+    },
+    {
+      "id": "WT-0045",
+      "reasons": [
+        "reparented_to_epic:WT-0020",
+        "original_parent_preserved_as_related"
+      ]
+    },
+    {
+      "id": "WT-0046",
+      "reasons": [
+        "reparented_to_epic:WT-0020",
+        "original_parent_preserved_as_related"
+      ]
+    },
+    {
+      "id": "WT-0047",
+      "reasons": [
+        "reparented_to_epic:WT-0020",
+        "original_parent_preserved_as_related"
+      ]
+    }
+  ],
+  "skipped_concurrent": []
+}
