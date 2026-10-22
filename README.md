@@ -1,8 +1,14 @@
 # TaskBoard
 
-Markdown-first desktop task board for Wartribes.
+Markdown-first desktop task boards for multiple projects. The original Wartribes board remains the default on first launch.
 
-Default board: `B:\GDrive\SharedWithPhone\Obsidian\jjj\Wartribes\Tasks`
+Default Wartribes board: `B:\GDrive\SharedWithPhone\Obsidian\jjj\Wartribes\Tasks`
+
+## Project tabs
+
+TaskBoard now opens with a tab strip for individual projects. Click **+ Project** to register an existing board folder containing `_board.md`, or check **Create a new TaskBoard board** to initialize an existing empty project folder. The selected tab persists across restarts in `%APPDATA%\TaskBoard\projects.json`. Each tab isolates task state, drafts, undo history, queues, snoozes, refresh and board preferences; tabs are locked while an editor or an operation is active. Removing a tab never deletes any tasks or directories. The original Wartribes tab, files, and user preferences are preserved.
+
+**CLI:** Other projects can already be accessed with `TaskBoard.exe --root "D:\Projects\Other\Tasks" --json task list`. For safety, the CLI default remains Wartribes rather than whichever desktop tab was last active. New projects still generate `WT-####` task IDs within their independent board root; project-specific prefixes and custom workflow roles are **planned**, not yet implemented. See [multi-project groundwork and limitations](docs/MULTI_PROJECT_FOUNDATION_20261022.md).
 
 Tasks can be edited directly in Obsidian. The editor presents **Description** as an editable original brief followed by timestamped, read-only updates. Updates (including submitted **Note to AI** text) are stored inside the Markdown `## Description` section using quoted text and comment markers, so an update cannot accidentally become a new Markdown section. Historical `AI Notes` and `User Notes` remain readable for compatibility; saving in TaskBoard moves prior AI notes and submitted Note to AI text into the description history and clears those separate fields.
 

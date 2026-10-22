@@ -10,12 +10,13 @@ import { applyCardPlacements, orderCardsByDependencies } from "./dependencyLayou
 import { withEpicProxyRows } from "./epicProxyRows";
 import { eligibleForAgeArchive } from "./archiveAge";
 import { isHiddenByCollapsedEpic, toggleAllEpicCollapses } from "./epicCollapse";
+import { ProjectTabs } from "./ProjectTabs";
+import type { ProjectTab } from "./api";
 import {
   archiveTask,
   archiveColumn,
   archiveColumnOlderThan,
   createTask,
-  getDefaultBoardPath,
   highlightInFomni,
   loadBoard,
   openInObsidian,
@@ -82,9 +83,9 @@ const activeUserQueueSnoozes = (raw: unknown, now = Date.now()): UserQueueSnooze
   );
 };
 
-const loadUserQueueSnoozes = (): UserQueueSnoozes => {
+const loadUserQueueSnoozes = (key = USER_QUEUE_SNOOZES_KEY): UserQueueSnoozes => {
   try {
-    return activeUserQueueSnoozes(JSON.parse(window.localStorage.getItem(USER_QUEUE_SNOOZES_KEY) || "{}"));
+    return activeUserQueueSnoozes(JSON.parse(window.localStorage.getItem(key) || "{}"));
   } catch {
     return {};
   }
@@ -127,9 +128,9 @@ type RecentTaskActivity = { kind: TaskActivityKind; at: number };
 const RECENT_ACTIVITY_STORAGE_KEY = "taskboard.recentTaskActivity";
 const RECENT_ACTIVITY_MS = 10 * 60 * 1000;
 
-const loadRecentTaskActivity = (): Record<string, RecentTaskActivity> => {
+const loadRecentTaskActivity = (key = RECENT_ACTIVITY_STORAGE_KEY): Record<string, RecentTaskActivity> => {
   try {
-    const stored: unknown = JSON.parse(window.localStorage.getItem(RECENT_ACTIVITY_STORAGE_KEY) || "{}");
+    const stored: unknown = JSON.parse(window.localStorage.getItem(key) || "{}");
     if (!stored || typeof stored !== "object" || Array.isArray(stored)) return {};
     const now = Date.now();
     return Object.fromEntries(Object.entries(stored).filter((entry): entry is [string, RecentTaskActivity] => {
@@ -226,15 +227,25 @@ const randomColumnColor = (used: string[]) => {
   return pool[Math.floor(Math.random() * pool.length)];
 };
 
-function App() {
-  const [boardPath, setBoardPath] = useState("");
+function ProjectBoard({ project, onInteractionChange }: {
+  project: ProjectTab;
+  onInteractionChange: (locked: boolean) => void;
+}) {
+  const boardPath = project.path;
+  // Preserve existing Wartribes UI settings while isolating all other boards.
+  // IDs such as WT-0020 are allowed to repeat between unrelated projects.
+  const storageKey = (name: string) =>
+    project.id === "wartribes" ? `taskboard.${name}` : `taskboard.project.${project.id}.${name}`;
+  const recentKey = storageKey("recentTaskActivity");
+  const snoozesKey = storageKey("userQueueSnoozes");
+  const collapsedKey = storageKey("collapsedTasks");
   const [snapshot, setSnapshot] = useState<BoardSnapshot | null>(null);
   const [query, setQuery] = useState("");
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [descriptionUpdateInput, setDescriptionUpdateInput] = useState("");
   const [userQueueReview, setUserQueueReview] = useState<UserQueueReview | null>(null);
   const [followupQueueReturn, setFollowupQueueReturn] = useState<UserQueueReview | null>(null);
-  const [userQueueSnoozes, setUserQueueSnoozes] = useState<UserQueueSnoozes>(loadUserQueueSnoozes);
+  const [userQueueSnoozes, setUserQueueSnoozes] = useState<UserQueueSnoozes>(() => loadUserQueueSnoozes(snoozesKey));
   const [dragId, setDragId] = useState<string | null>(null);
   const [dragColumnId, setDragColumnId] = useState<string | null>(null);
   const [columnDragPreview, setColumnDragPreview] = useState<{
@@ -254,7 +265,7 @@ function App() {
   } | null>(null);
   const [collapsedTaskIds, setCollapsedTaskIds] = useState<Set<string>>(() => {
     try {
-      const stored = window.localStorage.getItem("taskboard.collapsedTasks");
+      const stored = window.localStorage.getItem(collapsedKey);
       return new Set(stored ? (JSON.parse(stored) as string[]) : []);
     } catch {
       return new Set();
@@ -271,7 +282,7 @@ function App() {
   const snapshotRef = useRef<BoardSnapshot | null>(null);
   const activityTimersRef = useRef(new Map<string, number>());
   const [taskActivity, setTaskActivity] = useState<Record<string, TaskActivityKind>>({});
-  const [recentTaskActivity, setRecentTaskActivity] = useState<Record<string, RecentTaskActivity>>(loadRecentTaskActivity);
+  const [recentTaskActivity, setRecentTaskActivity] = useState<Record<string, RecentTaskActivity>>(() => loadRecentTaskActivity(recentKey));
   const [hoverTask, setHoverTask] = useState<{
     task: Task;
     x: number;
@@ -288,6 +299,11 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [refreshFeedback, setRefreshFeedback] = useState<"idle" | "working" | "done">("idle");
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    onInteractionChange(!!editor || busy || !!dragId || !!dragColumnId || !!columnDragPreview);
+    return () => onInteractionChange(false);
+  }, [editor, busy, dragId, dragColumnId, columnDragPreview, onInteractionChange]);
 
   const applySnapshot = (next: BoardSnapshot) => {
     snapshotRef.current = next;
@@ -419,9 +435,7 @@ function App() {
   useEffect(() => {
     void (async () => {
       try {
-        const path = await getDefaultBoardPath();
-        setBoardPath(path);
-        const next = await loadBoard(path);
+        const next = await loadBoard(boardPath);
         applySnapshot(next);
         setError("");
       } catch (err) {
@@ -444,7 +458,7 @@ function App() {
   // underlying task Markdown or create synthetic timestamps for old tasks.
   useEffect(() => {
     try {
-      window.localStorage.setItem(RECENT_ACTIVITY_STORAGE_KEY, JSON.stringify(recentTaskActivity));
+      window.localStorage.setItem(recentKey, JSON.stringify(recentTaskActivity));
     } catch { /* Storage may be disabled; badges still work for this session. */ }
   }, [recentTaskActivity]);
 
@@ -452,7 +466,7 @@ function App() {
   // the exact expiry even if automatic board refresh is suspended by an editor.
   useEffect(() => {
     try {
-      window.localStorage.setItem(USER_QUEUE_SNOOZES_KEY, JSON.stringify(userQueueSnoozes));
+      window.localStorage.setItem(snoozesKey, JSON.stringify(userQueueSnoozes));
     } catch { /* Snooze continues for the current window if storage is unavailable. */ }
     const nextExpiry = Math.min(...Object.values(userQueueSnoozes).filter((until) => until > Date.now()));
     if (!Number.isFinite(nextExpiry)) return;
@@ -558,7 +572,7 @@ function App() {
 
   useEffect(() => {
     window.localStorage.setItem(
-      "taskboard.collapsedTasks",
+      collapsedKey,
       JSON.stringify([...collapsedTaskIds]),
     );
   }, [collapsedTaskIds]);
@@ -1813,7 +1827,7 @@ function App() {
       <main className="loading-shell">
         <div className="loading-card">
           <strong>TaskBoard</strong>
-          <span>{error || "Loading Wartribes tasks…"}</span>
+          <span>{error || `Loading ${project.name} tasks…`}</span>
         </div>
       </main>
     );
@@ -1829,7 +1843,7 @@ function App() {
     >
       <header className="topbar">
         <div>
-          <div className="eyebrow">WARTRIBES</div>
+          <div className="eyebrow">TASKBOARD · {project.name.toUpperCase()}</div>
           <h1>{snapshot.config.name}</h1>
         </div>
         <div className="toolbar">
@@ -2317,10 +2331,10 @@ function App() {
           <button onClick={() => void copyTaskText(contextTask.path)}>Copy full file path</button>
           <button
             onClick={() => void copyTaskText(contextTask.kind === "epic"
-                ? `In Wartribes, review epic ${contextTask.id} and choose a ready executable subtask. Do not implement or claim the epic itself.`
+                ? `In ${project.name}, review epic ${contextTask.id} and choose a ready executable subtask. Do not implement or claim the epic itself.`
                 : contextTask.kind === "for_user"
                   ? `Review human-only task ${contextTask.id} in TaskBoard, prepare useful context, then ask the user to take the required action. Do not claim, complete, or archive it on their behalf.`
-                  : `In Wartribes, implement ${contextTask.id} from the TaskBoard.`)}
+                  : `In ${project.name}, implement ${contextTask.id} from the TaskBoard.`)}
             title="Copy a ready-to-paste implementation request for an agent"
           >
             Copy agent execute message
@@ -2862,4 +2876,6 @@ function App() {
   );
 }
 
-export default App;
+export default function App() {
+  return <ProjectTabs Board={ProjectBoard} />;
+}

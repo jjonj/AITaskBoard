@@ -1,9 +1,11 @@
+mod projects;
+
 use std::{path::PathBuf, process::Command};
 use task_core::{
     BoardConfig, BoardSnapshot, FsTaskStore, Task, TaskDraft, TaskStore,
 };
 
-const WARTRIBES_BOARD: &str =
+pub(crate) const WARTRIBES_BOARD: &str =
     r"B:\GDrive\SharedWithPhone\Obsidian\jjj\Wartribes\Tasks";
 const FOMNI_EXE: &str =
     r"D:\SSDProjects\Tools\Omnish\main\target\release\fomni.exe";
@@ -141,6 +143,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            projects::list_projects,
+            projects::add_project,
+            projects::activate_project,
+            projects::remove_project,
             default_board_path,
             load_board,
             create_task,

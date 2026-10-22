@@ -1615,3 +1615,141 @@ body.column-dragging * {
   border-radius: 3px;
   pointer-events: none;
 }
+
+
+/* A single TaskBoard window owns the project registry. One board is mounted at
+   a time so editors, undo, refresh, activity markers and drag state cannot
+   leak between unrelated project roots. */
+.project-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  min-height: 0;
+  background: #121a24;
+}
+.project-workspace {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.project-workspace .app-shell { height: 100%; }
+.project-tabs {
+  display: flex;
+  align-items: stretch;
+  flex: 0 0 auto;
+  gap: 3px;
+  min-height: 43px;
+  padding: 7px 11px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: #0c1118;
+  border-bottom: 1px solid #384453;
+}
+.project-tab-wrapper {
+  display: flex;
+  align-items: stretch;
+  flex: 0 0 auto;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 8px 8px 0 0;
+}
+.project-tab-wrapper.selected {
+  background: #1c2938;
+  border-color: #3d546d;
+}
+.project-tab {
+  padding: 0 15px;
+  background: transparent;
+  border: 0;
+  color: #a1aebb;
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.project-tab:hover:not(:disabled) { color: #f1f5ff; }
+.project-tab:disabled { cursor: default; }
+.project-tab-wrapper.selected .project-tab { color: #e4effe; }
+.project-tab-close {
+  width: 26px;
+  padding: 0 4px 0 0;
+  background: transparent;
+  border: 0;
+  color: #8793a2;
+  font-size: 18px;
+  cursor: pointer;
+}
+.project-tab-close:hover:not(:disabled) { color: #ffb9b9; }
+.project-tab-add {
+  align-self: center;
+  padding: 6px 11px;
+  border: 1px dashed #425772;
+  border-radius: 7px;
+  background: #182536;
+  color: #aecbe7;
+  cursor: pointer;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.project-tab-add:hover:not(:disabled) { border-color: #729fcb; background: #253953; }
+.project-tab-add:disabled, .project-tab-close:disabled { cursor: default; opacity: .45; }
+.project-switch-note {
+  align-self: center;
+  margin-left: auto;
+  padding: 0 10px;
+  color: #7f94a7;
+  white-space: nowrap;
+  font-size: 10px;
+}
+.project-loading {
+  display: grid;
+  place-items: center;
+  flex: 1;
+  color: #b5c3d0;
+  font-size: 13px;
+}
+.project-catalog-error {
+  flex: 0 0 auto;
+  padding: 8px 17px;
+  color: #f3adb6;
+  background: #352026;
+  border-bottom: 1px solid #62353b;
+  font-size: 12px;
+}
+.project-add-backdrop { z-index: 200; }
+.project-add-dialog {
+  width: min(530px, 95vw);
+  max-height: 90vh;
+  overflow: auto;
+  padding: 22px;
+  border: 1px solid #48617b;
+  border-radius: 14px;
+  background: #202d3d;
+  box-shadow: 0 20px 65px rgba(0, 0, 0, .65);
+}
+.project-add-dialog h2 { font-size: 19px; color: #f1f5fc; margin-bottom: 9px; }
+.project-add-dialog p { color: #adbdd0; font-size: 12px; line-height: 1.55; margin-bottom: 15px; }
+.project-add-dialog label:not(.project-create-toggle) {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+  color: #d5e0ee;
+  font-size: 12px;
+  font-weight: 650;
+}
+.project-add-dialog input:not([type="checkbox"]) {
+  width: 100%;
+  padding: 10px 11px;
+  border: 1px solid #496077;
+  border-radius: 7px;
+  background: #101b28;
+  outline: 0;
+  color: #f1f5fb;
+  font-size: 13px;
+}
+.project-add-dialog input:focus { border-color: #8fb7e1; }
+.project-create-toggle { display: flex; align-items: center; gap: 9px; margin: 16px 0; color: #dae5f1; font-size: 12px; }
+.project-create-toggle input { width: 16px; height: 16px; accent-color: #82a9d4; }
+.project-add-dialog .project-add-hint { color: #96a9bc; font-size: 11px; }
+.project-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
