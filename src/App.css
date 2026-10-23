@@ -1753,3 +1753,55 @@ body.column-dragging * {
 .project-create-toggle input { width: 16px; height: 16px; accent-color: #82a9d4; }
 .project-add-dialog .project-add-hint { color: #96a9bc; font-size: 11px; }
 .project-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+.project-tab-settings {
+  width: 26px;
+  background: transparent;
+  border: 0;
+  padding: 0 3px;
+  color: #94a5b7;
+  font-size: 15px;
+  cursor: pointer;
+}
+.project-tab-settings:hover:not(:disabled) { color: #dceafd; }
+.project-tab-settings:disabled { opacity: .4; cursor: default; }
+.project-folder-entries { display: flex; flex-direction: column; gap: 6px; }
+.project-add-dialog .project-folder-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.project-folder-row input { flex: 1; min-width: 0; }
+.project-folder-row .button { flex: 0 0 auto; white-space: nowrap; }
+.project-folder-row .project-folder-remove { padding: 7px 10px; }
+.project-add-folder {
+  background: transparent;
+  border: 1px dashed #597188;
+  border-radius: 7px;
+  color: #b2d3f1;
+  cursor: pointer;
+  margin: 1px 0 18px;
+  padding: 7px 12px;
+  font-size: 12px;
+}
+.project-add-folder:hover:not(:disabled) { border-color: #97b9d9; background: #253b52; }
+.project-task-path {
+  display: block;
+  overflow-wrap: anywhere;
+  margin: 8px 0;
+  padding: 9px 10px;
+  border: 1px solid #3f576e;
+  border-radius: 6px;
+  background: #111c2a;
+  color: #bbdbfa;
+  font: 12px/1.5 Consolas, ui-monospace, monospace;
+}
+.project-form-error {
+  padding: 9px 12px;
+  margin: 10px 0;
+  border: 1px solid #85505a;
+  background: #41252a;
+  color: #ffbec5;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}

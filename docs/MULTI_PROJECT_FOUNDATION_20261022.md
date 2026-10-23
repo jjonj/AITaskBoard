@@ -7,12 +7,7 @@ is stored in `%APPDATA%\TaskBoard\projects.json` (with a prior-copy backup as
 `projects.json.bak`). A fresh installation uses the existing Wartribes board as
 its sole initial tab; no Wartribes task files are migrated, renamed, or copied.
 
-The **+ Project** dialog can register an existing TaskBoard root (a directory
-containing `_board.md`) or explicitly initialize a new board in an **existing**
-directory. The directory is canonicalized and duplicate tab paths are rejected.
-Project tab removal **only** removes the catalog entry; it never deletes the
-project board or its task files. At least one tab must remain. The last selected
-tab is restored on startup.
+The **+ Project** dialog uses the Windows-native **Browse…** folder picker for source/working directories and suggests a name from the first folder. The path field precedes the name, and **+ Add folder** can associate multiple source, assets, or working directories with one project. The automatically managed Markdown board is always placed in `B:\GDrive\SharedWithPhone\Obsidian\jjj\[ProjectName]\Tasks`; existing board data is reused without overwriting it. There is no initialization checkbox or manual board-root selection. A gear icon on each tab allows editing associated folders later; editing folder associations never moves task files. Legacy project catalog entries without the new `folders` field load unchanged. Duplicate board tab paths are rejected. Project tab removal **only** removes the catalog entry; it never deletes the project board or its task files. At least one tab must remain. The last selected tab is restored on startup.
 
 On switching tabs, React completely unmounts the previous project board and
 mounts a new one keyed by the registered project ID. This isolates open editors,
@@ -56,10 +51,7 @@ single board root. No cross-project dependencies are available or implied.
    user, separate from all Markdown boards. Adding a tab is not a task
    migration. Back up projects.json when migrating machines; do not sync
    two running desktop processes' catalog writes without conflict control.
-6. **Project-level identity and UX:** Future work may expose project colors,
-   rename/reorder, a native folder picker, per-project status badges, and
-   explicit import/migration flows. Cross-project references must use a
-   qualified project ID/path, not only `WT-####`.
+6. **Project-level identity and UX:** Native folder browsing and multi-folder metadata are now implemented. Later work may expose project colors, rename/reorder, per-project status badges, and explicit import/migration flows. Cross-project references must use a qualified project ID/path, not only `WT-####`. Multiple associated source folders do not mean the task system scans them: the Markdown task store remains a single Obsidian folder per project.
 
 ## Safety / acceptance boundaries
 
@@ -72,3 +64,4 @@ single board root. No cross-project dependencies are available or implied.
 - Switching is blocked until an open editor/operation is finished or cancelled.
 - Each new board remains immediately usable with the existing CLI
   `--root` path even before the later generic prefix/CLI phases.
+- Registered source folders are read-only metadata in TaskBoard: creating a project never generates files in or moves the original source folders.

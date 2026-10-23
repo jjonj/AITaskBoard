@@ -15,6 +15,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["image-png"] }
 tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
 task-core = { path = "../packages/task-core" }
 taskboard-cli = { path = "../packages/task-cli" }
 serde = { version = "1", features = ["derive"] }

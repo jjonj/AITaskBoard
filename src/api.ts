@@ -1,11 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { BoardConfig, BoardSnapshot, Task, TaskDraft } from "./types";
 
-export type ProjectTab = { id: string; name: string; path: string };
+export type ProjectTab = { id: string; name: string; path: string; folders: string[] };
 export type ProjectCatalog = { schema: number; activeId: string; projects: ProjectTab[] };
 export const listProjects = () => invoke<ProjectCatalog>("list_projects");
-export const addProject = (name: string, path: string, createBoard: boolean) =>
-  invoke<ProjectCatalog>("add_project", { name, path, createBoard });
+export const addProject = (name: string, folders: string[]) =>
+  invoke<ProjectCatalog>("add_project", { name, folders });
+export const setProjectFolders = (id: string, folders: string[]) =>
+  invoke<ProjectCatalog>("set_project_folders", { id, folders });
 export const activateProject = (id: string) =>
   invoke<ProjectCatalog>("activate_project", { id });
 export const removeProject = (id: string) =>

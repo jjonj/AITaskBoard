@@ -134,6 +134,7 @@ fn show_main_window(window: tauri::WebviewWindow) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             use tauri::Manager;
             if let Some(window) = app.get_webview_window("main") {
@@ -145,6 +146,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             projects::list_projects,
             projects::add_project,
+            projects::set_project_folders,
             projects::activate_project,
             projects::remove_project,
             default_board_path,

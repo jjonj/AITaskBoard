@@ -7,12 +7,18 @@ use task_core::{FsTaskStore, TaskStore};
 
 use crate::WARTRIBES_BOARD;
 
+const OBSIDIAN_PROJECTS: &str = r"B:\GDrive\SharedWithPhone\Obsidian\jjj";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
     pub id: String,
     pub name: String,
     pub path: String,
+    // Additional working directories belonging to this project. TaskBoard
+    // Markdown always lives in `path`; never scan these directories for tasks.
+    #[serde(default)]
+    pub folders: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +37,7 @@ fn default_catalog() -> ProjectCatalog {
             id: "wartribes".into(),
             name: "Wartribes".into(),
             path: WARTRIBES_BOARD.into(),
+            folders: Vec::new(),
         }],
     }
 }
@@ -85,35 +92,70 @@ fn same_path(a: &str, b: &str) -> bool {
 #[tauri::command]
 pub fn list_projects() -> Result<ProjectCatalog, String> { load() }
 
-#[tauri::command]
-pub fn add_project(name: String, path: String, create_board: bool) -> Result<ProjectCatalog, String> {
+// The user's Obsidian vault is the one canonical TaskBoard storage location.
+// Source folders are metadata and can live anywhere on disk.
+fn board_directory(name: &str) -> Result<PathBuf, String> {
     let name = name.trim();
-    if name.is_empty() || name.len() > 80 {
-        return Err("Project name must contain 1–80 characters".into());
+    if name.is_empty() || name.len() > 80 ||
+       name == "." || name == ".." || name.ends_with(['.', ' ']) ||
+       name.chars().any(|c| c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')) ||
+       ["CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5",
+        "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4",
+        "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"].iter()
+           .any(|reserved| name.split('.').next().unwrap_or("").eq_ignore_ascii_case(reserved)) {
+        return Err("Project name contains characters invalid for a Windows folder".into());
     }
-    let location = path.trim().trim_matches('"');
-    if location.is_empty() { return Err("Choose an existing project folder".into()); }
-    let root = fs::canonicalize(Path::new(location))
-        .map_err(|e| format!("Project folder must already exist: {e}"))?;
-    if !root.is_dir() { return Err("Project path must be a folder".into()); }
-    let root_string = root.to_string_lossy().to_string();
-    let mut catalog = load()?;
-    if catalog.projects.iter().any(|p| same_path(&p.path, &root_string)) {
-        return Err("That folder is already open as a project tab".into());
-    }
-    if !root.join("_board.md").is_file() {
-        if !create_board {
-            return Err("No _board.md found. Check 'Create a new board here' to initialize this folder.".into());
+    Ok(Path::new(OBSIDIAN_PROJECTS).join(name).join("Tasks"))
+}
+
+fn normalize_folders(folders: Vec<String>) -> Result<Vec<String>, String> {
+    let mut normalized = Vec::<String>::new();
+    for folder in folders {
+        let input = folder.trim().trim_matches('"');
+        if input.is_empty() { continue; }
+        let full = fs::canonicalize(input)
+            .map_err(|e| format!("Project folder {input:?} does not exist: {e}"))?;
+        if !full.is_dir() {
+            return Err(format!("Project folder {} is not a directory", full.display()));
         }
-        FsTaskStore::default().ensure_board(&root, name).map_err(|e| e.to_string())?;
+        let full = full.to_string_lossy().to_string();
+        if !normalized.iter().any(|existing| same_path(existing, &full)) {
+            normalized.push(full);
+        }
     }
-    // Validate existing board before adding it. Invalid boards are never reset.
+    Ok(normalized)
+}
+
+#[tauri::command]
+pub fn add_project(name: String, folders: Vec<String>) -> Result<ProjectCatalog, String> {
+    let root = board_directory(&name)?;
+    let normalized_folders = normalize_folders(folders)?;
+    let mut catalog = load()?;
+    if catalog.projects.iter().any(|p| same_path(&p.path, &root.to_string_lossy())) {
+        return Err("This project's TaskBoard already has a tab".into());
+    }
+    // Creating a project never touches its source directories. An existing
+    // Obsidian board is reused, and the store only initializes missing files.
+    fs::create_dir_all(&root).map_err(|e| format!("Cannot create Obsidian Tasks folder: {e}"))?;
+    FsTaskStore::default().ensure_board(&root, name.trim()).map_err(|e| e.to_string())?;
     FsTaskStore::default().load(&root).map_err(|e| e.to_string())?;
-    // IDs identify UI tabs and must not be inferred from task IDs (WT-xxxx can
-    // legitimately repeat in different projects).
     let id = format!("project-{}", uuidless_unique_id());
-    catalog.projects.push(Project { id: id.clone(), name: name.to_string(), path: root_string });
+    catalog.projects.push(Project {
+        id: id.clone(), name: name.trim().to_string(),
+        path: root.to_string_lossy().to_string(), folders: normalized_folders,
+    });
     catalog.active_id = id;
+    save(&catalog)?;
+    Ok(catalog)
+}
+
+#[tauri::command]
+pub fn set_project_folders(id: String, folders: Vec<String>) -> Result<ProjectCatalog, String> {
+    let normalized = normalize_folders(folders)?;
+    let mut catalog = load()?;
+    let project = catalog.projects.iter_mut().find(|p| p.id == id)
+        .ok_or("Unknown project tab")?;
+    project.folders = normalized;
     save(&catalog)?;
     Ok(catalog)
 }
@@ -167,7 +209,7 @@ mod tests {
         assert_eq!(defaults.projects[0].path, WARTRIBES_BOARD);
         let mut two = defaults.clone();
         two.projects.push(Project { id: "other".into(), name: "Another board".into(),
-            path: r"D:\Projects\Another\Tasks".into() });
+            path: r"D:\Projects\Another\Tasks".into(), folders: Vec::new() });
         two.active_id = "other".into();
         save_at(&path, &two).expect("persist catalog");
         assert_eq!(load_at(&path).unwrap().active_id, "other");
@@ -176,6 +218,48 @@ mod tests {
         assert!(load_at(&path).is_err(), "corrupted state must never be reset silently");
         fs::remove_file(&path).ok();
         fs::remove_file(path.with_extension("json.bak")).ok();
+    }
+
+    #[test]
+    fn old_project_catalog_entries_load_without_folder_metadata() {
+        let path = std::env::temp_dir().join(format!(
+            "taskboard-old-catalog-{}-{}.json",
+            std::process::id(), uuidless_unique_id(),
+        ));
+        fs::write(&path, r#"{
+            "schema":1,"activeId":"wartribes",
+            "projects":[{"id":"wartribes","name":"Wartribes","path":"B:/Old/Tasks"}]
+        }"#).unwrap();
+        let loaded = load_at(&path).unwrap();
+        assert!(loaded.projects[0].folders.is_empty());
+        assert_eq!(loaded.projects[0].path, "B:/Old/Tasks");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn project_names_have_safe_fixed_task_paths_and_multiple_source_folders() {
+        assert_eq!(
+            board_directory("Altraea").unwrap(),
+            Path::new(OBSIDIAN_PROJECTS).join("Altraea").join("Tasks"),
+        );
+        for name in ["../escaped", "name\\child", "CON", "LPT9.txt", "with:", "x.", ""] {
+            assert!(board_directory(name).is_err(), "{name} should be rejected");
+        }
+        let base = std::env::temp_dir().join(format!(
+            "taskboard-multi-folders-{}-{}", std::process::id(), uuidless_unique_id(),
+        ));
+        let first = base.join("code");
+        let second = base.join("assets");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        let paths = normalize_folders(vec![
+            first.to_string_lossy().into_owned(),
+            second.to_string_lossy().into_owned(),
+            first.to_string_lossy().into_owned(),
+        ]).unwrap();
+        assert_eq!(paths.len(), 2);
+        assert!(normalize_folders(vec![base.join("missing").to_string_lossy().into_owned()]).is_err());
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
