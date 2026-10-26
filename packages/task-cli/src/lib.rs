@@ -42,8 +42,22 @@ enum TaskCommand {
     Archive(TaskTarget),
     Claim(TaskClaimArgs),
     Release(TaskClaimArgs),
+    Execution(TaskExecutionCommandArgs),
 }
 
+#[derive(Args)]
+struct TaskExecutionCommandArgs {
+    target: String,
+    #[command(subcommand)]
+    action: ExecutionAction,
+}
+#[derive(Subcommand)]
+enum ExecutionAction {
+    Show,
+    Set { mode: String, #[arg(long)] revision: String },
+    StartNow { #[arg(long)] revision: String },
+    Receipt { #[arg(long)] request: String, #[arg(long)] receipt: String },
+}
 #[derive(Subcommand)]
 enum ColumnCommand {
     List,
@@ -508,6 +522,24 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
                 Some(parent.id.clone())
             };
             Ok(json!(store.update(root, task).map_err(map_store_error)?))
+        }
+        TaskCommand::Execution(args) => {
+            let snapshot = load_checked(store, root)?;
+            let task = resolve_task(&snapshot, &args.target, false)?;
+            let result = match &args.action {
+                ExecutionAction::Show => store.execution_intent(root, &task.id),
+                ExecutionAction::Set { mode, revision } => {
+                    let mode = match mode.as_str() {
+                        "backlog" => task_core::ExecutionMode::Backlog,
+                        "queue" => task_core::ExecutionMode::Queue,
+                        _ => return Err(CliError::new("invalid_execution_mode", "mode must be backlog or queue")),
+                    };
+                    store.set_execution_mode(root, &task.id, revision, mode)
+                }
+                ExecutionAction::StartNow { revision } => store.request_start_now(root, &task.id, revision),
+                ExecutionAction::Receipt { request, receipt } => store.receipt_start_now(root, &task.id, request, receipt),
+            }.map_err(map_store_error)?;
+            Ok(json!(result))
         }
         TaskCommand::CompleteManaged(args) => {
             let snapshot = load_checked(store, root)?;

@@ -5,6 +5,9 @@ use crate::{
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, NaiveDate, SecondsFormat, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+#[path = "execution.rs"]
+mod execution;
+pub use execution::{ExecutionIntent, ExecutionMode};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},

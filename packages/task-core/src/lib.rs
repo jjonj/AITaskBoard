@@ -1,8 +1,9 @@
 mod model;
 mod store;
 
+
 pub use model::*;
-pub use store::{default_board_config, FsTaskStore, TaskStore, TaskStoreError};
+pub use store::{ExecutionIntent, ExecutionMode, default_board_config, FsTaskStore, TaskStore, TaskStoreError};
 
 pub const SCHEMA_VERSION: u32 = 1;
 pub const DRAFT_COLUMN_ID: &str = "draft";
