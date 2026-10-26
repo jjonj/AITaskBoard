@@ -38,6 +38,7 @@ enum TaskCommand {
     Move(TaskMoveArgs),
     Parent(TaskParentArgs),
     Complete(TaskTarget),
+    CompleteManaged(TaskManagedCompleteArgs),
     Archive(TaskTarget),
     Claim(TaskClaimArgs),
     Release(TaskClaimArgs),
@@ -180,10 +181,27 @@ struct TaskParentArgs {
 }
 
 #[derive(Args)]
+struct TaskManagedCompleteArgs {
+    target: String,
+    #[arg(long)]
+    agent: String,
+    #[arg(long)]
+    claim_token: String,
+    #[arg(long)]
+    expected_revision: String,
+}
+
+#[derive(Args)]
 struct TaskClaimArgs {
     target: String,
     #[arg(long)]
     agent: String,
+    /// Managed TaskBoard claim lifetime (not OpenRig claimant generation).
+    #[arg(long)]
+    managed: bool,
+    /// Required for conditional managed release.
+    #[arg(long)]
+    claim_token: Option<String>,
 }
 
 #[derive(Args)]
@@ -491,6 +509,12 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
             };
             Ok(json!(store.update(root, task).map_err(map_store_error)?))
         }
+        TaskCommand::CompleteManaged(args) => {
+            let snapshot = load_checked(store, root)?;
+            let task = resolve_task(&snapshot, &args.target, false)?;
+            ensure_task_rewrite_safe(task)?;
+            Ok(json!(store.complete_managed(root, &task.id, &args.agent, &args.claim_token, &args.expected_revision).map_err(map_store_error)?))
+        }
         TaskCommand::Complete(args) => {
             let snapshot = load_checked(store, root)?;
             let mut terminals: Vec<&Column> = snapshot.config.columns.iter().filter(|c| c.terminal).collect();
@@ -530,14 +554,21 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
             let task = resolve_task(&snapshot, &args.target, false)?;
             ensure_task_rewrite_safe(task)?;
             // Advisory only: never reject a claim based on the task type or agent name.
-            let claimed = store.claim(root, &task.id, &args.agent).map_err(map_store_error)?;
-            Ok(with_work_advisory(json!(claimed), &claimed))
+            let managed = if args.managed { Some(store.claim_managed(root, &task.id, &args.agent).map_err(map_store_error)?) } else { None };
+            let claimed = if let Some(ref managed) = managed { managed.task.clone() } else { store.claim(root, &task.id, &args.agent).map_err(map_store_error)? };
+            let mut result = with_work_advisory(json!(claimed), &claimed);
+            if let Some(managed) = managed { result["claim_token"] = json!(managed.claim_token); }
+            Ok(result)
         }
         TaskCommand::Release(args) => {
             let snapshot = load_checked(store, root)?;
             let task = resolve_task(&snapshot, &args.target, true)?;
             ensure_task_rewrite_safe(task)?;
-            Ok(json!(store.release_claim(root, &task.id, &args.agent).map_err(map_store_error)?))
+            if let Some(token) = &args.claim_token {
+                Ok(json!(store.release_managed(root, &task.id, &args.agent, token).map_err(map_store_error)?))
+            } else {
+                Ok(json!(store.release_claim(root, &task.id, &args.agent).map_err(map_store_error)?))
+            }
         }
     }
 }
@@ -858,6 +889,7 @@ fn slugify(name: &str) -> String {
 fn map_store_error(error: TaskStoreError) -> CliError {
     match error {
         TaskStoreError::NotFound(value) => CliError::new("task_not_found", format!("task not found: {value}")),
+        TaskStoreError::ClaimInstanceMismatch(message) => CliError::new("claim_instance_mismatch", message).exit(3),
         TaskStoreError::Conflict(message) => CliError::new("write_conflict", message).exit(3),
         TaskStoreError::AlreadyClaimed { task_id, claimed_by } => CliError::new(
             "already_claimed",
@@ -1031,6 +1063,8 @@ mod tests {
 
         let claim = run_task(&store, &root, &TaskCommand::Claim(TaskClaimArgs {
             target: human.id.clone(), agent: "assistant".into(),
+            managed: false,
+            claim_token: None,
         })).unwrap_err();
         assert!(claim.message.contains("FOR USER"));
 
@@ -1281,6 +1315,8 @@ mod tests {
                 &TaskCommand::Claim(TaskClaimArgs {
                     target: task.id.clone(),
                     agent: "generic-non-claude-non-opus".into(),
+            managed: false,
+            claim_token: None,
                 }),
             )
             .unwrap();
@@ -1305,6 +1341,8 @@ mod tests {
             &TaskCommand::Claim(TaskClaimArgs {
                 target: ordinary.id,
                 agent: "any-agent".into(),
+            managed: false,
+            claim_token: None,
             }),
         )
         .unwrap();

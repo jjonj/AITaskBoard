@@ -28,6 +28,8 @@ pub enum TaskStoreError {
     NotFound(String),
     #[error("write conflict: {0}")]
     Conflict(String),
+    #[error("claim_instance_mismatch: {0}")]
+    ClaimInstanceMismatch(String),
     #[error("task {task_id} is claimed by {claimed_by}")]
     AlreadyClaimed { task_id: String, claimed_by: String },
     #[error("I/O error: {0}")]
@@ -427,6 +429,138 @@ impl FsTaskStore {
     }
 }
 
+/// TaskBoard-owned lifetime token; separate from OpenRig claimant generation.
+#[derive(Debug, Clone, Serialize)]
+pub struct ManagedClaim {
+    pub task: Task,
+    pub claim_token: String,
+}
+
+fn claim_token(text: &str) -> Result<Option<String>, TaskStoreError> {
+    claim_metadata(text, "claim_token")
+}
+
+fn claim_metadata(text: &str, key: &str) -> Result<Option<String>, TaskStoreError> {
+    let (yaml, _) = split_frontmatter(text)?;
+    let mapping: serde_yaml::Mapping = serde_yaml::from_str(&yaml)
+        .map_err(|e| TaskStoreError::Parse(e.to_string()))?;
+    Ok(mapping.get(serde_yaml::Value::String(key.into()))
+        .and_then(serde_yaml::Value::as_str).map(str::to_owned))
+}
+
+fn render_with_claim_token(task: &Task, existing: &str, token: Option<&str>) -> Result<String, TaskStoreError> {
+    let rendered = render_task(task, Some(existing))?;
+    let (yaml, body) = split_frontmatter(&rendered)?;
+    let mut mapping: serde_yaml::Mapping = serde_yaml::from_str(&yaml)
+        .map_err(|e| TaskStoreError::Parse(e.to_string()))?;
+    mapping.remove(serde_yaml::Value::String("claim_token".into()));
+    if let Some(token) = token {
+        mapping.insert(serde_yaml::Value::String("claim_token".into()),
+            serde_yaml::Value::String(token.to_owned()));
+    }
+    let yaml = serde_yaml::to_string(&mapping).map_err(|e| TaskStoreError::Parse(e.to_string()))?;
+    Ok(format!("---\n{yaml}---\n{body}"))
+}
+
+impl FsTaskStore {
+    /// A managed claim never upgrades an existing manual/name-only claim.
+    pub fn claim_managed(&self, root: &Path, id: &str, agent: &str) -> Result<ManagedClaim, TaskStoreError> {
+        let agent = agent.trim();
+        if agent.is_empty() { return Err(TaskStoreError::Invalid("agent name cannot be empty".into())); }
+        let _lock = acquire_lock(root)?;
+        let path = find_task_path(root, id)?;
+        if path.starts_with(root.join(ARCHIVE_DIR)) {
+            return Err(TaskStoreError::Invalid(format!("cannot claim archived task {id}")));
+        }
+        let existing = fs::read_to_string(&path)?;
+        let mut task = parse_task(&path, false, &existing)?;
+        if task.kind != TaskKind::Task || task.attention.contains(&TaskAttention::NeedsUser) {
+            return Err(TaskStoreError::Invalid("task is not executable".into()));
+        }
+        ensure_dependencies_complete(&self.load_unlocked(root)?, &task)?;
+        if let Some(owner) = task.claimed_by.as_deref() {
+            return Err(if owner == agent {
+                TaskStoreError::ClaimInstanceMismatch(format!("{id}: existing claim requires its original token; cannot recover it from a display name"))
+            } else {
+                TaskStoreError::AlreadyClaimed { task_id: id.into(), claimed_by: owner.into() }
+            });
+        }
+        let token = uuid::Uuid::new_v4().to_string();
+        task.claimed_by = Some(agent.to_owned());
+        let rendered = render_with_claim_token(&task, &existing, Some(&token))?;
+        write_text_atomic(&path, &rendered)?;
+        task.revision = revision(&rendered);
+        Ok(ManagedClaim { task, claim_token: token })
+    }
+
+    /// Conditional acceptance checks both ownership lifetime and the full content
+    /// revision so changed criteria cannot be silently accepted from a stale result.
+    pub fn complete_managed(&self, root: &Path, id: &str, agent: &str, token: &str, expected_revision: &str) -> Result<Task, TaskStoreError> {
+        if token.is_empty() || expected_revision.is_empty() {
+            return Err(TaskStoreError::Invalid("managed completion requires claim token and content revision".into()));
+        }
+        let _lock = acquire_lock(root)?;
+        let path = find_task_path(root, id)?;
+        if path.starts_with(root.join(ARCHIVE_DIR)) {
+            return Err(TaskStoreError::Invalid("cannot complete archived task".into()));
+        }
+        let existing = fs::read_to_string(&path)?;
+        if claim_token(&existing)?.as_deref() != Some(token) {
+            return Err(TaskStoreError::ClaimInstanceMismatch(format!("{id}: claim lifetime changed; no changes made")));
+        }
+        if revision(&existing) != expected_revision {
+            return Err(TaskStoreError::Conflict(format!("{id}: task content or criteria changed; re-read before accepting result")));
+        }
+        let mut task = parse_task(&path, false, &existing)?;
+        if task.claimed_by.as_deref() != Some(agent) {
+            return Err(TaskStoreError::ClaimInstanceMismatch(format!("{id}: owner mismatch")));
+        }
+        let snapshot = self.load_unlocked(root)?;
+        ensure_dependencies_complete(&snapshot, &task)?;
+        let terminal = snapshot.config.columns.iter().filter(|column| column.terminal)
+            .min_by_key(|column| column.order)
+            .ok_or_else(|| TaskStoreError::Invalid("board has no terminal column".into()))?;
+        task.column = terminal.id.clone();
+        apply_completion_state(&snapshot.config, &mut task);
+        validate_task(&snapshot, &task)?;
+        let rendered = render_task(&task, Some(&existing))?;
+        write_text_atomic(&path, &rendered)?;
+        task.revision = revision(&rendered);
+        let current = self.load_unlocked(root)?;
+        self.maintain_dependency_unblocks(&current)?;
+        Ok(task)
+    }
+
+    /// Conditional under board lock. Same token + already released is idempotent only
+    /// if no new claim exists; an absent claim has no verified history after restart.
+    pub fn release_managed(&self, root: &Path, id: &str, agent: &str, expected: &str) -> Result<Task, TaskStoreError> {
+        if expected.is_empty() { return Err(TaskStoreError::ClaimInstanceMismatch("missing token".into())); }
+        let _lock = acquire_lock(root)?;
+        let path = find_task_path(root, id)?;
+        let existing = fs::read_to_string(&path)?;
+        let mut task = parse_task(&path, path.starts_with(root.join(ARCHIVE_DIR)), &existing)?;
+        let actual = claim_token(&existing)?;
+        if task.claimed_by.is_none() && claim_metadata(&existing, "last_released_claim_token")?.as_deref() == Some(expected) {
+            return Ok(task);
+        }
+        if task.claimed_by.as_deref() != Some(agent) || actual.as_deref() != Some(expected) {
+            return Err(TaskStoreError::ClaimInstanceMismatch(format!("{id}: expected token does not match current claim; no changes made")));
+        }
+        task.claimed_by = None;
+        let rendered = render_with_claim_token(&task, &existing, None)?;
+        let (yaml, body) = split_frontmatter(&rendered)?;
+        let mut map: serde_yaml::Mapping = serde_yaml::from_str(&yaml)
+            .map_err(|e| TaskStoreError::Parse(e.to_string()))?;
+        map.insert(serde_yaml::Value::String("last_released_claim_token".into()),
+            serde_yaml::Value::String(expected.into()));
+        let rendered = format!("---\n{}---\n{}", serde_yaml::to_string(&map)
+            .map_err(|e| TaskStoreError::Parse(e.to_string()))?, body);
+        write_text_atomic(&path, &rendered)?;
+        task.revision = revision(&rendered);
+        Ok(task)
+    }
+}
+
 impl TaskStore for FsTaskStore {
     fn load(&self, root: &Path) -> Result<BoardSnapshot, TaskStoreError> {
         let _lock = acquire_lock(root)?;
@@ -535,7 +669,9 @@ impl TaskStore for FsTaskStore {
             apply_completion_state(&snapshot.config, &mut task);
         }
         validate_task(&snapshot, &task)?;
-        let text = render_task(&task, Some(&existing))?;
+        let text = if task.claimed_by != previous.claimed_by {
+            render_with_claim_token(&task, &existing, None)?
+        } else { render_task(&task, Some(&existing))? };
         write_text_atomic(&path, &text)?;
         task.revision = revision(&text);
         // Complete dependent release during the same board lock. The next load
@@ -610,6 +746,9 @@ impl TaskStore for FsTaskStore {
             Some(_) => {}
         }
 
+        if claim_token(&existing)?.is_some() {
+            return Err(TaskStoreError::ClaimInstanceMismatch(format!("{id}: managed claim requires token-based release")));
+        }
         task.claimed_by = None;
         let text = render_task(&task, Some(&existing))?;
         write_text_atomic(&path, &text)?;
