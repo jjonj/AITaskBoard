@@ -3364,3 +3364,14 @@ body.card-dragging .project-tab-wrapper:not(.selected):hover {
   font-weight: 750;
   line-height: 1.2;
 }
+
+/* OW-0019: one quiet combined source-backed capacity chip. No card changes. */
+.queue-capacity-chip {
+  padding: 6px 9px;
+  border: 1px solid #394452;
+  border-radius: 8px;
+  color: #aebac8;
+  background: #1d2834;
+  font-size: 11px;
+  white-space: nowrap;
+}

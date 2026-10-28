@@ -17,7 +17,8 @@ import { eligibleForAgeArchive } from "./archiveAge";
 import { isHiddenByCollapsedEpic, toggleAllEpicCollapses } from "./epicCollapse";
 import { ProjectTabs } from "./ProjectTabs";
 import { ReleaseCenter } from "./ReleaseCenter";
-import type { ProjectTab, TaskIdReservation, ExecutionMode } from "./api";
+import { QueueOverviewPanel } from "./QueueOverviewPanel";
+import type { ProjectTab, TaskIdReservation, ExecutionMode, QueueOverview, QueueCapacity } from "./api";
 import {
   archiveTask,
   archiveColumn,
@@ -40,6 +41,8 @@ import {
   taskSetExecutionMode,
   taskRequestStartNow,
   taskSyncQueue,
+  taskQueueOverview,
+  taskQueueCapacity,
   updateTask,
 } from "./api";
 import type {
@@ -279,6 +282,23 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId }: {
     return () => window.clearTimeout(timer);
   }, [query]);
   const [reviewOpen, setReviewOpen] = useState(false);
+  const [queueDrawerOpen, setQueueDrawerOpen] = useState(false);
+  const [queueTelemetry, setQueueTelemetry] = useState<QueueOverview | null>(null);
+  const [capacityTelemetry, setCapacityTelemetry] = useState<QueueCapacity | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const observe = () => {
+      void taskQueueOverview(boardPath).then(value => {
+        if (alive) setQueueTelemetry(value);
+      }).catch(() => { if (alive) setQueueTelemetry(null); });
+      void taskQueueCapacity().then(value => {
+        if (alive) setCapacityTelemetry(value);
+      }).catch(() => { if (alive) setCapacityTelemetry(null); });
+    };
+    observe();
+    const poll = window.setInterval(observe, 20000);
+    return () => { alive = false; window.clearInterval(poll); };
+  }, [boardPath]);
   const [reviewNotice, setReviewNotice] = useState("");
   useEffect(() => { if (requestedReviewId) setReviewOpen(true); }, [requestedReviewId]);
   const [hideBlockedInboxTasks, setHideBlockedInboxTasks] = useState(() => {
@@ -2471,6 +2491,14 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId }: {
       }}
     >
       {releasesOpen && <ReleaseCenter boardPath={boardPath} enabled={snapshot.config.releases_enabled ?? false} onClose={() => { setReleasesOpen(false); void refresh(boardPath, false); }} />}
+      {queueDrawerOpen && <QueueOverviewPanel boardPath={boardPath}
+        onClose={() => setQueueDrawerOpen(false)}
+        onOpenTask={(id) => {
+          const task = snapshot.tasks.find(item => item.id === id && !item.archived);
+          if (task) { setQueueDrawerOpen(false); openEdit(task); }
+          else setError(`Task ${id} is not an active task on this board`);
+        }}
+        onChanged={() => void refresh(boardPath, true)} />}
       {reviewNotice ? <div className="review-reconciliation-notice" role="status">{reviewNotice}</div> : null}
       <header className="topbar">
         <div>
@@ -2485,7 +2513,18 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId }: {
               title="Open unified feedback inbox: visual reviews and For user quick replies (Ctrl+R)">
               Inbox <span className="review-mode-count">{activeTasks.filter((task) => task.review_status === "open").length + userQueueTasks.length}</span>
             </button>
+            <button type="button" className={queueDrawerOpen ? "button primary" : "button secondary"}
+              onClick={() => setQueueDrawerOpen(open => !open)} disabled={!!editor}
+              aria-expanded={queueDrawerOpen} title="Open exact OpenRig queue overview">
+              Queue <span className="review-mode-count">{queueTelemetry?.hasMore ? `${queueTelemetry.limit}+`
+                : queueTelemetry?.activeCount ?? "?"}</span>
+            </button>
           </div>
+          <span className="queue-capacity-chip" role="status"
+            title={capacityTelemetry?.reason ?? "Current verified T3/OpenRig capacity"}>
+            OpenRig · {capacityTelemetry?.reason === null && capacityTelemetry.unknown === 0
+              ? capacityTelemetry.working : "?"}/{capacityTelemetry?.limit ?? "?"} active
+          </span>
           <div className="search-wrap">
             <span>⌕</span>
             <input
