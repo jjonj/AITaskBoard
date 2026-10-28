@@ -248,3 +248,24 @@ pub(crate) async fn overview(path: PathBuf) -> Result<Value, String> {
     }
     Ok(result)
 }
+
+/** OW-0019: provider capacity is advisory and may be unavailable (HTTP 503).
+ * Never interpret an unavailable/partial snapshot as free slots. */
+pub(crate) async fn capacity() -> Result<Value, String> {
+    let bearer = token()?;
+    let client = client()?;
+    let response = client.get(format!("{DAEMON}/api/integrations/t3/capacity"))
+        .bearer_auth(&bearer).send().await
+        .map_err(|_| "OpenRig T3 capacity unavailable; no launch attempted".to_owned())?;
+    let code = response.status();
+    let snapshot = response.json::<Value>().await
+        .map_err(|_| "OpenRig T3 capacity returned invalid JSON".to_owned())?;
+    if code != StatusCode::OK && code != StatusCode::SERVICE_UNAVAILABLE {
+        return Err(format!("OpenRig T3 capacity query refused ({code})"));
+    }
+    if !snapshot["working"].is_number() || !snapshot["limit"].is_number() ||
+        !snapshot["admissible"].is_boolean() || !snapshot["reason"].is_null() && !snapshot["reason"].is_string() {
+        return Err("OpenRig T3 capacity payload invalid or incomplete".into());
+    }
+    Ok(snapshot)
+}

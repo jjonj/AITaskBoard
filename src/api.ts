@@ -85,6 +85,14 @@ export type QueueOverview = {
 /** Read-only canonical OpenRig board queue. Credentials never reach the renderer. */
 export const taskQueueOverview = (path?: string) =>
   invoke<QueueOverview>("task_queue_overview", { path });
+
+export type QueueCapacity = {
+  observedAt: string; limit: number; working: number; reserved: number;
+  unknown: number; used: number; available: number; admissible: boolean;
+  reason: string | null;
+};
+export const taskQueueCapacity = () =>
+  invoke<QueueCapacity>("task_queue_capacity");
 export const taskLiveWithMe = (id: string, expectedRevision: string, withMe: boolean, path?: string) =>
   invoke<Task>("task_live_with_me", { path, id, expectedRevision, withMe });
 
