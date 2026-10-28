@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   taskQueueOverview, taskExecutionIntent, taskSetExecutionMode, taskSyncQueue, taskQueueReprioritize, taskQueueMove,
-  type QueueOverview, type QueueOverviewItem,
+  type QueueOverview, type QueueOverviewItem, type QueueCapacity,
 } from "./api";
 import "./QueueOverviewPanel.css";
 
 type Props = {
   boardPath: string;
+  capacity?: QueueCapacity | null;
   onClose: () => void;
   onOpenTask: (taskId: string) => void;
   onChanged?: () => void;
@@ -26,7 +27,7 @@ const statusLabel = (item: QueueOverviewItem) => {
 
 /** The native bridge reads OpenRig's exact board-scoped canonical queue.
  * No second job registry, launch poller, or inferred provider status. */
-export function QueueOverviewPanel({ boardPath, onClose, onOpenTask, onChanged }: Props) {
+export function QueueOverviewPanel({ boardPath, capacity, onClose, onOpenTask, onChanged }: Props) {
   const [snapshot, setSnapshot] = useState<QueueOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionWarning, setActionWarning] = useState<string | null>(null);
@@ -129,6 +130,16 @@ export function QueueOverviewPanel({ boardPath, onClose, onOpenTask, onChanged }
         </div>
         <button type="button" className="button secondary" onClick={() => void refresh()}>Refresh</button>
         <button type="button" className="omni-queue-close" onClick={onClose} aria-label="Close queue overview">×</button>
+      </div>
+      <div className="omni-queue-capacity" role="status">
+        {capacity ? <>
+          <span>Verified T3 working: {capacity.working} / soft limit {capacity.limit}</span>
+          <span>Reserved starts: {capacity.reserved}</span>
+          <span>Unverified sessions: {capacity.unknown}</span>
+          <strong>{capacity.admissible
+            ? `${capacity.available} verified background slot(s) available; admission and worker pickup not implied.`
+            : `Background admission paused: ${capacity.reason ?? "no verified free slot"}`}</strong>
+        </> : <strong>T3 capacity unavailable. No background availability inferred.</strong>}
       </div>
       {error && <p className="omni-queue-warning" role="status">OpenRig unavailable: {error}. No capacity or job state inferred.</p>}
       {actionWarning && <p className="omni-queue-warning" role="status">{actionWarning}</p>}

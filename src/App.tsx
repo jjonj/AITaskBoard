@@ -2524,7 +2524,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId }: {
       }}
     >
       {releasesOpen && <ReleaseCenter boardPath={boardPath} enabled={snapshot.config.releases_enabled ?? false} onClose={() => { setReleasesOpen(false); void refresh(boardPath, false); }} />}
-      {queueDrawerOpen && <QueueOverviewPanel boardPath={boardPath}
+      {queueDrawerOpen && <QueueOverviewPanel boardPath={boardPath} capacity={capacityTelemetry}
         onClose={() => setQueueDrawerOpen(false)}
         onOpenTask={(id) => {
           const task = snapshot.tasks.find(item => item.id === id && !item.archived);

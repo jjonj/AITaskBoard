@@ -102,3 +102,21 @@
   cursor: pointer;
 }
 .omni-queue-priority-label select:disabled { opacity: .5; }
+
+.omni-queue-capacity {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 10px 13px 2px;
+  border: 1px solid #35485c;
+  background: #22313d;
+  border-radius: 7px;
+  padding: 9px 11px;
+  font-size: 11px;
+  color: #aebfd1;
+}
+.omni-queue-capacity strong {
+  color: #e0ceab;
+  font-size: 11px;
+  font-weight: 600;
+}
