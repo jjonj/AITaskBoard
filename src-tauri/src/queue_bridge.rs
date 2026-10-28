@@ -104,24 +104,47 @@ pub(crate) async fn sync(path: PathBuf, id: String) -> Result<QueueSyncStatus, S
     let request = execution.queue_request.as_deref();
     let qid = request.map(|request| format!("qitem-taskboard-{request}"));
     if !matches!(task.kind, TaskKind::Task|TaskKind::Recurring) || finished || execution.mode == ExecutionMode::Backlog {
-        if let (Some(qitem), Some(receipt), Some(request)) = (qid.as_deref(),execution.queue_receipt.as_deref(),request) {
-            if qitem != receipt { return Ok(status("conflict",qid,Some("Queue receipt does not match current request".into()))); }
+        if let (Some(qitem), Some(request), Some(attempt)) = (qid.as_deref(),request,execution.queue_attempt.as_deref()) {
+            if attempt != request || execution.queue_receipt.as_deref().is_some_and(|receipt| receipt != qitem) {
+                return Ok(status("conflict",qid,Some("Queue attempt or receipt identity mismatch".into())));
+            }
+            if execution.queue_retired_receipt.as_deref() == Some(qitem) {
+                return Ok(status("canceled",qid,None));
+            }
             let bearer = token()?;
             let client = client()?;
             let (code,row) = get(&client,&bearer,&format!("/api/queue/{qitem}")).await?;
-            if code == StatusCode::NOT_FOUND { return Ok(status("unknown",qid,Some("Registered qitem not found".into()))); }
-            if !code.is_success() || !row_matches(&row,&reference,request,None,&task) {
-                return Ok(status("conflict",qid,Some("Queue record identity cannot be verified".into())));
+            if code == StatusCode::NOT_FOUND {
+                return Ok(status("unknown",qid,Some("Previous Queue attempt is unverified; do not requeue until reconciled".into())));
             }
-            if terminal_state(&row) { return Ok(status("canceled",qid,None)); }
+            if !code.is_success() || !row_matches(&row,&reference,request,None,&task) {
+                return Ok(status("conflict",qid,Some("Previous Queue record identity cannot be verified".into())));
+            }
+            if terminal_state(&row) {
+                if let Err(error)=store.retire_queue(&path,&id,request,&execution.revision,qitem) {
+                    return Ok(status("conflict",qid,Some(format!("Queue is terminal, but retirement CAS failed: {error}"))));
+                }
+                return Ok(status("canceled",qid,None));
+            }
             if row["state"] != "pending" || row["claimedAt"].as_str().is_some_and(|value| !value.is_empty()) {
                 return Ok(status("running",qid,Some("Already assigned/running: separate explicit stop required".into())));
             }
-            let (response,result)=post(&client,&bearer,&format!("/api/queue/taskboard/{qitem}/sync"),json!({
+            let (response,result)=match post(&client,&bearer,&format!("/api/queue/taskboard/{qitem}/sync"),json!({
                 "taskRef":reference,"action":"cancel","requestId":request,"actorSession":SOURCE,
-            })).await.map_err(|_| "Queue cancellation UNKNOWN: check qitem before retry".to_owned())?;
-            if response.is_success() && result["state"]=="canceled" {return Ok(status("canceled",qid,None));}
+            })).await {
+                Ok(result) => result,
+                Err(reason) => return Ok(status("unknown",qid,Some(format!("Queue cancellation UNKNOWN: {reason}")))),
+            };
+            if response.is_success() && result["state"]=="canceled" {
+                if let Err(error)=store.retire_queue(&path,&id,request,&execution.revision,qitem) {
+                    return Ok(status("conflict",qid,Some(format!("Cancellation committed but retirement CAS failed: {error}"))));
+                }
+                return Ok(status("canceled",qid,None));
+            }
             return Ok(status("conflict",qid,Some(format!("Cancel refused: {}",result["error"].as_str().unwrap_or("unknown reason")))));
+        }
+        if execution.queue_receipt.is_some() {
+            return Ok(status("conflict",qid,Some("Queue receipt exists without its registration attempt".into())));
         }
         return Ok(status("not_queued",qid,None));
     }

@@ -15,6 +15,8 @@ pub struct ExecutionIntent {
     pub queue_attempt: Option<String>,
     /// Exact canonical OpenRig qitem ID, never a local second queue.
     pub queue_receipt: Option<String>,
+    /// Previous attempt was verified terminal in OpenRig; required before requeue.
+    pub queue_retired_receipt: Option<String>,
     /// Stable ID for a single explicit foreground request, not a mode.
     pub start_now_request: Option<String>,
     /// Set by the eventual dispatcher after it durably accepts this request.
@@ -35,6 +37,7 @@ fn intent(mapping: &serde_yaml::Mapping, text: &str) -> Result<ExecutionIntent, 
         queue_request: field("queue_request"),
         queue_attempt: field("queue_registration_attempt"),
         queue_receipt: field("queue_receipt"),
+        queue_retired_receipt: field("queue_retired_receipt"),
         start_now_request: field("start_now_request"),
         start_now_receipt: field("start_now_receipt"),
         revision: revision(text),
@@ -75,9 +78,18 @@ impl FsTaskStore {
         let previous = intent(&mapping, &text)?;
         if previous.mode == mode { return Ok(previous); }
         if mode == ExecutionMode::Queue {
+            // Never erase an old pending/UNKNOWN registration. Verify prior
+            // OpenRig qitem terminal state before minting a requeue identity.
+            if previous.queue_attempt.is_some() {
+                let old_qid = previous.queue_request.as_ref().map(|request| format!("qitem-taskboard-{request}"));
+                if previous.queue_retired_receipt.as_deref() != old_qid.as_deref() {
+                    return Err(TaskStoreError::Conflict(format!("{id} previous Queue attempt is not verified terminal; reconcile before requeue")));
+                }
+            }
             mapping.insert(key("queue_request"), key(&uuid::Uuid::new_v4().to_string()));
             mapping.remove(key("queue_registration_attempt"));
             mapping.remove(key("queue_receipt"));
+            mapping.remove(key("queue_retired_receipt"));
         }
         // When returning to Backlog, preserve prior request/receipt for explicit
         // cancel reconciliation. This method never cancels running OpenRig work.
@@ -120,6 +132,28 @@ impl FsTaskStore {
         }
         if previous.revision != expected { return Err(TaskStoreError::Conflict(format!("{id} changed during registration"))); }
         mapping.insert(key("queue_receipt"), key(qitem_id));
+        persist(&path, &mapping, &body)
+    }
+
+    /// Record a verified terminal state of an earlier OpenRig Queue request.
+    /// A timeout or missing row is not terminal evidence.
+    pub fn retire_queue(&self, root: &Path, id: &str, request: &str, expected: &str, qitem_id: &str) -> Result<ExecutionIntent, TaskStoreError> {
+        if qitem_id != format!("qitem-taskboard-{request}") {
+            return Err(TaskStoreError::Invalid("retired queue qitem does not match request".into()));
+        }
+        let _lock = acquire_lock(root)?;
+        let path = find_task_path(root, id)?;
+        let (text, mut mapping, body) = load(&path)?;
+        let previous = intent(&mapping, &text)?;
+        if previous.queue_request.as_deref() != Some(request) || previous.queue_attempt.as_deref() != Some(request) {
+            return Err(TaskStoreError::Conflict(format!("{id} queue attempt changed")));
+        }
+        if let Some(retired) = previous.queue_retired_receipt.as_deref() {
+            if retired == qitem_id { return Ok(previous); }
+            return Err(TaskStoreError::Conflict(format!("{id} different retired queue receipt")));
+        }
+        if previous.revision != expected { return Err(TaskStoreError::Conflict(format!("{id} changed during Queue retirement"))); }
+        mapping.insert(key("queue_retired_receipt"), key(qitem_id));
         persist(&path, &mapping, &body)
     }
 

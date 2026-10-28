@@ -42,19 +42,26 @@ fn queue_request_is_immutable_until_requeued_and_receipt_is_compare_and_set() {
     })).unwrap()).unwrap();
     let first = store.set_execution_mode(root, &task.id, &task.revision, ExecutionMode::Queue).unwrap();
     let request = first.queue_request.as_ref().unwrap();
-    assert!(matches!(store.receipt_queue(root, &task.id, request, &task.revision, "qitem-1"), Err(TaskStoreError::Conflict(_))));
+    let qitem = format!("qitem-taskboard-{request}");
+    assert!(matches!(store.receipt_queue(root, &task.id, request, &task.revision, &qitem), Err(TaskStoreError::Conflict(_))));
     let attempted = store.begin_queue_registration(root, &task.id, request, &first.revision).unwrap();
     assert_eq!(attempted.queue_attempt.as_deref(), Some(request.as_str()));
     assert!(matches!(store.begin_queue_registration(root, &task.id, request, &attempted.revision), Err(TaskStoreError::Conflict(_))));
-    assert!(matches!(store.receipt_queue(root, &task.id, request, &first.revision, "qitem-1"), Err(TaskStoreError::Conflict(_))));
-    let receipt = store.receipt_queue(root, &task.id, request, &attempted.revision, "qitem-1").unwrap();
-    assert_eq!(receipt.queue_receipt.as_deref(), Some("qitem-1"));
-    assert_eq!(store.receipt_queue(root, &task.id, request, &first.revision, "qitem-1").unwrap().revision, receipt.revision);
+    assert!(matches!(store.receipt_queue(root, &task.id, request, &first.revision, &qitem), Err(TaskStoreError::Conflict(_))));
+    let receipt = store.receipt_queue(root, &task.id, request, &attempted.revision, &qitem).unwrap();
+    assert_eq!(receipt.queue_receipt.as_deref(), Some(qitem.as_str()));
+    assert_eq!(store.receipt_queue(root, &task.id, request, &first.revision, &qitem).unwrap().revision, receipt.revision);
     assert!(matches!(store.receipt_queue(root, &task.id, request, &receipt.revision, "qitem-2"), Err(TaskStoreError::Conflict(_))));
     let backlog = store.set_execution_mode(root, &task.id, &receipt.revision, ExecutionMode::Backlog).unwrap();
-    assert_eq!(backlog.queue_receipt.as_deref(), Some("qitem-1"));
-    assert!(matches!(store.receipt_queue(root, &task.id, request, &backlog.revision, "qitem-1"), Err(TaskStoreError::Conflict(_))));
-    let requeued = store.set_execution_mode(root, &task.id, &backlog.revision, ExecutionMode::Queue).unwrap();
+    assert_eq!(backlog.queue_receipt.as_deref(), Some(qitem.as_str()));
+    assert!(matches!(store.receipt_queue(root, &task.id, request, &backlog.revision, &qitem), Err(TaskStoreError::Conflict(_))));
+    assert!(matches!(
+        store.set_execution_mode(root, &task.id, &backlog.revision, ExecutionMode::Queue),
+        Err(TaskStoreError::Conflict(_))
+    ));
+    let retired = store.retire_queue(root, &task.id, request, &backlog.revision, &qitem).unwrap();
+    assert_eq!(retired.queue_retired_receipt.as_deref(), Some(qitem.as_str()));
+    let requeued = store.set_execution_mode(root, &task.id, &retired.revision, ExecutionMode::Queue).unwrap();
     assert_ne!(requeued.queue_request, first.queue_request);
     assert!(requeued.queue_receipt.is_none());
     assert!(requeued.queue_attempt.is_none());
