@@ -4,7 +4,7 @@ import type { Task } from "./types";
  * Missing/invalid timestamps are deliberately not guessed. Epics remain
  * until all of their still-active children can also be archived.
  */
-export function eligibleForAgeArchive<T extends Pick<Task, "id" | "parent" | "kind" | "column" | "archived" | "completed_at">>(
+export function eligibleForAgeArchive<T extends Pick<Task, "id" | "parent" | "kind" | "column" | "archived" | "completed_at"> & Partial<Pick<Task, "attention" | "question" | "review_status">>>(
   tasks: readonly T[],
   columnId: string,
   cutoffIso: string,
@@ -13,6 +13,8 @@ export function eligibleForAgeArchive<T extends Pick<Task, "id" | "parent" | "ki
   if (!Number.isFinite(cutoff)) return [];
   const qualified = tasks.filter((task) => {
     if (task.archived || task.column !== columnId || !task.completed_at) return false;
+    if (task.review_status === "open" ||
+        (task.attention?.includes("question") && task.question && !task.question.answer)) return false;
     const completedAt = Date.parse(task.completed_at);
     return Number.isFinite(completedAt) && completedAt <= cutoff;
   });

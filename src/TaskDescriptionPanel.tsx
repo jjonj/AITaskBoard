@@ -1,5 +1,6 @@
-import { useEffect, useLayoutEffect, useRef, useState, type TextareaHTMLAttributes } from "react";
-import { parseDescriptionTimeline, updateInitialDescription } from "./descriptionTimeline";
+import { useLayoutEffect, useRef, useState, type TextareaHTMLAttributes } from "react";
+import { parseDescriptionTimeline, updateInitialDescription, type DescriptionUpdateKind } from "./descriptionTimeline";
+import { MarkdownText } from "./MarkdownText";
 
 type AutoTextareaProps = TextareaHTMLAttributes<HTMLTextAreaElement> & {
   minRows?: number;
@@ -24,18 +25,20 @@ export function AutoTextarea({ minRows = 2, maxHeight = 420, value, style, ...pr
 type Props = {
   description: string;
   onChange: (description: string) => void;
-  pendingUpdate: string;
-  onPendingUpdateChange: (value: string) => void;
-  /** Note to AI composer tab; omitted for epics (they keep separate notes). */
+  /** User-only Note to AI composer; omitted for epics. */
   noteToAi?: string;
   onNoteToAiChange?: (value: string) => void;
   legacyAiNotes?: string;
+  /** Task creation uses the space normally occupied by the Note to AI composer. */
+  descriptionMinRows?: number;
+  descriptionMaxHeight?: number;
 };
 
-const updateLabel = (kind: "update" | "user-note" | "legacy-ai") => ({
+const updateLabel = (kind: DescriptionUpdateKind) => ({
   update: "Update",
   "user-note": "Note to AI",
   "legacy-ai": "Imported AI notes",
+  blocked: "Blocked",
 })[kind];
 
 const VISIBLE_UPDATES = 2;
@@ -54,22 +57,12 @@ function relativeTime(iso: string) {
 }
 
 export function DescriptionTimeline({
-  description, onChange, pendingUpdate, onPendingUpdateChange, noteToAi, onNoteToAiChange, legacyAiNotes,
+  description, onChange, noteToAi, onNoteToAiChange, legacyAiNotes,
+  descriptionMinRows = 3, descriptionMaxHeight = 360,
 }: Props) {
   const { initial, updates } = parseDescriptionTimeline(description);
   const [showAll, setShowAll] = useState(false);
-  const hasNoteTab = !!onNoteToAiChange;
-  const [tab, setTab] = useState<"update" | "note">(
-    hasNoteTab && noteToAi?.trim() ? "note" : "update");
-  const activeTab = hasNoteTab ? tab : "update";
-  const composerRef = useRef<HTMLDivElement>(null);
-  const focusComposer = useRef(false);
-  useEffect(() => {
-    if (!focusComposer.current) return;
-    focusComposer.current = false;
-    composerRef.current?.querySelector("textarea")?.focus();
-  }, [tab]);
-  const chooseTab = (next: "update" | "note") => { focusComposer.current = true; setTab(next); };
+  const [previewDescription, setPreviewDescription] = useState(false);
   const hiddenCount = showAll ? 0 : Math.max(0, updates.length - VISIBLE_UPDATES);
   const visible = updates.slice(hiddenCount);
 
@@ -80,16 +73,23 @@ export function DescriptionTimeline({
         {updates.length > 0 && (
           <span>{updates.length} update{updates.length === 1 ? "" : "s"}</span>
         )}
+        <button type="button" className="description-markdown-mode"
+          onClick={() => setPreviewDescription((current) => !current)}
+          aria-pressed={previewDescription}>
+          {previewDescription ? "Edit Markdown" : "Preview Markdown"}
+        </button>
       </div>
-      <AutoTextarea
-        className="description-initial"
-        minRows={3}
-        maxHeight={360}
-        aria-label="Task description"
-        placeholder="Describe the task and the desired outcome…"
-        value={initial}
-        onChange={(event) => onChange(updateInitialDescription(description, event.currentTarget.value))}
-      />
+      {previewDescription
+        ? <MarkdownText text={initial || "*No description yet.*"} className="markdown-field-preview description-markdown-preview" />
+        : <AutoTextarea
+            className="description-initial"
+            minRows={descriptionMinRows}
+            maxHeight={descriptionMaxHeight}
+            aria-label="Task description"
+            placeholder="Describe the task and the desired outcome…"
+            value={initial}
+            onChange={(event) => onChange(updateInitialDescription(description, event.currentTarget.value))}
+          />}
 
       {(updates.length > 0 || legacyAiNotes?.trim()) && (
         <ol className="description-history">
@@ -108,7 +108,7 @@ export function DescriptionTimeline({
                   {relativeTime(entry.at)}
                 </time>
               </div>
-              <div className="description-entry-text">{entry.text}</div>
+              <MarkdownText text={entry.text} className="description-entry-text" />
             </li>
           ))}
           {legacyAiNotes?.trim() && (
@@ -117,7 +117,7 @@ export function DescriptionTimeline({
                 <strong>Existing AI notes</strong>
                 <time>moved into history on save</time>
               </div>
-              <div className="description-entry-text">{legacyAiNotes}</div>
+              <MarkdownText text={legacyAiNotes} className="description-entry-text" />
             </li>
           )}
           {showAll && updates.length > VISIBLE_UPDATES && (
@@ -128,46 +128,22 @@ export function DescriptionTimeline({
         </ol>
       )}
 
-      <div ref={composerRef} className={`description-composer ${activeTab}`}>
-        <div className="description-composer-tabs" role="tablist">
-          <button type="button" role="tab" aria-selected={activeTab === "update"}
-            className={activeTab === "update" ? "active" : ""} onClick={() => chooseTab("update")}>
-            + Add update{pendingUpdate.trim() && activeTab !== "update" ? " •" : ""}
-          </button>
-          {hasNoteTab && (
-            <button type="button" role="tab" aria-selected={activeTab === "note"}
-              className={`note${activeTab === "note" ? " active" : ""}`} onClick={() => chooseTab("note")}>
-              ✎ Note to AI{noteToAi?.trim() && activeTab !== "note" ? " •" : ""}
-            </button>
-          )}
-          <span className="description-composer-hint">
-            {activeTab === "note"
-              ? "Clears For user and flags AI attention on save"
-              : "Appended as a timestamped entry on save"}
-          </span>
-        </div>
-        {activeTab === "update" ? (
+      {onNoteToAiChange && (
+        <div className="description-composer note">
+          <div className="description-composer-tabs">
+            <strong className="note">✎ Note to AI</strong>
+            <span className="description-composer-hint">Clears For user and flags AI attention on save</span>
+          </div>
           <AutoTextarea
-            key="update"
-            minRows={2}
-            maxHeight={240}
-            aria-label="Add description update"
-            placeholder="Progress, decisions, observations or context…"
-            value={pendingUpdate}
-            onChange={(event) => onPendingUpdateChange(event.currentTarget.value)}
-          />
-        ) : (
-          <AutoTextarea
-            key="note"
             minRows={2}
             maxHeight={240}
             aria-label="Note to AI"
             placeholder="Instructions for the AI working on this task…"
             value={noteToAi ?? ""}
-            onChange={(event) => onNoteToAiChange?.(event.currentTarget.value)}
+            onChange={(event) => onNoteToAiChange(event.currentTarget.value)}
           />
-        )}
-      </div>
+        </div>
+      )}
     </section>
   );
 }

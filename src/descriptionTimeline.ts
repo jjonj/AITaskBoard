@@ -1,13 +1,16 @@
 import type { TaskDraft } from "./types";
 
-export type DescriptionUpdateKind = "update" | "user-note" | "legacy-ai";
+// "blocked" entries are written only by task-core when an agent blocks a task.
+export type DescriptionUpdateKind = "update" | "user-note" | "legacy-ai" | "blocked";
 export type DescriptionUpdate = {
   kind: DescriptionUpdateKind;
   at: string;
   text: string;
 };
 
-const START = /^<!-- taskboard:update:(update|user-note|legacy-ai)\|([^\n]+) -->$/;
+export const AUTHORIZE_UNBLOCK_TEXT = "Agents have full authority to do what it takes to unblock this task.";
+
+const START = /^<!-- taskboard:update:(update|user-note|legacy-ai|blocked)\|([^\n]+) -->$/;
 const END = "<!-- taskboard:end-update -->";
 
 const quoteLines = (text: string) =>
@@ -27,11 +30,16 @@ export function parseDescriptionTimeline(description: string): {
   initial: string;
   updates: DescriptionUpdate[];
 } {
-  const normalized = description.replace(/\r\n/g, "\n").trim();
+  // Keep whitespace while the controlled textarea is being edited. Trimming
+  // here swallowed every trailing space before the user could type the next word.
+  const normalized = description.replace(/\r\n/g, "\n");
   const lines = normalized.split("\n");
   const first = lines.findIndex((line) => START.test(line));
   if (first < 0) return { initial: normalized, updates: [] };
-  const initial = lines.slice(0, first).join("\n").trim();
+  // The formatter adds exactly two newlines before the first update block.
+  // Remove that separator only, keeping every user-typed space and line break.
+  const prefix = lines.slice(0, first).join("\n");
+  const initial = prefix.endsWith("\n") ? prefix.slice(0, -1) : prefix;
   const updates: DescriptionUpdate[] = [];
   let i = first;
   while (i < lines.length) {
@@ -64,7 +72,7 @@ export function parseDescriptionTimeline(description: string): {
 export function formatDescriptionTimeline(initial: string, updates: DescriptionUpdate[]): string {
   const blocks = updates.map(({ kind, at, text }) =>
     `<!-- taskboard:update:${kind}|${at} -->\n${quoteLines(text)}\n${END}`);
-  return [initial.trim(), ...blocks].filter(Boolean).join("\n\n");
+  return initial ? [initial, ...blocks].join("\n\n") : blocks.join("\n\n");
 }
 
 export function updateInitialDescription(description: string, newInitial: string): string {

@@ -24,12 +24,38 @@ test("preserves editable initial description and appends chronological updates",
   assert.equal(result.updates[1].at, time);
 });
 
+test("typing a space in the description preserves whitespace until the next keystroke", () => {
+  let description = "canttypespacehere";
+  description = updateInitialDescription(description, "can type ");
+  assert.equal(parseDescriptionTimeline(description).initial, "can type ");
+  description = updateInitialDescription(description, "can type space");
+  assert.equal(parseDescriptionTimeline(description).initial, "can type space");
+
+  description = appendDescriptionUpdates(description, [{ kind: "user-note", text: "Other context" }], time);
+  description = updateInitialDescription(description, "space after update ");
+  assert.equal(parseDescriptionTimeline(description).initial, "space after update ");
+  assert.equal(parseDescriptionTimeline(description).updates[0].text, "Other context");
+  description = updateInitialDescription(description, "one more line\n");
+  assert.equal(parseDescriptionTimeline(description).initial, "one more line\n");
+  assert.equal(parseDescriptionTimeline(description).updates[0].text, "Other context");
+});
+
 test("quoted note headings stay inside the Rust ## Description section", () => {
   const note = "A heading follows:\n## Acceptance Criteria\nDo not lose this line\n\nThanks";
   const description = appendDescriptionUpdates("Task", [{ kind: "user-note", text: note }], time);
   assert.ok(description.includes("> ## Acceptance Criteria"));
   assert.equal(description.split("\n").filter((line) => line.startsWith("## ")).length, 0);
   assert.equal(parseDescriptionTimeline(description).updates[0].text, note);
+});
+
+test("core-written blocked reason entries parse as red blocked updates", () => {
+  // Exact shape written by task-core append_description_update.
+  const description = "Brief\n\n<!-- taskboard:update:blocked|2026-10-24T10:00:00.000Z -->\n> Missing source mesh.\n<!-- taskboard:end-update -->";
+  const result = parseDescriptionTimeline(description);
+  assert.equal(result.initial, "Brief");
+  assert.deepEqual(result.updates.map(({ kind, text }) => ({ kind, text })), [
+    { kind: "blocked", text: "Missing source mesh." },
+  ]);
 });
 
 test("malformed timeline data stays visible as original text rather than being lost", () => {

@@ -1,28 +1,45 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import "./App.css";
 import { TASK_ICON_OPTIONS, TaskIconGlyph } from "./TaskIcons";
 import { TitleMarkup } from "./TitleMarkup";
 import { DependencyArrows } from "./DependencyArrows";
 import { TaskLinkPicker } from "./TaskLinkPicker";
 import { AutoTextarea, DescriptionTimeline } from "./TaskDescriptionPanel";
-import { parseDescriptionTimeline, prepareTaskDraftForSave } from "./descriptionTimeline";
+import { MarkdownText, MarkdownPreviewToggle } from "./MarkdownText";
+import { TaskImageGallery, type PendingClipboardImage } from "./TaskImageGallery";
+import { ReviewView } from "./ReviewView";
+import { isUserQueueEligible } from "./userQueueEligibility";
+import { appendDescriptionUpdates, AUTHORIZE_UNBLOCK_TEXT, parseDescriptionTimeline, prepareTaskDraftForSave, updateInitialDescription } from "./descriptionTimeline";
 import { applyCardPlacements, orderCardsByDependencies } from "./dependencyLayout";
 import { withEpicProxyRows } from "./epicProxyRows";
 import { eligibleForAgeArchive } from "./archiveAge";
 import { isHiddenByCollapsedEpic, toggleAllEpicCollapses } from "./epicCollapse";
 import { ProjectTabs } from "./ProjectTabs";
-import type { ProjectTab } from "./api";
+import { ReleaseCenter } from "./ReleaseCenter";
+import type { ProjectTab, TaskIdReservation, ExecutionMode } from "./api";
 import {
   archiveTask,
   archiveColumn,
   archiveColumnOlderThan,
   createTask,
+  reserveTaskId,
+  releaseTaskId,
+  saveTaskImage,
   highlightInFomni,
   loadBoard,
+  listProjects,
   openInObsidian,
+  openClaimedT3Session,
+  openTaskSession,
+  taskLiveWithMe,
   restoreSnapshot,
   saveBoardConfig,
   showMainWindow,
+  taskExecutionIntent,
+  taskSetExecutionMode,
+  taskRequestStartNow,
+  taskSyncQueue,
   updateTask,
 } from "./api";
 import type {
@@ -78,7 +95,7 @@ const activeUserQueueSnoozes = (raw: unknown, now = Date.now()): UserQueueSnooze
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
   return Object.fromEntries(
     Object.entries(raw).filter(([id, until]) =>
-      /^WTE?-\d+$/.test(id) && typeof until === "number" &&
+      /^[A-Z][A-Z0-9]{1,11}-\d+$/.test(id) && typeof until === "number" &&
       Number.isFinite(until) && until > now),
   );
 };
@@ -90,15 +107,6 @@ const loadUserQueueSnoozes = (key = USER_QUEUE_SNOOZES_KEY): UserQueueSnoozes =>
     return {};
   }
 };
-
-const isUserQueueEligible = (
-  task: Task, board: BoardSnapshot, snoozes: UserQueueSnoozes, now = Date.now(),
-): boolean =>
-  isForUser(task) &&
-  !task.archived &&
-  !task.completed &&
-  !board.config.columns.some((column) => column.id === task.column && column.terminal) &&
-  (snoozes[task.id] ?? 0) <= now;
 
 const newestUserTasks = (tasks: Task[]): Task[] =>
   [...tasks].sort((a, b) =>
@@ -195,6 +203,10 @@ const emptyDraft = (
   parent,
   category,
   kind: "task",
+  deployable: null,
+  repeat_every_days: null,
+  next_due: null,
+  blocked_reason: null,
   depends_on: [],
   related_to: [],
   icon: null,
@@ -209,6 +221,22 @@ const emptyDraft = (
 
 const errorText = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
+
+type TaskDumpRow = { line: number; text: string };
+// Keep every source line intact. The optional description contains only the
+// overflow, never a paraphrase that might lose a requirement.
+const splitTaskDumpText = (source: string): { title: string; description: string } => {
+  const text = source.trim().replace(/\s+/g, " ");
+  if (text.length <= 105) return { title: text, description: "" };
+  const sentence = text.slice(40, 110).search(/[.!?]\s/);
+  const sentenceEnd = sentence >= 0 ? sentence + 41 : -1;
+  const wordEnd = text.lastIndexOf(" ", 105);
+  const cut = sentenceEnd >= 45 ? sentenceEnd : wordEnd >= 45 ? wordEnd : 105;
+  return {
+    title: text.slice(0, cut).trim(),
+    description: text.slice(cut).trim(),
+  };
+};
 
 const columnPalette = [
   "#718f78",
@@ -227,9 +255,10 @@ const randomColumnColor = (used: string[]) => {
   return pool[Math.floor(Math.random() * pool.length)];
 };
 
-function ProjectBoard({ project, onInteractionChange }: {
+function ProjectBoard({ project, onInteractionChange, requestedReviewId }: {
   project: ProjectTab;
   onInteractionChange: (locked: boolean) => void;
+  requestedReviewId?: string;
 }) {
   const boardPath = project.path;
   // Preserve existing Wartribes UI settings while isolating all other boards.
@@ -239,13 +268,114 @@ function ProjectBoard({ project, onInteractionChange }: {
   const recentKey = storageKey("recentTaskActivity");
   const snoozesKey = storageKey("userQueueSnoozes");
   const collapsedKey = storageKey("collapsedTasks");
+  const blockedInboxFilterKey = storageKey("hideBlockedInboxTasks");
   const [snapshot, setSnapshot] = useState<BoardSnapshot | null>(null);
   const [query, setQuery] = useState("");
+  // MISC-0019: a search filter is temporary, not a persistent board state.
+  // Restart the idle countdown with each keystroke so active editing is unaffected.
+  useEffect(() => {
+    if (!query.trim()) return;
+    const timer = window.setTimeout(() => setQuery(""), 90_000);
+    return () => window.clearTimeout(timer);
+  }, [query]);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [reviewNotice, setReviewNotice] = useState("");
+  useEffect(() => { if (requestedReviewId) setReviewOpen(true); }, [requestedReviewId]);
+  const [hideBlockedInboxTasks, setHideBlockedInboxTasks] = useState(() => {
+    try { return window.localStorage.getItem(blockedInboxFilterKey) === "true"; }
+    catch { return false; }
+  });
+  useEffect(() => {
+    try { window.localStorage.setItem(blockedInboxFilterKey, String(hideBlockedInboxTasks)); }
+    catch { /* This filter remains usable when local storage is unavailable. */ }
+  }, [blockedInboxFilterKey, hideBlockedInboxTasks]);
   const [editor, setEditor] = useState<EditorState | null>(null);
-  const [descriptionUpdateInput, setDescriptionUpdateInput] = useState("");
+  const [remoteRelatedTasks, setRemoteRelatedTasks] = useState<Task[]>([]);
+  useEffect(() => {
+    if (!editor) { setRemoteRelatedTasks([]); return; }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const catalog = await listProjects();
+        const boards = await Promise.all(catalog.projects.filter((item) => item.path !== boardPath)
+          .map(async (item) => {
+            try {
+              const snapshot = await loadBoard(item.path);
+              return snapshot.tasks.map((task) => ({
+                ...task,
+                id: `${item.path}#${task.id}`,
+                title: `${item.name} · ${task.title}`,
+              }));
+            } catch { return [] as Task[]; }
+          }));
+        if (!cancelled) setRemoteRelatedTasks(boards.flat());
+      } catch { if (!cancelled) setRemoteRelatedTasks([]); }
+    })();
+    return () => { cancelled = true; };
+  }, [!!editor, boardPath]);
+  const remotePrerequisiteKey = (snapshot?.tasks ?? [])
+    .flatMap((task) => task.depends_on).filter((id) => id.includes("#")).sort().join("|");
+  const [remotePrerequisites, setRemotePrerequisites] = useState<Map<string, Task>>(() => new Map());
+  useEffect(() => {
+    let cancelled = false;
+    const references = remotePrerequisiteKey ? remotePrerequisiteKey.split("|") : [];
+    const refreshRemote = async () => {
+      const paths = [...new Set(references.map((id) => id.slice(0, id.lastIndexOf("#"))))];
+      const boards = await Promise.all(paths.map(async (path) => {
+        try { return { path, board: await loadBoard(path) }; }
+        catch { return null; }
+      }));
+      if (cancelled) return;
+      const next = new Map<string, Task>();
+      for (const entry of boards) {
+        if (!entry) continue;
+        for (const task of entry.board.tasks) next.set(`${entry.path}#${task.id}`, task);
+      }
+      setRemotePrerequisites(next);
+    };
+    void refreshRemote();
+    const timer = window.setInterval(() => void refreshRemote(), 15_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [remotePrerequisiteKey]);
+  const [taskDumpOpen, setTaskDumpOpen] = useState(false);
+  const [taskDumpText, setTaskDumpText] = useState("");
+  const [taskDumpPriorities, setTaskDumpPriorities] = useState<Record<number, boolean>>({});
+  const taskDumpRows = useMemo<TaskDumpRow[]>(() =>
+    taskDumpText.split(/\r?\n/).map((text, line) => ({ line, text: text.trim() }))
+      .filter((row) => row.text.length > 0), [taskDumpText]);
+  const [reservedTaskId, setReservedTaskId] = useState<TaskIdReservation | null>(null);
+  const [pendingClipboardImages, setPendingClipboardImages] = useState<PendingClipboardImage[]>([]);
+  const imageDialogGeneration = useRef(0);
+  const editorModalRef = useRef<HTMLElement | null>(null);
+  const [fileDropActive, setFileDropActive] = useState(false);
+  const [doneMenuOpen, setDoneMenuOpen] = useState(false);
+  const [executionChoice, setExecutionChoice] = useState<ExecutionMode | "start_now">("backlog");
+  const [withMeSelected, setWithMeSelected] = useState(false);
+  const [executionLoading, setExecutionLoading] = useState(false);
+  useEffect(() => {
+    if (!editor || editor.mode === "create" || !editor.original) {
+      setWithMeSelected(false);
+      setExecutionChoice("backlog");
+      setExecutionLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setExecutionLoading(true);
+    setWithMeSelected(editor.original.live?.with_me === true);
+    setExecutionChoice("backlog");
+    void taskExecutionIntent(editor.original.id, boardPath).then((intent) => {
+      if (!cancelled) setExecutionChoice(intent.mode);
+    }).catch((err) => {
+      if (!cancelled) setError(`Cannot read execution mode: ${errorText(err)}`);
+    }).finally(() => { if (!cancelled) setExecutionLoading(false); });
+    return () => { cancelled = true; };
+  }, [boardPath, editor?.mode, editor?.original?.id]);
+  const [releasesOpen, setReleasesOpen] = useState(false);
   const [userQueueReview, setUserQueueReview] = useState<UserQueueReview | null>(null);
+  const [queueExpanded, setQueueExpanded] = useState(false);
   const [followupQueueReturn, setFollowupQueueReturn] = useState<UserQueueReview | null>(null);
   const [userQueueSnoozes, setUserQueueSnoozes] = useState<UserQueueSnoozes>(() => loadUserQueueSnoozes(snoozesKey));
+  const [keyboardSelectedTaskId, setKeyboardSelectedTaskId] = useState<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
   const [dragColumnId, setDragColumnId] = useState<string | null>(null);
   const [columnDragPreview, setColumnDragPreview] = useState<{
@@ -276,6 +406,7 @@ function ProjectBoard({ project, onInteractionChange }: {
   const localMutationVersion = useRef(0);
   const pendingTaskWrites = useRef(new Set<string>());
   const refreshJobRef = useRef<Promise<BoardSnapshot> | null>(null);
+  const deferredExternalRefresh = useRef(false);
   const lastUserInputAtRef = useRef(Date.now());
   const pointerIsDownRef = useRef(false);
   const refreshFeedbackTimerRef = useRef<number | null>(null);
@@ -299,6 +430,77 @@ function ProjectBoard({ project, onInteractionChange }: {
   const [busy, setBusy] = useState(false);
   const [refreshFeedback, setRefreshFeedback] = useState<"idle" | "working" | "done">("idle");
   const [error, setError] = useState("");
+
+  // Windows Explorer file drops are handled by Tauri rather than HTML5 DnD.
+  // The native event includes absolute paths; no file contents are imported.
+  useEffect(() => {
+    if (!editor || busy || !("__TAURI_INTERNALS__" in window)) {
+      setFileDropActive(false);
+      return;
+    }
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    const overEditor = (position: { x: number; y: number }) => {
+      const bounds = editorModalRef.current?.getBoundingClientRect();
+      if (!bounds) return false;
+      // Tauri reports physical webview pixels; DOM bounds use CSS pixels.
+      const scale = window.devicePixelRatio || 1;
+      const x = position.x / scale;
+      const y = position.y / scale;
+      return x >= bounds.left && x <= bounds.right && y >= bounds.top && y <= bounds.bottom;
+    };
+    void getCurrentWebview().onDragDropEvent(({ payload }) => {
+      if (!active) return;
+      if (payload.type === "leave") {
+        setFileDropActive(false);
+        return;
+      }
+      const inside = overEditor(payload.position);
+      if (payload.type !== "drop") {
+        setFileDropActive(inside);
+        return;
+      }
+      setFileDropActive(false);
+      if (!inside) return;
+      const paths = [...new Set(payload.paths.filter((path) => path.trim()))];
+      if (!paths.length) return;
+      setEditor((current) => {
+        if (!current) return current;
+        const initial = parseDescriptionTimeline(current.draft.description).initial.trimEnd();
+        const description = updateInitialDescription(current.draft.description,
+          [initial, ...paths].filter(Boolean).join("\n"));
+        return { ...current, draft: { ...current.draft, description } };
+      });
+    }).then((dispose) => {
+      if (active) unlisten = dispose;
+      else dispose();
+    }).catch(() => { /* Browser preview has no native file-drop bridge. */ });
+    return () => { active = false; unlisten?.(); setFileDropActive(false); };
+  }, [!!editor, busy]);
+
+  // The reservation is held only while this creation dialog is open.
+  // Switching Task/Epic releases the old namespace and reserves a new ID.
+  useEffect(() => {
+    if (editor?.mode !== "create") {
+      setReservedTaskId(null);
+      return;
+    }
+    let closed = false;
+    let owned: TaskIdReservation | null = null;
+    setReservedTaskId(null);
+    void reserveTaskId(editor.draft.kind, boardPath).then((reservation) => {
+      if (closed) {
+        void releaseTaskId(reservation, boardPath);
+      } else {
+        owned = reservation;
+        setReservedTaskId(reservation);
+      }
+    }).catch((reason) => { if (!closed) setError(`Could not reserve task ID: ${errorText(reason)}`); });
+    return () => {
+      closed = true;
+      if (owned) void releaseTaskId(owned, boardPath);
+    };
+  }, [boardPath, editor?.mode, editor?.draft.kind]);
 
   useEffect(() => {
     onInteractionChange(!!editor || busy || !!dragId || !!dragColumnId || !!columnDragPreview);
@@ -508,6 +710,29 @@ function ProjectBoard({ project, onInteractionChange }: {
     };
   }, []);
 
+  // Parent project tabs detect out-of-band edits across all boards. Never
+  // overwrite a draft or drag; replay the pending refresh after interaction.
+  useEffect(() => {
+    const request = (event: Event) => {
+      if (editor || busy || contextMenu || columnContextMenu || dragId || dragColumnId ||
+          pendingTaskWrites.current.size) {
+        deferredExternalRefresh.current = true;
+        return;
+      }
+      const silent = (event as CustomEvent<{ silent?: boolean }>).detail?.silent ?? true;
+      void refresh(boardPath, silent);
+    };
+    window.addEventListener("taskboard:refresh-board", request);
+    return () => window.removeEventListener("taskboard:refresh-board", request);
+  }, [boardPath, editor, busy, contextMenu, columnContextMenu, dragId, dragColumnId]);
+
+  useEffect(() => {
+    if (!deferredExternalRefresh.current || editor || busy || contextMenu ||
+        columnContextMenu || dragId || dragColumnId || pendingTaskWrites.current.size) return;
+    deferredExternalRefresh.current = false;
+    void refresh(boardPath, true);
+  }, [boardPath, editor, busy, contextMenu, columnContextMenu, dragId, dragColumnId]);
+
   useEffect(() => {
     if (!boardPath || editor || busy || contextMenu || columnContextMenu || dragId || dragColumnId) return;
     const timer = window.setInterval(() => {
@@ -588,8 +813,8 @@ function ProjectBoard({ project, onInteractionChange }: {
   );
 
   const isComplete = (id: string) => {
-    const item = snapshot?.tasks.find((t) => t.id === id);
-    return !!item && (item.archived || !!item.completed || columns.some((col) => col.id === item.column && col.terminal));
+    const item = id.includes("#") ? remotePrerequisites.get(id) : snapshot?.tasks.find((t) => t.id === id);
+    return !!item && (item.archived || !!item.completed || (!id.includes("#") && columns.some((col) => col.id === item.column && col.terminal)));
   };
   const waitingFor = (task: Task): string[] => (task.depends_on || []).filter((id) => !isComplete(id));
   const readinessOf = (task: Task) => task.kind === "epic" ? "epic"
@@ -660,6 +885,10 @@ function ProjectBoard({ project, onInteractionChange }: {
       : [],
     [activeTasks, snapshot, userQueueSnoozes],
   );
+  // The Inbox contains open visual reviews and actionable For user cards.
+  // Filtering the Blocked column never changes their underlying task state.
+  const isInReviewInbox = (task: Task) => task.review_status === "open" ||
+    (!!snapshot && isUserQueueEligible(task, snapshot, userQueueSnoozes));
 
   // A newly completed card should remain visible even when Done was scrolled down.
   useEffect(() => {
@@ -793,6 +1022,10 @@ function ProjectBoard({ project, onInteractionChange }: {
     parent: task.parent,
     category: task.category,
     kind: task.kind,
+    deployable: task.deployable ?? null,
+    repeat_every_days: task.repeat_every_days ?? null,
+    next_due: task.next_due ?? null,
+    blocked_reason: task.blocked_reason ?? null,
     depends_on: [...task.depends_on],
     related_to: [...task.related_to],
     icon: task.icon ?? null,
@@ -812,6 +1045,7 @@ function ProjectBoard({ project, onInteractionChange }: {
   });
 
   const attentionRank = (task: Task) => {
+    if (task.kind === "task" && readinessOf(task) === "ready" && task.attention.includes("priority")) return -1;
     if (isForUser(task)) return 0;
     if (task.attention.includes("blocked")) return 2;
     if (
@@ -873,6 +1107,8 @@ function ProjectBoard({ project, onInteractionChange }: {
   };
 
   const closeEditor = (board = snapshot) => {
+    imageDialogGeneration.current += 1;
+    setPendingClipboardImages([]);
     // A follow-up created during queue review is edited outside the queue.
     // Closing or saving it resumes the queued tasks where the user left off.
     if (followupQueueReturn && board) {
@@ -890,9 +1126,12 @@ function ProjectBoard({ project, onInteractionChange }: {
   }, [editor?.original?.id]);
 
   const openEdit = (task: Task, fromQueue = false) => {
+    setQueueExpanded(false);
+    imageDialogGeneration.current += 1;
+    setPendingClipboardImages([]);
     if (!fromQueue) setUserQueueReview(null);
     setQuestionAnswerText("");
-    setDescriptionUpdateInput("");
+    setDoneMenuOpen(false);
     setHoverTask(null);
     setEditor({
       mode: "edit",
@@ -949,15 +1188,92 @@ function ProjectBoard({ project, onInteractionChange }: {
     parent: string | null = null,
     category: string | null = null,
   ) => {
+    imageDialogGeneration.current += 1;
+    setPendingClipboardImages([]);
     const target = column ?? defaultCreateColumn();
     if (!target) return;
     setContextMenu(null);
     setColumnContextMenu(null);
     setUserQueueReview(null);
     setFollowupQueueReturn(null);
-    setDescriptionUpdateInput("");
+    setDoneMenuOpen(false);
     setEditor({ mode: "create", draft: emptyDraft(target,
       parent && taskMap.get(parent)?.kind === "epic" ? parent : null, category) });
+  };
+
+  const openTaskDump = (text = "") => {
+    if (busy || editor) return;
+    setContextMenu(null);
+    setColumnContextMenu(null);
+    setReviewOpen(false);
+    setTaskDumpText(text);
+    setTaskDumpPriorities({});
+    setError("");
+    setTaskDumpOpen(true);
+  };
+
+  // Only intercept a board-level paste. Pasting in search, notes or an editor
+  // continues to work exactly as before, including clipboard images.
+  useEffect(() => {
+    const handleBoardPaste = (event: ClipboardEvent) => {
+      if (editor || taskDumpOpen || busy || reviewOpen || event.defaultPrevented) return;
+      if (event.target instanceof Element &&
+          event.target.closest("input, textarea, [contenteditable], [role='textbox']")) return;
+      const text = event.clipboardData?.getData("text/plain");
+      if (!text?.trim()) return;
+      event.preventDefault();
+      openTaskDump(text);
+    };
+    window.addEventListener("paste", handleBoardPaste);
+    return () => window.removeEventListener("paste", handleBoardPaste);
+  }, [editor, taskDumpOpen, busy, reviewOpen]);
+
+  const generateTaskDump = async () => {
+    if (busy || !snapshot || !taskDumpRows.length) return;
+    const target = defaultCreateColumn();
+    if (!target) { setError("Create an active task column before generating tasks."); return; }
+    const rows = [...taskDumpRows];
+    const before = snapshot;
+    const created: Task[] = [];
+    setBusy(true);
+    setError("");
+    try {
+      for (const row of rows) {
+        const parts = splitTaskDumpText(row.text);
+        const draft = {
+          ...emptyDraft(target),
+          title: parts.title,
+          description: parts.description,
+          attention: taskDumpPriorities[row.line] ? ["priority" as const] : [],
+        };
+        created.push(await createTask(draft, boardPath));
+      }
+      const after = await loadBoard(boardPath);
+      applySnapshot(after);
+      flashTaskActivity(created.map((task) => ({ id: task.id, kind: "created" as const })));
+      pushUndo({ kind: "board", label: "generate task dump", before, after });
+      setTaskDumpOpen(false);
+      setTaskDumpText("");
+      setTaskDumpPriorities({});
+    } catch (reason) {
+      // A partial batch is real work, not a rollback. Keep only uncreated
+      // lines in the dialog so retry cannot silently generate duplicates.
+      const remaining = rows.slice(created.length);
+      setTaskDumpText(remaining.map((row) => row.text).join("\n"));
+      setTaskDumpPriorities(Object.fromEntries(remaining.map((row, index) =>
+        [index, !!taskDumpPriorities[row.line]])));
+      setError(`${created.length} of ${rows.length} tasks created. ${errorText(reason)}`);
+      try {
+        const after = await loadBoard(boardPath);
+        applySnapshot(after);
+        if (created.length) {
+          flashTaskActivity(created.map((task) => ({ id: task.id, kind: "created" as const })));
+          pushUndo({ kind: "board", label: "partial task dump", before, after });
+        }
+      } catch { /* Keep the original error and remaining lines. */ }
+    } finally {
+      setBusy(false);
+    }
   };
 
   const run = async (operation: () => Promise<void>) => {
@@ -973,6 +1289,94 @@ function ProjectBoard({ project, onInteractionChange }: {
     }
   };
 
+  // Single task-qualified navigation path. Starting an unclaimed task first
+  // records the With me intent; T3 is the sole authority for session deduplication.
+  const openForTask = (task: Task) => void run(async () => {
+    if (!task.claimed_by && task.live?.with_me !== true) {
+      await taskLiveWithMe(task.id, task.revision, true, boardPath);
+    }
+    await openTaskSession(task.id, boardPath);
+    const after = await loadBoard(boardPath);
+    applySnapshot(after);
+  });
+
+  const pasteClipboardImages = (event: React.ClipboardEvent<HTMLElement>) => {
+    if (busy) return;
+    const files = [...event.clipboardData.items]
+      .filter((item) => item.kind === "file" && /^image\/(png|jpeg|webp|gif)$/.test(item.type))
+      .map((item) => item.getAsFile()).filter((file): file is File => !!file);
+    if (!files.length) return; // Text Ctrl+V must keep its normal editing behavior.
+    event.preventDefault();
+    const generation = imageDialogGeneration.current;
+    for (const file of files) {
+      if (file.size > 20 * 1024 * 1024) {
+        setError("A pasted image exceeds the 20 MB attachment limit.");
+        continue;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (generation !== imageDialogGeneration.current || typeof reader.result !== "string") return;
+        setPendingClipboardImages((current) => [...current, {
+          dataUrl: reader.result as string, mime: file.type,
+          name: file.name || "Pasted image",
+        }]);
+      };
+      reader.onerror = () => { if (generation === imageDialogGeneration.current) setError("Could not read the clipboard image."); };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const withClipboardImages = async (draft: TaskDraft, id: string): Promise<TaskDraft> => {
+    if (!pendingClipboardImages.length) return draft;
+    const links: string[] = [];
+    for (const image of pendingClipboardImages) {
+      const encoded = image.dataUrl.split(",", 2)[1];
+      if (!encoded) throw new Error("Invalid clipboard image data.");
+      const savedPath = await saveTaskImage(id, encoded, image.mime, boardPath);
+      links.push(`![Pasted image](../${savedPath})`);
+    }
+    const initial = parseDescriptionTimeline(draft.description).initial;
+    return {
+      ...draft,
+      description: updateInitialDescription(draft.description,
+        [initial, ...links].filter(Boolean).join("\n\n")),
+    };
+  };
+
+  // Release a user-queue item only when Save persists an actual human edit.
+  const queueEdited = !!(editor?.original && userQueueReview &&
+    editor.original.id === userQueueReview.ids[userQueueReview.index] &&
+    isForUser(editor.original) &&
+    (editor.draft.title !== editor.original.title ||
+      editor.draft.description !== editor.original.description ||
+      editor.draft.user_notes !== editor.original.user_notes ||
+      editor.draft.notes !== editor.original.notes ||
+      editor.draft.category !== editor.original.category ||
+      editor.draft.column !== editor.original.column ||
+      editor.draft.parent !== editor.original.parent ||
+      editor.draft.icon !== editor.original.icon ||
+      editor.draft.kind !== editor.original.kind ||
+      editor.draft.repeat_every_days !== (editor.original.repeat_every_days ?? null) ||
+      editor.draft.next_due !== (editor.original.next_due ?? null) ||
+      !!pendingClipboardImages.length ||
+      JSON.stringify(editor.draft.related_to) !== JSON.stringify(editor.original.related_to) ||
+      JSON.stringify(editor.draft.depends_on) !== JSON.stringify(editor.original.depends_on) ||
+      JSON.stringify(editor.draft.attention) !== JSON.stringify(editor.original.attention) ||
+      JSON.stringify(editor.draft.acceptance_criteria) !== JSON.stringify(editor.original.acceptance_criteria) ||
+      JSON.stringify(editor.draft.question) !== JSON.stringify(editor.original.question)));
+
+  const syncQueueWarning = async (id: string): Promise<string | null> => {
+    // A TaskBoard save is already durable. Never make an OpenRig outage appear
+    // to roll it back; report the independent queue result explicitly.
+    try {
+      const result = await taskSyncQueue(id, boardPath);
+      if (["not_queued", "registered", "terminal", "canceled"].includes(result.status)) return null;
+      return `${id} saved locally; OpenRig queue ${result.status}: ${result.reason || result.qitemId || "reconcile this task"}`;
+    } catch (error) {
+      return `${id} saved locally, but OpenRig queue sync is unavailable: ${errorText(error)}`;
+    }
+  };
+
   const saveEditor = (markDone = false) =>
     run(async () => {
       if (!editor || !snapshot) return;
@@ -985,7 +1389,7 @@ function ProjectBoard({ project, onInteractionChange }: {
       }
 
       const before = snapshot;
-      const prepared = prepareTaskDraftForSave(editor.draft, descriptionUpdateInput, editor.original?.claimed_by);
+      const prepared = prepareTaskDraftForSave(editor.draft, "", editor.original?.claimed_by);
       let draft = { ...prepared,
         column: markDone && editor.mode === "edit" && doneColumn ? doneColumn.id : prepared.column,
         depends_on: editor.draft.kind === "epic" ? [] : [...editor.draft.depends_on],
@@ -996,6 +1400,18 @@ function ProjectBoard({ project, onInteractionChange }: {
         question: editor.draft.kind === "epic" ? null : prepared.question,
         acceptance_criteria: editor.draft.kind === "epic" ? [] : prepared.acceptance_criteria,
       };
+      if (queueEdited) {
+        draft = {
+          ...draft,
+          kind: draft.kind === "for_user" ? "task" : draft.kind,
+          attention: draft.attention.filter((flag) => flag !== "needs-user"),
+        };
+      }
+      if (pendingClipboardImages.length) {
+        const id = editor.original?.id ?? reservedTaskId?.id;
+        if (!id) throw new Error("Task ID must be reserved before saving clipboard images.");
+        draft = await withClipboardImages(draft, id);
+      }
       if (draft.kind === "epic" && editor.original?.kind !== "epic") {
         const retained = [
           draft.notes,
@@ -1005,30 +1421,61 @@ function ProjectBoard({ project, onInteractionChange }: {
         ].filter(Boolean);
         draft = { ...draft, notes: retained.join("\n\n") };
       }
+      if (executionLoading) throw new Error("Still reading the existing execution state; save after it loads.");
       let after = before;
+      let savedTask: Task | null = null;
+      let undoAction: string | null = null;
 
       if (editor.mode === "create") {
-        const saved = await createTask(draft, boardPath);
+        if (!reservedTaskId) throw new Error("Task ID reservation is not ready yet.");
+        const saved = await createTask({ ...draft, reserved_id: reservedTaskId.id, reservation_token: reservedTaskId.token }, boardPath);
+        savedTask = saved;
         after = snapshotWithTask(before, saved);
         flashTaskActivity([{ id: saved.id, kind: "created" }]);
-        pushUndo({ kind: "board", label: "create task", before, after });
+        undoAction = "create task";
       } else if (editor.original) {
         const saved = await updateTask({ ...editor.original, ...draft }, boardPath);
+        savedTask = saved;
         // Completing a prerequisite can release other tasks from Blocked in
         // the shared core. Reload those automatic changes as part of this save.
         after = doneColumn && saved.column === doneColumn.id
           ? await loadBoard(boardPath) : snapshotWithTask(before, saved);
         const kind = classifyTaskChange(editor.original, saved);
         if (kind) flashTaskActivity([{ id: saved.id, kind }]);
-        pushUndo({ kind: "board", label: "edit task", before, after });
+        undoAction = "edit task";
       }
 
+      // Persist execution intent only after the task exists. Each write is revision-checked;
+      // a pending Start now ID is never retried or replaced after an uncertain result.
+      if (savedTask && !markDone && (savedTask.kind === "task" || savedTask.kind === "recurring")) {
+        if (withMeSelected !== (savedTask.live?.with_me === true)) {
+          savedTask = await taskLiveWithMe(savedTask.id, savedTask.revision, withMeSelected, boardPath);
+        }
+        const current = await taskExecutionIntent(savedTask.id, boardPath);
+        if (executionChoice === "start_now" && withMeSelected) {
+          // Live Start opens/focuses the one T3 session, never registers a second
+          // background/foreground job for the same click.
+          await openTaskSession(savedTask.id, boardPath);
+        } else if (executionChoice === "start_now") {
+          await taskRequestStartNow(savedTask.id, current.revision, boardPath);
+        } else if (executionChoice !== current.mode) {
+          await taskSetExecutionMode(savedTask.id, current.revision, executionChoice, boardPath);
+        }
+        // Core metadata writes change the revision outside the ordinary Task draft API.
+        after = await loadBoard(boardPath);
+      }
+      if (undoAction) pushUndo({ kind: "board", label: undoAction, before, after });
+      const syncWarning = savedTask ? await syncQueueWarning(savedTask.id) : null;
+      // The sync CAS may add a receipt, changing the revision: reload before
+      // delivering the local board view, rather than leaving a stale edit draft.
+      if (savedTask) after = await loadBoard(boardPath);
       applySnapshot(after);
       if (userQueueReview && editor.original?.id === userQueueReview.ids[userQueueReview.index]) {
         advanceUserQueue(after);
       } else {
         closeEditor(after);
       }
+      if (syncWarning) setError(syncWarning);
     });
 
   // Closing a task preserves edited fields; the follow-up starts in the same
@@ -1044,7 +1491,8 @@ function ProjectBoard({ project, onInteractionChange }: {
       const before = snapshot;
       const sourceColumn = editor.draft.column === doneColumn.id
         ? original.column : editor.draft.column;
-      const prepared = prepareTaskDraftForSave(editor.draft, descriptionUpdateInput, original.claimed_by);
+      const prepared = await withClipboardImages(
+        prepareTaskDraftForSave(editor.draft, "", original.claimed_by), original.id);
       const closed = await updateTask({
         ...original,
         ...prepared,
@@ -1069,8 +1517,10 @@ function ProjectBoard({ project, onInteractionChange }: {
         flashTaskActivity([{ id: original.id, kind: "moved" }]);
         throw new Error(`${original.id} was saved and moved to Done, but the follow-up could not be created: ${errorText(error)}`);
       }
+      const syncWarning = await syncQueueWarning(closed.id);
       const after = await loadBoard(boardPath);
       applySnapshot(after);
+      if (syncWarning) setError(syncWarning);
       flashTaskActivity([
         { id: closed.id, kind: "moved" },
         { id: followup.id, kind: "created" },
@@ -1080,6 +1530,41 @@ function ProjectBoard({ project, onInteractionChange }: {
       openEdit(followup);
     });
 
+  // Human authorization: return a blocked task to AI Ready through the normal
+  // update path. The core clears blocked_reason once the task is unblocked.
+  const authorizeUnblock = () =>
+    run(async () => {
+      if (!editor?.original || editor.mode !== "edit" || editor.draft.kind === "epic" || !snapshot) return;
+      if (!editor.draft.title.trim()) return;
+      const original = editor.original;
+      const before = snapshot;
+      const readyColumn = snapshot.config.columns.find((column) => column.id === "ai-ready" && !column.terminal)
+        ?? snapshot.config.columns.find((column) => column.ai_ready && !column.terminal && column.id !== "blocked");
+      if (!readyColumn) throw new Error("This board has no AI Ready column to unblock into.");
+      const prepared = await withClipboardImages(
+        prepareTaskDraftForSave(editor.draft, "", original.claimed_by), original.id);
+      const saved = await updateTask({
+        ...original,
+        ...prepared,
+        column: readyColumn.id,
+        attention: prepared.attention.filter((flag) => flag !== "blocked"),
+        blocked_reason: null,
+        position_after: null,
+        positioned_at: null,
+        description: appendDescriptionUpdates(prepared.description,
+          [{ kind: "user-note", text: AUTHORIZE_UNBLOCK_TEXT }]),
+      }, boardPath);
+      const after = snapshotWithTask(before, saved);
+      flashTaskActivity([{ id: saved.id, kind: "moved" }]);
+      pushUndo({ kind: "board", label: "authorize unblock", before, after });
+      applySnapshot(after);
+      if (userQueueReview && original.id === userQueueReview.ids[userQueueReview.index]) {
+        advanceUserQueue(after);
+      } else {
+        closeEditor(after);
+      }
+    });
+
   const chooseDraftKind = (kind: TaskDraft["kind"]) => {
     if (!editor) return;
     setEditor({
@@ -1087,6 +1572,8 @@ function ProjectBoard({ project, onInteractionChange }: {
       draft: {
         ...editor.draft,
         kind,
+        repeat_every_days: kind === "recurring" ? editor.draft.repeat_every_days : null,
+        next_due: kind === "recurring" ? editor.draft.next_due : null,
         parent: kind === "epic" ? null : editor.draft.parent,
         column: editor.mode === "create"
           ? kind === "epic" ? "draft" : kind === "for_user" ? "in-progress" : defaultCreateColumn() ?? editor.draft.column
@@ -1175,7 +1662,9 @@ function ProjectBoard({ project, onInteractionChange }: {
 
     try {
       await updateTask(optimistic, boardPath);
+      const syncWarning = await syncQueueWarning(id);
       const after = await loadBoard(boardPath);
+      if (syncWarning) setError(syncWarning);
       const saved = after.tasks.find((item) => item.id === id);
       if (saved) {
         const kind = classifyTaskChange(task, saved);
@@ -1324,6 +1813,10 @@ function ProjectBoard({ project, onInteractionChange }: {
     };
 
     const handleUp = (upEvent: MouseEvent) => {
+      const droppedProjectId = dragging
+        ? document.elementFromPoint(upEvent.clientX, upEvent.clientY)
+            ?.closest<HTMLElement>("[data-project-tab-id]")?.dataset.projectTabId
+        : null;
       const taskTargetId = dragging
         ? validDropTaskAt(upEvent.clientX, upEvent.clientY)
         : null;
@@ -1342,6 +1835,15 @@ function ProjectBoard({ project, onInteractionChange }: {
         return;
       }
 
+      if (droppedProjectId && droppedProjectId !== project.id) {
+        window.dispatchEvent(new CustomEvent("taskboard:project-transfer", {
+          detail: {
+            taskId: task.id, expectedRevision: task.revision,
+            sourceProjectId: project.id, destinationProjectId: droppedProjectId,
+          },
+        }));
+        return;
+      }
       if (taskTarget?.kind === "epic") {
         void makeSubtaskOf(task.id, taskTarget.id);
       } else if (taskTarget) {
@@ -1389,7 +1891,9 @@ function ProjectBoard({ project, onInteractionChange }: {
           hidden: false,
           snoozed_until: null,
           awake_until: null,
-          ai_ready: false,
+          ai_ready: !["draft", "done", "review", "blocked"].includes(id.toLowerCase()) &&
+            !["draft", "done", "review", "blocked"].includes(name.trim().toLowerCase()),
+          advisory: false,
           color: randomColumnColor(snapshot.config.columns.map((column) => column.color)),
         },
       ],
@@ -1511,7 +2015,7 @@ function ProjectBoard({ project, onInteractionChange }: {
     window.addEventListener("mouseup", handleUp, { once: true });
   };
 
-  const toggleColumnAiReady = (id: string) => {
+  const cycleColumnMode = (id: string) => {
     if (!snapshot) return;
     const column = snapshot.config.columns.find((item) => item.id === id);
     if (
@@ -1524,10 +2028,14 @@ function ProjectBoard({ project, onInteractionChange }: {
       {
         ...snapshot.config,
         columns: snapshot.config.columns.map((item) =>
-          item.id === id ? { ...item, ai_ready: !item.ai_ready } : item,
+          item.id === id ? {
+            ...item,
+            ai_ready: !item.ai_ready && !item.advisory,
+            advisory: item.ai_ready ? true : false,
+          } : item,
         ),
       },
-      "toggle AI-ready column",
+      "cycle column Off / AI Ready / Advisory",
     );
   };
 
@@ -1645,9 +2153,12 @@ function ProjectBoard({ project, onInteractionChange }: {
       if (!snapshot) return;
       const before = snapshot;
       const archived = await archiveTask(task.id, boardPath);
-      const after = snapshotWithTask(before, archived);
+      let after = snapshotWithTask(before, archived);
+      const syncWarning = await syncQueueWarning(archived.id);
+      after = await loadBoard(boardPath);
       pushUndo({ kind: "board", label: "archive task", before, after });
       applySnapshot(after);
+      if (syncWarning) setError(syncWarning);
       setContextMenu(null);
       if (editor?.original?.id === task.id) {
         if (userQueueReview) advanceUserQueue(after);
@@ -1759,6 +2270,10 @@ function ProjectBoard({ project, onInteractionChange }: {
     : undefined;
   const doneColumn = columns.find((column) => column.id === "done" && column.terminal)
     ?? columns.find((column) => column.terminal);
+  const isAdvisoryEditor = !!editor && columns.some((column) =>
+    column.id === editor.draft.column && column.advisory);
+  const isQueueCompact = !!editor && !queueExpanded && !!userQueueReview &&
+    editor.original?.id === userQueueReview.ids[userQueueReview.index];
   const openMoveSubmenu = (event: React.MouseEvent<HTMLButtonElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
     const width = 240;
@@ -1770,11 +2285,57 @@ function ProjectBoard({ project, onInteractionChange }: {
     });
   };
 
+  const navigateTaskCards = (direction: "up" | "down" | "left" | "right") => {
+    const board = boardRef.current;
+    if (!board) return;
+    const cards = [...board.querySelectorAll<HTMLElement>(".task-card[data-task-id]")];
+    if (!cards.length) return;
+    const current = cards.find((card) => card.dataset.taskId === keyboardSelectedTaskId);
+    let target = current ?? cards[0];
+    if (current) {
+      const column = current.closest<HTMLElement>(".column[data-column-id]");
+      const siblings = column
+        ? [...column.querySelectorAll<HTMLElement>(".task-card[data-task-id]")] : [];
+      if (direction === "up" || direction === "down") {
+        const index = siblings.indexOf(current);
+        target = siblings[Math.max(0, Math.min(siblings.length - 1,
+          index + (direction === "down" ? 1 : -1)))] ?? current;
+      } else {
+        const columnEls = [...board.querySelectorAll<HTMLElement>(".column[data-column-id]")];
+        const index = column ? columnEls.indexOf(column) : -1;
+        const delta = direction === "right" ? 1 : -1;
+        const midY = current.getBoundingClientRect().top + current.offsetHeight / 2;
+        for (let nextIndex = index + delta; nextIndex >= 0 && nextIndex < columnEls.length; nextIndex += delta) {
+          const candidates = [...columnEls[nextIndex].querySelectorAll<HTMLElement>(".task-card[data-task-id]")];
+          if (!candidates.length) continue;
+          target = candidates.reduce((best, candidate) => {
+            const distance = (item: HTMLElement) =>
+              Math.abs(item.getBoundingClientRect().top + item.offsetHeight / 2 - midY);
+            return distance(candidate) < distance(best) ? candidate : best;
+          });
+          break;
+        }
+      }
+    }
+    setKeyboardSelectedTaskId(target.dataset.taskId ?? null);
+    setHoverTask(null);
+    target.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
+  };
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase();
+      const editingTarget = event.target instanceof Element &&
+        !!event.target.closest("input, textarea, select, [contenteditable], [role='textbox']");
+      const controlTarget = event.target instanceof Element &&
+        !!event.target.closest("button, [role='button']");
 
       if (event.key === "Escape") {
+        if (taskDumpOpen && !busy) {
+          event.preventDefault();
+          setTaskDumpOpen(false);
+          return;
+        }
         if (contextMenu || columnContextMenu) {
           event.preventDefault();
           setContextMenu(null);
@@ -1784,22 +2345,86 @@ function ProjectBoard({ project, onInteractionChange }: {
         }
         if (editor && !busy) {
           event.preventDefault();
-          closeEditor();
+          if (doneMenuOpen) setDoneMenuOpen(false);
+          else closeEditor();
+          return;
+        }
+      }
+
+      if (taskDumpOpen || busy) return;
+      if (editor) {
+        if (event.ctrlKey && !event.altKey && key === "tab") {
+          event.preventDefault();
+          if (!(editor.mode === "edit" && editor.original?.kind === "epic" && childCounts.has(editor.original.id))) {
+            chooseDraftKind(editor.draft.kind === "epic" ? "task" : "epic");
+          }
+          return;
+        }
+        if (event.ctrlKey && !event.altKey && key === "u" && editor.draft.kind !== "epic") {
+          event.preventDefault();
+          chooseDraftKind(isForUser(editor.draft) ? "task" : "for_user");
+          return;
+        }
+        if (event.ctrlKey && !event.altKey && key === "enter") {
+          event.preventDefault();
+          void saveEditor(editor.mode === "edit" && editor.draft.kind !== "epic");
+          return;
+        }
+        if ((!event.ctrlKey && !event.altKey && key === "enter" && !event.shiftKey && !event.isComposing &&
+            !controlTarget && !(event.target instanceof Element && event.target.closest("textarea, [contenteditable]"))) ||
+            (event.ctrlKey && !event.altKey && key === "s")) {
+          event.preventDefault();
+          void saveEditor();
+        }
+        return;
+      }
+
+      if (!event.ctrlKey && !event.metaKey && !event.altKey && !editingTarget && !controlTarget &&
+          !reviewOpen) {
+        const directions: Record<string, "up" | "down" | "left" | "right"> = {
+          arrowup: "up", w: "up", arrowdown: "down", s: "down",
+          arrowleft: "left", a: "left", arrowright: "right", d: "right",
+        };
+        if (directions[key]) {
+          event.preventDefault();
+          navigateTaskCards(directions[key]);
+          return;
+        }
+        if ((key === " " || key === "spacebar") && keyboardSelectedTaskId) {
+          const selected = taskMap.get(keyboardSelectedTaskId);
+          if (selected) { event.preventDefault(); openEdit(selected); }
           return;
         }
       }
 
       if (!event.ctrlKey || event.altKey) return;
-
-      if (key === "t") {
+      if (key === " " || key === "spacebar") {
         event.preventDefault();
-        if (!editor) openCreate();
+        openCreate();
         return;
       }
-
-      if (key === "s" || (event.key === "Enter" && editor)) {
+      if (key === "r") {
         event.preventDefault();
-        if (editor) void saveEditor();
+        setReviewOpen((current) => !current);
+        return;
+      }
+      if (key === "k") {
+        event.preventDefault();
+        document.querySelector<HTMLInputElement>(".search-wrap input")?.focus();
+        return;
+      }
+      if (key === "q") {
+        event.preventDefault();
+        startUserQueue();
+        return;
+      }
+      if (key === "t") {
+        event.preventDefault();
+        openCreate();
+        return;
+      }
+      if (key === "s") {
+        event.preventDefault();
         return;
       }
 
@@ -1813,7 +2438,8 @@ function ProjectBoard({ project, onInteractionChange }: {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [editor, busy, contextMenu, columnContextMenu, snapshot, boardPath, undoCount]);
+  }, [editor, taskDumpOpen, busy, contextMenu, columnContextMenu, snapshot, boardPath,
+      undoCount, reviewOpen, keyboardSelectedTaskId, query, userQueueTasks, childCounts, doneMenuOpen]);
 
   useEffect(() => {
     if (!contextMenu && !columnContextMenu) return;
@@ -1841,31 +2467,43 @@ function ProjectBoard({ project, onInteractionChange }: {
         if (columnContextMenu) setColumnContextMenu(null);
       }}
     >
+      {releasesOpen && <ReleaseCenter boardPath={boardPath} enabled={snapshot.config.releases_enabled ?? false} onClose={() => { setReleasesOpen(false); void refresh(boardPath, false); }} />}
+      {reviewNotice ? <div className="review-reconciliation-notice" role="status">{reviewNotice}</div> : null}
       <header className="topbar">
         <div>
-          <div className="eyebrow">TASKBOARD · {project.name.toUpperCase()}</div>
           <h1>{snapshot.config.name}</h1>
         </div>
         <div className="toolbar">
+          <div className="review-mode-switch" role="group" aria-label="TaskBoard view">
+            <button type="button" className={reviewOpen ? "button secondary" : "button primary"}
+              onClick={() => setReviewOpen(false)}>Board</button>
+            <button type="button" className={reviewOpen ? "button primary" : "button secondary"}
+              onClick={() => setReviewOpen(true)} disabled={!!editor}
+              title="Open unified feedback inbox: visual reviews and For user quick replies (Ctrl+R)">
+              Inbox <span className="review-mode-count">{activeTasks.filter((task) => task.review_status === "open").length + userQueueTasks.length}</span>
+            </button>
+          </div>
           <div className="search-wrap">
             <span>⌕</span>
             <input
               value={query}
               onChange={(event) => setQuery(event.currentTarget.value)}
               placeholder="Search tasks"
+              aria-label="Search tasks"
+              title="Focus search (Ctrl+K)"
+              onKeyDown={(event) => { if (event.key === "Escape") setQuery(""); }}
             />
+            {query && <button type="button" className="search-clear" aria-label="Clear task search"
+              title="Clear filter (Esc)" onClick={() => setQuery("")}>×</button>}
           </div>
-          <button
-            type="button"
-            className="button user-queue-button"
-            onClick={startUserQueue}
-            disabled={busy || userQueueTasks.length === 0}
-            title={userQueueTasks.length
-              ? "Review pending For user tasks, newest first. Snoozed tasks return after 24 hours."
-              : "No pending For user tasks (snoozed tasks will return automatically)."}
-          >
-            User queue <span className="user-queue-count">{userQueueTasks.length}</span>
-          </button>
+          <details className="toolbar-more">
+            <summary className="button secondary" title="More TaskBoard actions">More ▾</summary>
+            <div className="toolbar-more-menu">
+              <button type="button" className="button secondary" onClick={startUserQueue}
+                disabled={busy || userQueueTasks.length === 0}
+                title="Direct For user quick-reply queue (Ctrl+Q)">
+                For user · {userQueueTasks.length}
+              </button>
           <button
             className="button secondary epic-collapse-all"
             onClick={toggleAllEpicsCollapsed}
@@ -1888,17 +2526,26 @@ function ProjectBoard({ project, onInteractionChange }: {
           </button>
           <button
             className="button secondary"
-            onClick={() => void refresh(boardPath, false)}
+            onClick={() => window.dispatchEvent(new Event("taskboard:refresh-all"))}
             disabled={busy || refreshFeedback === "working"}
-            title="Reload the latest tasks from Markdown files"
+            title="Refresh all project boards from Markdown files (F5)"
           >
             {refreshFeedback === "working" ? "Refreshing…" : refreshFeedback === "done" ? "✓ Updated" : "Refresh"}
           </button>
-          <button className="button primary" onClick={() => openCreate()} disabled={busy}>
+          <button className="button secondary" onClick={addColumn} disabled={busy}
+            title="Add a new TaskBoard column">
+            + Column
+          </button>
+            </div>
+          </details>
+          <button className="button secondary" onClick={() => setReleasesOpen(true)} disabled={busy}>Releases</button>
+          <button className="button primary" onClick={() => openCreate()} disabled={busy}
+            title="Create a task (Ctrl+Space or Ctrl+T)">
             + Task
           </button>
-          <button className="button secondary" onClick={addColumn} disabled={busy}>
-            + Column
+          <button className="button secondary" onClick={() => openTaskDump()} disabled={busy || !!editor}
+            title="Paste one task per line (Ctrl+V on the board also opens Task Dump).">
+            Task Dump
           </button>
         </div>
       </header>
@@ -1918,6 +2565,7 @@ function ProjectBoard({ project, onInteractionChange }: {
 
       <section
         className="board"
+        style={reviewOpen ? { display: "none" } : undefined}
         ref={boardRef}
         onPointerDown={startBoardPan}
         onPointerMove={moveBoardPan}
@@ -1926,8 +2574,11 @@ function ProjectBoard({ project, onInteractionChange }: {
         onContextMenu={(event) => event.preventDefault()}
       >
         {columns.map((column) => {
-          const columnTasks = orderCardsByDependencies(applyCardPlacements(visibleTasks
-            .filter((task) => task.column === column.id)
+          const allColumnTasks = visibleTasks.filter((task) => task.column === column.id);
+          const inReviewCount = column.id === "blocked"
+            ? allColumnTasks.filter(isInReviewInbox).length : 0;
+          const columnTasks = orderCardsByDependencies(applyCardPlacements(allColumnTasks
+            .filter((task) => !(column.id === "blocked" && hideBlockedInboxTasks && isInReviewInbox(task)))
             .sort((a, b) => column.terminal
               ? completedSortTime(b) - completedSortTime(a) || b.id.localeCompare(a.id)
               : attentionRank(a) - attentionRank(b) ||
@@ -1982,6 +2633,15 @@ function ProjectBoard({ project, onInteractionChange }: {
               style={columnStyle}
               onContextMenu={(event) => openColumnMenu(event, column.id)}
             >
+              {column.id === "blocked" && (
+                <label className="blocked-review-filter" title="Hide blocked tasks currently awaiting your attention in Inbox. Tasks are not modified.">
+                  <input type="checkbox" checked={hideBlockedInboxTasks}
+                    onChange={(event) => setHideBlockedInboxTasks(event.currentTarget.checked)}
+                    onPointerDown={(event) => event.stopPropagation()} />
+                  <span>Hide tasks in Inbox</span>
+                  <small>{inReviewCount}</small>
+                </label>
+              )}
               <div
                 className="column-header"
                 onMouseDown={(event) => beginColumnDrag(event, column)}
@@ -1999,20 +2659,24 @@ function ProjectBoard({ project, onInteractionChange }: {
                   onPointerDown={(event) => event.stopPropagation()}
                   onMouseDown={(event) => event.stopPropagation()}
                 >
+                  <button type="button" className="column-quick-add" title={`Add task to ${column.name}`}
+                    aria-label={`Add task to ${column.name}`} onClick={() => openCreate(column.id)}>+</button>
                   {column.id !== "draft" && !column.terminal && (
                     <button
-                      className={`column-ai-ready ${column.ai_ready ? "active" : ""}`}
+                      className={`column-ai-ready ${column.advisory ? "advisory" : column.ai_ready ? "active" : ""}`}
                       title={
                         column.id === "ai-ready"
                           ? "Canonical AI Ready column"
                           : column.ai_ready
-                            ? "Tasks in this column are AI-ready"
-                            : "Mark this column as AI-ready"
+                            ? "AI Ready (green) — click for Advisory (yellow)"
+                            : column.advisory
+                              ? "Advisory: temporary instructions shown to all board agents — click for Off"
+                              : "Off — click for AI Ready (green)"
                       }
                       disabled={column.id === "ai-ready"}
-                      onClick={() => toggleColumnAiReady(column.id)}
+                      onClick={() => cycleColumnMode(column.id)}
                     >
-                      ✓
+                      {column.advisory ? "!" : "✓"}
                     </button>
                   )}
                   <button title="Collapse column" onClick={() => toggleColumnHidden(column.id)}>│</button>
@@ -2052,7 +2716,7 @@ function ProjectBoard({ project, onInteractionChange }: {
                   const depth = depthOf(task);
                   return (
                     <article
-                      className={`task-card ${task.kind === "epic" ? "epic-card" : isForUser(task) ? "for-user-card" : ""} ${highlightedEpicId === task.id ? "epic-proxy-highlight" : ""} ${dragId === task.id ? "drag-source" : ""} ${
+                      className={`task-card ${keyboardSelectedTaskId === task.id ? "keyboard-selected" : ""} ${task.kind === "epic" ? "epic-card" : isForUser(task) ? "for-user-card" : task.kind === "recurring" ? "recurring-card" : ""} ${task.attention.includes("priority") ? "priority-card" : ""} ${highlightedEpicId === task.id ? "epic-proxy-highlight" : ""} ${dragId === task.id ? "drag-source" : ""} ${
                         cardDropTargetId === task.id ? (task.kind === "epic" ? "drop-parent-target" : "drop-after-target") : ""
                       } ${
                         taskActivity[task.id]
@@ -2065,7 +2729,7 @@ function ProjectBoard({ project, onInteractionChange }: {
                         ? `Recently ${recentTaskActivity[task.id].kind} at ${new Date(recentTaskActivity[task.id].at).toLocaleTimeString()} (highlighted for 10 minutes)`
                         : undefined}
                       style={{ marginLeft: Math.min(depth, 4) * 12 }}
-                      onMouseDown={(event) => beginCardDrag(event, task)}
+                      onMouseDown={(event) => { setKeyboardSelectedTaskId(task.id); beginCardDrag(event, task); }}
                       onContextMenu={(event) => {
                         event.preventDefault();
                         event.stopPropagation();
@@ -2082,6 +2746,8 @@ function ProjectBoard({ project, onInteractionChange }: {
                     >
                       <div className="task-title-row">
                         {isForUser(task) && <span className="for-user-badge" title="Requires user input. Legacy NeedsUser flags are displayed here too.">FOR USER</span>}
+                        {task.kind === "recurring" && <span className="recurring-badge"
+                          title={task.next_due ? `Next run ${task.next_due}; ${task.run_count ?? 0} completed` : "Recurring: available after each recorded run"}>↻ {task.next_due || "RECURRING"}</span>}
                         <span className="task-card-id" title={task.kind === "epic" ? "Epic (non-executable)" : isForUser(task) ? "For user (human input)" : "Executable task"}>{task.id}</span>
                         {task.kind === "epic" && childCounts.has(task.id) && (
                           <button
@@ -2111,6 +2777,22 @@ function ProjectBoard({ project, onInteractionChange }: {
                           </span>
                         )}
                         <h3><TitleMarkup title={task.title} /></h3>
+                        {task.claimed_by && (
+                          <button type="button" className="task-more-button"
+                            aria-label={`More actions for ${task.id}`}
+                            title="Task actions, including open claimed T3 session"
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              const rect = event.currentTarget.getBoundingClientRect();
+                              setContextMenu({
+                                taskId: task.id,
+                                x: Math.min(rect.right, window.innerWidth - 240),
+                                y: Math.min(rect.bottom, window.innerHeight - 410),
+                              });
+                            }}>···</button>
+                        )}
                         {task.kind === "task" && !isForUser(task) && (
                           <span className={`readiness-badge ${readinessOf(task)}`}
                             title={readinessOf(task) === "waiting" ? `Waiting for ${waitingFor(task).join(", ")}` : readinessOf(task) === "ready" ? "Ready to start" : "Blocked"}
@@ -2129,6 +2811,9 @@ function ProjectBoard({ project, onInteractionChange }: {
                             {task.attention.includes("blocked") && (
                               <span className="attention-icon blocked" title="Blocked">×</span>
                             )}
+                            {task.attention.includes("priority") && (
+                              <span className="attention-icon priority" title="Priority — handle before ordinary ready tasks" aria-label="Priority">!</span>
+                            )}
                           </div>
                         )}
                       </div>
@@ -2144,15 +2829,37 @@ function ProjectBoard({ project, onInteractionChange }: {
                 })}
               </div>
 
-              <button className="quick-add" onClick={() => openCreate(column.id)}>
-                + Add task
-              </button>
             </div>
           );
         })}
       </section>
 
-      {!editor && <DependencyArrows boardRef={boardRef} visibleTasks={visibleTasks}
+      {reviewOpen && <div className="review-unified-backdrop" role="dialog" aria-modal="true"
+          aria-label="Unified human feedback queue">
+          <ReviewView project={project} onClose={() => setReviewOpen(false)} initialTaskId={requestedReviewId}
+            userTasks={userQueueTasks}
+            onUserTaskUpdated={(notice) => {
+              if (notice) setReviewNotice(notice);
+              void loadBoard(boardPath).then(applySnapshot).catch((cause) => setError(String(cause)));
+            }}
+            onSnoozeUserTask={(task, path, until) => {
+              if (path === boardPath) {
+                setUserQueueSnoozes((current) => ({
+                  ...current, [task.id]: until,
+                }));
+              }
+            }}
+            onOpenUserTask={(task) => {
+              const ids = userQueueTasks.map((value) => value.id);
+              const index = ids.indexOf(task.id);
+              if (index < 0) return;
+              setReviewOpen(false);
+              setUserQueueReview({ ids, index });
+              openEdit(task, true);
+            }} />
+        </div>}
+
+      {!reviewOpen && !editor && <DependencyArrows boardRef={boardRef} visibleTasks={visibleTasks}
         columns={columns} layoutKey={dependencyLayoutKey} />}
 
       {columnDragPreview && (
@@ -2224,12 +2931,13 @@ function ProjectBoard({ project, onInteractionChange }: {
           {hoverTask.task.description.trim() && (
             <section className="hover-preview-section">
               <strong>Task description</strong>
-              <p>{parseDescriptionTimeline(hoverTask.task.description).initial}</p>
+              <MarkdownText text={parseDescriptionTimeline(hoverTask.task.description).initial} />
               {parseDescriptionTimeline(hoverTask.task.description).updates.map((update, index) => (
-                <div className="hover-description-update" key={index}>
+                <div className={`hover-description-update ${update.kind}`} key={index}>
                   <small>{update.kind === "user-note" ? "Note to AI" :
-                    update.kind === "legacy-ai" ? "Imported AI notes" : "Task update"} · {new Date(update.at).toLocaleString()}</small>
-                  <p>{update.text}</p>
+                    update.kind === "legacy-ai" ? "Imported AI notes" :
+                    update.kind === "blocked" ? "Blocked" : "Task update"} · {new Date(update.at).toLocaleString()}</small>
+                  <MarkdownText text={update.text} />
                 </div>
               ))}
             </section>
@@ -2237,31 +2945,32 @@ function ProjectBoard({ project, onInteractionChange }: {
           {!!hoverTask.task.acceptance_criteria.length && (
             <section className="hover-preview-section">
               <strong>Acceptance criteria</strong>
-              <ul>{hoverTask.task.acceptance_criteria.map((criterion, index) => <li key={index}>{criterion}</li>)}</ul>
+              <ul>{hoverTask.task.acceptance_criteria.map((criterion, index) =>
+                <li key={index}><MarkdownText text={criterion} /></li>)}</ul>
             </section>
           )}
           {hoverTask.task.question && (
             <section className="hover-preview-section">
               <strong>Question {hoverTask.task.question.answer ? "(answered)" : "(open)"}</strong>
-              <p>{hoverTask.task.question.prompt}</p>
+              <MarkdownText text={hoverTask.task.question.prompt} />
             </section>
           )}
           {hoverTask.task.user_notes.trim() && (
             <section className="hover-preview-section user">
               <strong>User notes</strong>
-              <p>{hoverTask.task.user_notes}</p>
+              <MarkdownText text={hoverTask.task.user_notes} />
             </section>
           )}
           {hoverTask.task.ai_notes.trim() && (
             <section className="hover-preview-section ai">
               <strong>Historical AI notes (moved to timeline on next save)</strong>
-              <p>{hoverTask.task.ai_notes}</p>
+              <MarkdownText text={hoverTask.task.ai_notes} />
             </section>
           )}
           {hoverTask.task.notes.trim() && (
             <section className="hover-preview-section">
               <strong>Notes</strong>
-              <p>{hoverTask.task.notes}</p>
+              <MarkdownText text={hoverTask.task.notes} />
             </section>
           )}
         </aside>
@@ -2281,6 +2990,17 @@ function ProjectBoard({ project, onInteractionChange }: {
           >
             Edit task
           </button>
+          {contextTask.claimed_by && (
+            <button disabled={busy} onClick={() => {
+              const claimedBy = contextTask.claimed_by!;
+              setContextMenu(null);
+              void run(async () => {
+                await openClaimedT3Session(claimedBy);
+              });
+            }} title="Focus T3; restore the exact saved conversation if the original session was closed">
+              Open claimed T3 session
+            </button>
+          )}
           {contextTask.kind === "epic" && <button
             onClick={() => {
               setContextMenu(null);
@@ -2306,6 +3026,21 @@ function ProjectBoard({ project, onInteractionChange }: {
           {contextTask.kind !== "epic" && (
             <>
               <div className="context-separator" />
+              <button
+                disabled={busy}
+                className="priority-context-action"
+                aria-pressed={contextTask.attention.includes("priority")}
+                onClick={() => {
+                  const id = contextTask.id;
+                  setContextMenu(null);
+                  void persistTaskMutation(id, "toggle priority", (task) => ({
+                    ...task,
+                    attention: task.attention.includes("priority")
+                      ? task.attention.filter((flag) => flag !== "priority")
+                      : [...task.attention, "priority"],
+                  }));
+                }}
+              >{contextTask.attention.includes("priority") ? "✓ Remove priority" : "! Mark priority"}</button>
               <button
                 disabled={busy || !doneColumn || contextTask.column === doneColumn.id}
                 onClick={() => {
@@ -2444,51 +3179,201 @@ function ProjectBoard({ project, onInteractionChange }: {
         </div>
       )}
 
+      {taskDumpOpen && (
+        <div className="modal-backdrop" onMouseDown={() => { if (!busy) setTaskDumpOpen(false); }}>
+          <section className="task-modal task-dump-modal" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <div>
+                <div className="eyebrow">BATCH CREATE · {project.name.toUpperCase()}</div>
+                <h2>Task Dump</h2>
+              </div>
+              <button type="button" className="icon-button" aria-label="Close Task Dump"
+                onClick={() => setTaskDumpOpen(false)} disabled={busy}>×</button>
+            </div>
+            <p className="task-dump-help">Enter one task per line. Check priority beside any line before generating.</p>
+            <textarea className="task-dump-input" aria-label="Task Dump input" autoFocus
+              value={taskDumpText} disabled={busy}
+              placeholder={"Fix pathfinding on rivers\nImprove minimap readability\nAdd more detailed combat logs"}
+              onChange={(event) => setTaskDumpText(event.currentTarget.value)} />
+            <div className="task-dump-preview" aria-label="Tasks to create">
+              {taskDumpRows.length ? taskDumpRows.map((row) => (
+                <div className="task-dump-row" key={row.line}>
+                  <label className="task-dump-priority" title="Mark this generated task as priority">
+                    <input type="checkbox" disabled={busy}
+                      checked={!!taskDumpPriorities[row.line]}
+                      onChange={(event) => setTaskDumpPriorities((current) => ({
+                        ...current, [row.line]: event.currentTarget.checked,
+                      }))} />
+                    Priority
+                  </label>
+                  <span>{row.text}</span>
+                </div>
+              )) : <span className="task-dump-empty">Paste or type tasks above to preview them here.</span>}
+            </div>
+            {error && <div className="error-banner">{error}</div>}
+            <div className="task-dump-footer">
+              <span>{taskDumpRows.length} task{taskDumpRows.length === 1 ? "" : "s"} · {taskDumpRows.filter((row) => taskDumpPriorities[row.line]).length} priority</span>
+              <div className="spacer" />
+              <button type="button" className="button secondary" disabled={busy}
+                onClick={() => setTaskDumpOpen(false)}>Cancel</button>
+              <button type="button" className="button primary" disabled={busy || !taskDumpRows.length}
+                onClick={() => void generateTaskDump()}>{busy ? "Generating…" : "Generate"}</button>
+            </div>
+          </section>
+        </div>
+      )}
+
       {editor && (
-        <div className="modal-backdrop" onMouseDown={() => !busy && closeEditor()}>
-          <section className="task-modal" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-backdrop task-editor-backdrop" onMouseDown={() => !busy && closeEditor()}>
+          <section ref={editorModalRef}
+            className={`task-modal ${isAdvisoryEditor ? "advisory-editor" : ""} ${isQueueCompact ? "queue-compact-modal" : ""} ${fileDropActive ? "file-drop-active" : ""}`}
+            onMouseDown={(event) => {
+              event.stopPropagation();
+              if (!(event.target as HTMLElement).closest(".editor-finish-menu")) setDoneMenuOpen(false);
+            }} onPaste={pasteClipboardImages}>
+            {fileDropActive && <div className="editor-file-drop-hint">Drop to add file paths to Description</div>}
             <div className="modal-header">
               <div className="eyebrow">
-                {editor.mode === "edit" ? editor.original?.id : "NEW TASK"}
+                {editor.mode === "edit" ? editor.original?.id : reservedTaskId ? (
+                  <button type="button" className="reserved-id-copy" title="Click to copy this task ID" onClick={() => void copyTaskText(reservedTaskId.id)} onContextMenu={(event) => { event.preventDefault(); void copyTaskText(reservedTaskId.id); }}>{reservedTaskId.id} ⧉</button>
+                ) : "RESERVING ID…"}
                 {userQueueReview && editor.original?.id === userQueueReview.ids[userQueueReview.index] && (
                   <span className="user-queue-progress">
                     USER QUEUE · {userQueueReview.index + 1} / {userQueueReview.ids.length}
                   </span>
                 )}
               </div>
-              <div className="task-kind-switch" role="group" aria-label="Card type">
-                <div className="task-kind-switch-options">
+              {!isAdvisoryEditor && <div className="task-kind-switch" role="group" aria-label="Card type">
+                {!isQueueCompact && <div className="task-kind-switch-options">
                   <button type="button"
-                    className={`kind-option${editor.draft.kind !== "epic" ? " active" : ""}`}
-                    aria-pressed={editor.draft.kind !== "epic"}
+                    className={`kind-option${editor.draft.kind === "task" || editor.draft.kind === "for_user" ? " active" : ""}`}
+                    aria-pressed={editor.draft.kind === "task" || editor.draft.kind === "for_user"}
                     disabled={editor.mode === "edit" && editor.original?.kind === "epic" && childCounts.has(editor.original.id)}
+                    title="Toggle Task/Epic (Ctrl+Tab)"
                     onClick={() => chooseDraftKind("task")}>Task</button>
                   <button type="button"
                     className={`kind-option${editor.draft.kind === "epic" ? " active epic" : ""}`}
                     aria-pressed={editor.draft.kind === "epic"}
+                    title="Toggle Task/Epic (Ctrl+Tab)"
                     onClick={() => chooseDraftKind("epic")}>Epic</button>
-                </div>
+                  <button type="button"
+                    className={`kind-option${editor.draft.kind === "recurring" ? " active recurring" : ""}`}
+                    aria-pressed={editor.draft.kind === "recurring"}
+                    title="Repeating work item: completion records a run and reopens it"
+                    onClick={() => chooseDraftKind("recurring")}>↻ Recurring</button>
+                </div>}
                 {editor.draft.kind !== "epic" && <button type="button"
                   className={`kind-user-option${isForUser(editor.draft) ? " active" : ""}`}
                   aria-pressed={isForUser(editor.draft)}
+                  title="Toggle For user (Ctrl+U)"
                   onClick={() => chooseDraftKind(editor.draft.kind === "for_user" || editor.draft.attention.includes("needs-user") ? "task" : "for_user")}>
                     {isForUser(editor.draft) ? "●" : "○"} For user
                 </button>}
-              </div>
+              </div>}
+              {editor.mode === "edit" && editor.original?.kind !== "epic" && editor.original?.claimed_by && (() => {
+                // Opens the claimant's exact T3 session; IPC only accepts a bare or t3-browser: prefixed UUID.
+                const claimedBy = editor?.original?.claimed_by ?? "";
+                const sessionLinked = /^(t3-browser:)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(claimedBy);
+                return (
+                  <button type="button" className="button secondary" disabled={busy || !sessionLinked}
+                    title={sessionLinked ? "Focus T3; restore the exact saved conversation if the original session was closed" : "No verified T3 session link for this task"}
+                    onClick={() => void run(async () => { await openClaimedT3Session(claimedBy); })}>
+                    Open Session
+                  </button>
+                );
+              })()}
               <button className="icon-button" aria-label="Close editor" onClick={() => closeEditor()} disabled={busy}>×</button>
             </div>
 
-            <input
+            {isQueueCompact ? (
+              <h2 className="queue-compact-title">{editor.draft.title}</h2>
+            ) : <input
               className="task-title-input"
               autoFocus
               aria-label="Title"
+              onKeyDown={(event) => {
+                if (event.key !== "Tab" || event.shiftKey || event.ctrlKey || event.metaKey) return;
+                const description = event.currentTarget.closest(".task-modal")
+                  ?.querySelector<HTMLTextAreaElement>("textarea.description-initial");
+                if (!description) return;
+                event.preventDefault();
+                description.focus();
+              }}
               placeholder={editor.draft.kind === "epic" ? "Epic title" : "Task title"}
               value={editor.draft.title}
               onChange={(event) =>
                 setEditor({ ...editor, draft: { ...editor.draft, title: event.currentTarget.value } })
               }
-            />
+            />}
 
+            {isQueueCompact ? (
+              <div className="queue-compact-fields">
+                <div className="queue-compact-summary">
+                  {parseDescriptionTimeline(editor.draft.description).initial.slice(0, 550)
+                    || "Your response will be recorded on this task."}
+                </div>
+                {editor.draft.question?.prompt && !editor.draft.question.answer && (
+                  <div className="question-panel">
+                    <strong>{editor.draft.question.prompt}</strong>
+                    <div className="question-options">
+                      {editor.draft.question.options.map((option) =>
+                        <button className="question-option" key={option} onClick={() => void answerQuestion(option)}
+                          disabled={busy}>{option}</button>)}
+                    </div>
+                  </div>
+                )}
+                <label>Note to AI
+                  <AutoTextarea minRows={5} placeholder="Your instructions or decision..."
+                    value={editor.draft.user_notes} onChange={(event) => setEditor((current) => {
+                      if (!current) return null;
+                      const note = event.currentTarget.value;
+                      return { ...current, draft: {
+                        ...current.draft,
+                        user_notes: note,
+
+                      } };
+                    })} />
+                </label>
+                <MarkdownPreviewToggle text={editor.draft.user_notes} />
+                <label>Acceptance criteria
+                  <AutoTextarea minRows={3} placeholder="One per line"
+                    value={editor.draft.acceptance_criteria.join("\n")}
+                    onChange={(event) => setEditor((current) => current ? {
+                      ...current, draft: {
+                        ...current.draft,
+                        acceptance_criteria: event.currentTarget.value.split("\n"),
+                      },
+                    } : current)} />
+                </label>
+                <MarkdownPreviewToggle text={editor.draft.acceptance_criteria.join("\n\n")} />
+                <div className="queue-compact-actions">
+                  <button className="button secondary" type="button"
+                    onClick={() => setQueueExpanded(true)}>Full task editor ↗</button>
+                  <button className="button secondary" type="button"
+                    onClick={() => { closeEditor(); setReviewOpen(true); }}>Visual reviews ↗</button>
+                </div>
+              </div>
+            ) : isAdvisoryEditor ? (
+              <div className="advisory-fields">
+                <p>Advisory — a temporary notice shown to all agents working on this board. Moving it to Done deletes the notice; Draft hides it from agent discovery.</p>
+                <label>Column
+                  <select value={editor.draft.column} onChange={(event) =>
+                    setEditor({ ...editor, draft: { ...editor.draft, column: event.currentTarget.value } })}>
+                    {columns.map((column) => <option key={column.id} value={column.id}>{column.name}</option>)}
+                  </select>
+                </label>
+                <label>Advisory content
+                  <AutoTextarea minRows={6} placeholder="Temporary instructions, deadlines or pause notices…"
+                    value={parseDescriptionTimeline(editor.draft.description).initial}
+                    onChange={(event) => setEditor((current) => current ? {
+                      ...current,
+                      draft: { ...current.draft,
+                        description: updateInitialDescription(current.draft.description, event.currentTarget.value),
+                      },
+                    } : current)} />
+                </label>
+              </div>
+            ) : (<>
             {editor.mode === "edit" &&
               editor.original &&
               editor.draft.kind !== "epic" &&
@@ -2544,6 +3429,28 @@ function ProjectBoard({ project, onInteractionChange }: {
                 <p>{editor.draft.question.answer}</p>
               </section>
             )}
+
+            {editor.draft.kind === "recurring" && <div className="recurring-fields">
+              <label>Repeat every (days, optional)
+                <input type="number" min="1" max="3650" step="1"
+                  placeholder="Immediately after completion"
+                  value={editor.draft.repeat_every_days ?? ""}
+                  onChange={(event) => setEditor({ ...editor, draft: {
+                    ...editor.draft, repeat_every_days: event.currentTarget.value === ""
+                      ? null : Number(event.currentTarget.value),
+                  } })} />
+              </label>
+              <label>Next eligible date (optional)
+                <input type="date"
+                  value={editor.draft.next_due ?? ""}
+                  onChange={(event) => setEditor({ ...editor, draft: {
+                    ...editor.draft, next_due: event.currentTarget.value || null,
+                  } })} />
+              </label>
+              <span className="recurring-history">Recorded runs: {editor.original?.run_count ?? 0}
+                {editor.original?.last_run_at ? ` · Last: ${editor.original.last_run_at.slice(0, 10)}` : ""}
+                <br />Completing records a run and returns this task to AI Ready.</span>
+            </div>}
 
             <div className={`form-grid ${editor.draft.kind === "epic" ? "two" : "three"}`}>
               <label>
@@ -2605,14 +3512,21 @@ function ProjectBoard({ project, onInteractionChange }: {
               </label>
             </div>
 
+            {snapshot.config.releases_enabled && editor.draft.kind === "task" && (
+              <label className="release-deployable">
+                <input type="checkbox" checked={editor.draft.deployable !== false}
+                  onChange={(event) => setEditor({ ...editor, draft: { ...editor.draft, deployable: event.currentTarget.checked } })} />
+                Enroll automatically in the rolling release when this task is Done
+              </label>
+            )}
             {editor.draft.kind === "epic" && (
               <div className="epic-editor-note">EPIC — not executable or assignable. Its board column is automatically derived from its subtasks.</div>
             )}
             <div className="form-grid">
               {editor.draft.kind !== "epic" && <TaskLinkPicker
                 key={`${editor.original?.id ?? "new"}-depends`}
-                label="Depends on (hard prerequisites)"
-                tasks={snapshot?.tasks ?? []}
+                label="Depends on (hard prerequisites · all projects)"
+                tasks={[...(snapshot?.tasks ?? []), ...remoteRelatedTasks]}
                 excludeId={editor.original?.id}
                 allowEpics={false}
                 values={editor.draft.depends_on}
@@ -2621,8 +3535,8 @@ function ProjectBoard({ project, onInteractionChange }: {
               />}
               <TaskLinkPicker
                 key={`${editor.original?.id ?? "new"}-related`}
-                label="Related to (informational)"
-                tasks={snapshot?.tasks ?? []}
+                label="Related to (informational · all projects)"
+                tasks={[...(snapshot?.tasks ?? []), ...remoteRelatedTasks]}
                 excludeId={editor.original?.id}
                 values={editor.draft.related_to}
                 onChange={(related_to) => setEditor((current) => current
@@ -2662,7 +3576,7 @@ function ProjectBoard({ project, onInteractionChange }: {
               <div className="attention-editor">
                 <span>Attention</span>
                 <div className="attention-editor-buttons">
-                  {(["question", "blocked"] as TaskAttention[]).map((flag) => (
+                  {(["question", "blocked", "priority"] as TaskAttention[]).map((flag) => (
                     <button
                       type="button"
                       key={flag}
@@ -2671,7 +3585,7 @@ function ProjectBoard({ project, onInteractionChange }: {
                       }`}
                       onClick={() => toggleAttentionDraft(flag)}
                     >
-                      {flag === "question" ? "? Question" : "× Blocked"}
+                      {flag === "question" ? "? Question" : flag === "blocked" ? "× Blocked" : "! Priority"}
                     </button>
                   ))}
                 </div>
@@ -2729,17 +3643,17 @@ function ProjectBoard({ project, onInteractionChange }: {
               key={editor.original?.id ?? "new-task"}
               description={editor.draft.description}
               legacyAiNotes={editor.draft.ai_notes}
-              pendingUpdate={descriptionUpdateInput}
-              onPendingUpdateChange={setDescriptionUpdateInput}
+              descriptionMinRows={editor.mode === "create" ? 7 : 3}
+              descriptionMaxHeight={editor.mode === "create" ? 480 : 360}
               onChange={(description) =>
                 setEditor((current) => current
                   ? { ...current, draft: { ...current.draft, description } }
                   : current)}
-              {...(editor.draft.kind !== "epic" && {
+              {...(editor.mode === "edit" && editor.draft.kind !== "epic" && {
                 noteToAi: editor.draft.user_notes,
                 onNoteToAiChange: (note: string) => setEditor((current) => {
                   if (!current) return current;
-                  const releaseToAI = note.trim().length > 0;
+                  const releaseToAI = !userQueueReview && note.trim().length > 0;
                   return {
                     ...current,
                     draft: {
@@ -2755,6 +3669,13 @@ function ProjectBoard({ project, onInteractionChange }: {
                 }),
               })}
             />
+            <TaskImageGallery
+              description={editor.draft.description}
+              boardPath={boardPath}
+              pending={pendingClipboardImages}
+              onRemovePending={(index) =>
+                setPendingClipboardImages((current) => current.filter((_, position) => position !== index))}
+            />
 
             {editor.draft.kind === "epic" && <label>
               User design and coordination notes
@@ -2765,6 +3686,7 @@ function ProjectBoard({ project, onInteractionChange }: {
                 onChange={(event) => setEditor({ ...editor, draft: { ...editor.draft, user_notes: event.currentTarget.value } })}
               />
             </label>}
+            {editor.draft.kind === "epic" && <MarkdownPreviewToggle text={editor.draft.user_notes} />}
 
             {editor.draft.kind === "epic" && <label>
               Epic planning and coordination notes
@@ -2775,6 +3697,7 @@ function ProjectBoard({ project, onInteractionChange }: {
                 onChange={(event) => setEditor({ ...editor, draft: { ...editor.draft, notes: event.currentTarget.value } })}
               />
             </label>}
+            {editor.draft.kind === "epic" && <MarkdownPreviewToggle text={editor.draft.notes} />}
 
             {editor.draft.kind !== "epic" && <label>
               Acceptance criteria
@@ -2794,36 +3717,41 @@ function ProjectBoard({ project, onInteractionChange }: {
                 }
               />
             </label>}
+            {editor.draft.kind !== "epic" &&
+              <MarkdownPreviewToggle text={editor.draft.acceptance_criteria.join("\n\n")} />}
+
+            {editor.mode === "edit" && editor.original && editor.original.kind !== "epic" &&
+              (editor.original.column === "blocked" || editor.original.attention.includes("blocked")) && (
+              <div className="blocked-authorize">
+                <div className="blocked-authorize-reason">
+                  <strong>Blocked</strong>
+                  <span>{editor.original.blocked_reason?.trim()
+                    || "No blocked reason recorded (blocked before reasons were required)."}</span>
+                </div>
+                <button type="button" className="button blocked-authorize-button"
+                  title={`Move to AI Ready and add: "${AUTHORIZE_UNBLOCK_TEXT}"`}
+                  onClick={authorizeUnblock} disabled={busy}>
+                  Authorize Unblock
+                </button>
+              </div>
+            )}
+            </>)}
 
             <div className="modal-actions">
-              {editor.mode === "edit" && editor.original && (
-                <>
-                  {editor.original.kind === "epic" && <button
-                    className="button secondary"
-                    onClick={() => openCreate(
-                      defaultCreateColumn(),
-                      editor.original!.id,
-                      editor.draft.category,
-                    )}
-                    disabled={busy}
-                  >
-                    + Task under epic
-                  </button>}
-                  <button className="button danger" onClick={archiveSelected} disabled={busy}>
-                    Archive
-                  </button>
-                  {editor.original.kind !== "epic" && editor.draft.kind !== "epic" && (
-                    <button type="button" className="button done-button"
-                      title="Save this task and move it to Done"
-                      onClick={() => saveEditor(true)}
-                      disabled={busy || !doneColumn || editor.original.column === doneColumn.id ||
-                        !editor.draft.title.trim() ||
-                        (editor.draft.attention.includes("question") && !editor.draft.question?.prompt.trim())}>
-                      Done
-                    </button>
-                  )}
-                </>
-              )}
+              {!isAdvisoryEditor && (editor.draft.kind === "task" || editor.draft.kind === "recurring") && <div className="execution-mode-picker" role="group" aria-label="Execution mode">
+                {(["backlog", "queue", "start_now"] as const).map((mode) =>
+                  <button type="button" key={mode} disabled={busy || executionLoading}
+                    aria-pressed={executionChoice === mode}
+                    className={`execution-mode-option${executionChoice === mode ? " active" : ""}`}
+                    title={mode === "start_now" ? "Record a durable foreground start request; no duplicate dispatch on uncertain delivery" : mode === "queue" ? "Register this task for background scheduling when the scheduler is installed" : "Keep this task in the backlog"}
+                    onClick={() => setExecutionChoice(mode)}>
+                    {mode === "start_now" ? "Start now" : mode === "queue" ? "Queue" : "Backlog"}
+                  </button>)}
+              </div>}
+              {editor.mode === "edit" && editor.original?.kind === "epic" && <button type="button"
+                className="button secondary" onClick={() => openCreate(defaultCreateColumn(), editor.original!.id, editor.draft.category)} disabled={busy}>
+                + Task under epic
+              </button>}
               <span className="spacer" />
               {userQueueReview && editor.original?.id === userQueueReview.ids[userQueueReview.index] && (
                 <>
@@ -2839,35 +3767,36 @@ function ProjectBoard({ project, onInteractionChange }: {
                   </button>
                 </>
               )}
-              <button className="button secondary" onClick={() => closeEditor()} disabled={busy}>
-                Cancel
-              </button>
+              {editor.mode === "edit" && editor.original && <div className="editor-finish-menu">
+                <button type="button" className="button secondary editor-finish-trigger" aria-expanded={doneMenuOpen}
+                  title="Archive or finish this task" onClick={() => setDoneMenuOpen((value) => !value)} disabled={busy}>
+                  ☰ ▴
+                </button>
+                {doneMenuOpen && <div className="editor-finish-options">
+                  <button type="button" className="editor-archive-option" onClick={() => { setDoneMenuOpen(false); archiveSelected(); }} disabled={busy}>Archive</button>
+                  {editor.original.kind !== "epic" && editor.draft.kind !== "epic" && <>
+                    <button type="button" className="editor-complete-option" onClick={() => { setDoneMenuOpen(false); void saveEditor(true); }} disabled={busy || !doneColumn || editor.original.column === doneColumn.id || !editor.draft.title.trim() ||
+                      (editor.draft.attention.includes("question") && !editor.draft.question?.prompt.trim())}>Mark Done</button>
+                    {!isAdvisoryEditor && <button type="button" className="editor-followup-option" onClick={() => { setDoneMenuOpen(false); void closeAndFollowup(); }} disabled={busy || !doneColumn || editor.original.column === doneColumn.id || !editor.draft.title.trim() ||
+                      (editor.draft.attention.includes("question") && !editor.draft.question?.prompt.trim())}>Mark Done and Followup</button>}
+                  </>}
+                </div>}
+              </div>}
+              <button className="button editor-cancel-button" onClick={() => closeEditor()} disabled={busy}>Cancel</button>
               <button
-                className="button primary"
-                title="Save (Ctrl+S or Ctrl+Enter)"
+                className={`button primary ${queueEdited ? "queue-save-release" : ""}`}
+                title={queueEdited ? "Save your response and remove For user from this task" : "Save (Enter or Ctrl+S). Textareas keep Enter for new lines."}
                 onClick={() => saveEditor()}
                 disabled={
-                  busy ||
+                  busy || executionLoading ||
                   !editor.draft.title.trim() ||
+                  (editor.mode === "create" && !reservedTaskId) ||
                   (editor.draft.attention.includes("question") &&
                     !editor.draft.question?.prompt.trim())
                 }
               >
-                {busy ? "Saving…" : "Save"}
+                {busy ? "Saving…" : queueEdited ? "Save & release" : "Save"}
               </button>
-              {editor.mode === "edit" && editor.original?.kind !== "epic" &&
-                editor.draft.kind !== "epic" && (
-                <button
-                  className="button followup-button"
-                  title="Save this task, move it to Done, and open a new related follow-up in the original column."
-                  onClick={closeAndFollowup}
-                  disabled={busy || !doneColumn || editor.original?.column === doneColumn.id ||
-                    !editor.draft.title.trim() ||
-                    (editor.draft.attention.includes("question") && !editor.draft.question?.prompt.trim())}
-                >
-                  Close &amp; Followup
-                </button>
-              )}
             </div>
           </section>
         </div>

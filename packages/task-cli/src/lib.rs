@@ -1,9 +1,12 @@
-use clap::{Args, Parser, Subcommand};
+mod review_gate_link;
+
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use serde_json::{json, Value};
 use std::{collections::HashSet, fs, path::{Path, PathBuf}, process};
-use task_core::{AI_READY_COLUMN_ID, BoardConfig, BoardSnapshot, Column, FsTaskStore, Task, TaskAttention, TaskDraft, TaskQuestion, TaskStore, TaskStoreError};
+use task_core::{AI_READY_COLUMN_ID, BoardConfig, BoardSnapshot, Column, FsTaskStore, Task, TaskAttention, TaskDraft, TaskQuestion, TaskStore, TaskStoreError, ReviewInputArtifact, ReviewRequest, ReviewResolution, ReviewPin};
 
 const WARTRIBES_BOARD: &str = r"B:\GDrive\SharedWithPhone\Obsidian\jjj\Wartribes\Tasks";
+const TASK_CREATE_GUIDANCE: &str = r"C:\Users\crovea\.agents\docs\guidance\taskboard.md";
 
 #[derive(Parser)]
 #[command(name = "taskboard", version, about = "Agent-facing CLI for the shared Markdown TaskBoard")]
@@ -26,6 +29,7 @@ enum Command {
         #[command(subcommand)]
         command: ColumnCommand,
     },
+    Release { #[command(subcommand)] command: ReleaseCommand },
 }
 
 #[derive(Subcommand)]
@@ -38,11 +42,15 @@ enum TaskCommand {
     Move(TaskMoveArgs),
     Parent(TaskParentArgs),
     Complete(TaskTarget),
+    Finish(TaskFinishArgs),
+    AskUser(TaskAskUserArgs),
     CompleteManaged(TaskManagedCompleteArgs),
     Archive(TaskTarget),
     Claim(TaskClaimArgs),
     Release(TaskClaimArgs),
     Execution(TaskExecutionCommandArgs),
+    Live { #[command(subcommand)] command: TaskLiveCommand },
+    Review { #[command(subcommand)] command: ReviewCommand },
 }
 
 #[derive(Args)]
@@ -51,6 +59,7 @@ struct TaskExecutionCommandArgs {
     #[command(subcommand)]
     action: ExecutionAction,
 }
+
 #[derive(Subcommand)]
 enum ExecutionAction {
     Show,
@@ -58,6 +67,74 @@ enum ExecutionAction {
     StartNow { #[arg(long)] revision: String },
     Receipt { #[arg(long)] request: String, #[arg(long)] receipt: String },
 }
+
+/// Persist live collaboration on the existing task; never creates or sends a session.
+#[derive(Subcommand)]
+enum TaskLiveCommand {
+    WithMe { target: String, #[arg(long)] off: bool },
+    Ready { target: String, #[arg(long)] brief: String, #[arg(long)] est: Option<u32> },
+    Start { target: String },
+    Later { target: String, #[arg(long)] until: String },
+    Clear { target: String },
+}
+
+#[derive(Subcommand)]
+enum ReviewCommand {
+    Request(ReviewRequestArgs),
+    Show(TaskTarget),
+    Thumbnails(TaskTarget),
+    Resolve(ReviewResolveArgs),
+    Gc { #[arg(long)] dry_run: bool, #[arg(long)] all_boards: bool },
+}
+
+#[derive(Args)]
+struct ReviewRequestArgs {
+    task: String,
+    #[arg(long)] mode: String,
+    #[arg(long)] judge: String,
+    #[arg(long)] criteria: Vec<String>,
+    #[arg(long, required = true)] artifact: Vec<String>,
+    #[arg(long)] reference: Vec<String>,
+    #[arg(long)] previous: Option<String>,
+    #[arg(long)] poster: Option<String>,
+    #[arg(long)] top: Option<usize>,
+    #[arg(long)] implemented_by: Option<String>,
+    #[arg(long)] openrig_gate: Option<String>,
+}
+
+#[derive(Args)]
+struct ReviewResolveArgs {
+    task: String,
+    #[arg(long)] verdict: String,
+    #[arg(long)] choice: Vec<String>,
+    #[arg(long)] rank: Vec<String>,
+    #[arg(long)] pins_json: Option<String>,
+    #[arg(long, default_value = "")] note: String,
+    /// Human review verdict only. Agents must never self-resolve review requests.
+    #[arg(long)] human_confirmed: bool,
+}
+
+#[derive(Subcommand)]
+enum ReleaseCommand {
+    List,
+    New,
+    Show(TaskTarget),
+    Enable { #[arg(action = clap::ArgAction::Set)] enabled: bool },
+    Reconcile { #[arg(long)] historical: bool },
+    BlockedCandidates,
+    MigrateBlocked { task: String, #[arg(long)] validated: bool, #[arg(long)] evidence: String },
+    Include { release: String, task: String },
+    Exclude { release: String, task: String },
+    Move { release: String, task: String, destination: String },
+    Source { release: String, task: String, #[arg(long)] repo: String, #[arg(long)] commit: String, #[arg(long)] integrated_ref: Option<String>, #[arg(long)] evidence: Option<String> },
+    Prepare { release: String, #[arg(long, default_value="")] evidence: String,
+        #[arg(long)] run_id: Option<String> },
+    Outcome { release: String, attempt: u32, status: String, #[arg(long)] evidence: String,
+        #[arg(long)] run_id: Option<String> },
+    Verify { release: String, attempt: u32, task: String,
+        #[arg(long)] evidence: String, #[arg(long, default_value="verified")] status: String },
+}
+
 #[derive(Subcommand)]
 enum ColumnCommand {
     List,
@@ -65,6 +142,7 @@ enum ColumnCommand {
     Rename(ColumnRenameArgs),
     Reorder(ColumnReorderArgs),
     Ready(ColumnReadyArgs),
+    Advisory(ColumnReadyArgs),
     Remove(ColumnTarget),
 }
 
@@ -85,6 +163,9 @@ struct TaskListArgs {
     roots: bool,
     #[arg(long)]
     ai_ready: bool,
+    /// Optional live task state filter: ready or in_session.
+    #[arg(long)]
+    live_state: Option<String>,
 }
 
 #[derive(Args)]
@@ -108,6 +189,8 @@ struct TaskCreateArgs {
     icon: Option<String>,
     #[arg(long, default_value = "task")]
     kind: String,
+    #[arg(long)] repeat_every_days: Option<u32>,
+    #[arg(long)] next_due: Option<String>,
     #[arg(long = "depends-on")]
     depends_on: Vec<String>,
     #[arg(long = "related-to")]
@@ -126,6 +209,10 @@ struct TaskCreateArgs {
     question: Option<String>,
     #[arg(long = "option")]
     options: Vec<String>,
+    /// Concise reason; required when creating directly in Blocked or with the blocked flag.
+    #[arg(long)]
+    blocked_reason: Option<String>,
+    #[arg(long="confirm-genuine-block", hide=true)] confirm_genuine_block: Option<String>,
 }
 
 #[derive(Args)]
@@ -145,6 +232,9 @@ struct TaskUpdateArgs {
     clear_icon: bool,
     #[arg(long)]
     kind: Option<String>,
+    #[arg(long)] repeat_every_days: Option<u32>,
+    #[arg(long)] next_due: Option<String>,
+    #[arg(long)] clear_recurrence: bool,
     #[arg(long = "depends-on")]
     depends_on: Vec<String>,
     #[arg(long)]
@@ -177,12 +267,22 @@ struct TaskUpdateArgs {
     acceptance_criteria: Vec<String>,
     #[arg(long)]
     clear_acceptance: bool,
+    /// Concise, easy-to-read reason. Required before an agent marks a task
+    /// blocked (blocked flag or Blocked column); recorded in the Description timeline.
+    #[arg(long)]
+    blocked_reason: Option<String>,
+    #[arg(long="confirm-genuine-block", hide=true)] confirm_genuine_block: Option<String>,
+    #[arg(long, action=clap::ArgAction::Set)] deployable: Option<bool>,
 }
 
 #[derive(Args)]
 struct TaskMoveArgs {
     target: String,
     column: String,
+    /// Required when moving into the Blocked column.
+    #[arg(long)]
+    blocked_reason: Option<String>,
+    #[arg(long="confirm-genuine-block", hide=true)] confirm_genuine_block: Option<String>,
 }
 
 #[derive(Args)]
@@ -192,6 +292,33 @@ struct TaskParentArgs {
     parent: Option<String>,
     #[arg(long)]
     clear: bool,
+}
+
+#[derive(Args)]
+struct TaskAskUserArgs {
+    target: String,
+    #[arg(long = "type")]
+    request_type: String,
+    #[arg(long)]
+    question: String,
+    #[arg(long = "option")]
+    options: Vec<String>,
+    #[arg(long = "artifact")]
+    artifacts: Vec<String>,
+    #[arg(long)]
+    mode: Option<String>,
+    #[arg(long)]
+    previous: Option<String>,
+    #[arg(long)]
+    poster: Option<String>,
+}
+
+#[derive(Args)]
+struct TaskFinishArgs {
+    target: String,
+    #[arg(long, default_value = "none")]
+    verification: String,
+    #[arg(long)] instructions: Option<String>,
 }
 
 #[derive(Args)]
@@ -279,6 +406,25 @@ impl CliError {
 
 /// Run the same CLI from the console binary or the desktop executable.
 pub fn entry() {
+    // Dynamically load owner guidance; no rebuild is needed when it changes.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.windows(3).any(|part|
+        part[0] == "task" && part[1] == "create" && part[2] == "--help"
+    ) {
+        let mut command = Cli::command();
+        let create = command.find_subcommand_mut("task")
+            .and_then(|task| task.find_subcommand_mut("create"))
+            .expect("TaskBoard create subcommand");
+        println!("{}\n", create.render_long_help());
+        match fs::read_to_string(TASK_CREATE_GUIDANCE) {
+            Ok(guidance) => println!("{guidance}"),
+            Err(error) => {
+                eprintln!("Cannot read {}: {error}", TASK_CREATE_GUIDANCE);
+                process::exit(2);
+            }
+        }
+        return;
+    }
     let cli = Cli::parse();
     match run(&cli) {
         Ok(value) => print_success(cli.json, value),
@@ -294,12 +440,279 @@ fn run(cli: &Cli) -> Result<Value, CliError> {
     match &cli.command {
         Command::Task { command } => run_task(&store, &cli.root, command),
         Command::Column { command } => run_column(&store, &cli.root, command),
+        Command::Release { command } => run_release(&store, &cli.root, command),
     }
+}
+
+/// Human acceptance and approval are Inbox work, not technical blockers.
+fn validate_agent_block_reason(reason: Option<&str>) -> Result<(), CliError> {
+    let reason = reason.unwrap_or("").to_ascii_lowercase();
+    let human_gate = ["user verification", "human verification", "user to verify",
+        "user verify", "waiting for user", "awaiting user", "approval required",
+        "waiting for approval", "awaiting approval", "user approval",
+        "human approval", "user sign-off", "user signoff"];
+    if human_gate.iter().any(|phrase| reason.contains(phrase)) {
+        return Err(CliError::new("human_input_not_blocker",
+            "Do not Block a task solely for human approval/verification. Keep AI work actionable, request Inbox feedback on the original task, or finish implementation in Done with a pending verification request."));
+    }
+    Ok(())
+}
+
+fn run_ask_user(store: &FsTaskStore, root: &Path, args: &TaskAskUserArgs) -> Result<Value, CliError> {
+    let snapshot = load_checked(store, root)?;
+    let mut task = resolve_task(&snapshot, &args.target, false)?.clone();
+    ensure_task_rewrite_safe(&task)?;
+    if task.kind != task_core::TaskKind::Task || is_human_only(&task) {
+        return Err(CliError::new("invalid_request_target", "Use the original AI-owned implementation task, not a For user card or epic"));
+    }
+    if args.question.trim().is_empty() {
+        return Err(CliError::new("question_required", "Provide a concrete --question"));
+    }
+    if task.review_status.as_deref() == Some("open") ||
+        task.question.as_ref().is_some_and(|q| q.answer.is_none()) {
+        return Err(CliError::new("request_already_open", "Resolve the existing request instead of duplicating it"));
+    }
+    if args.request_type == "visual-review" {
+        if args.artifacts.is_empty() {
+            return Err(CliError::new("visual_artifact_required", "A visual review needs a screenshot, clip, or HTML preview; a source patch is insufficient"));
+        }
+        return run_task(store, root, &TaskCommand::Review { command: ReviewCommand::Request(ReviewRequestArgs {
+            task: task.id.clone(), mode: args.mode.clone().unwrap_or_else(|| "approve".into()),
+            judge: args.question.clone(), criteria: Vec::new(), artifact: args.artifacts.clone(),
+            reference: Vec::new(), previous: args.previous.clone(), poster: args.poster.clone(),
+            top: None, implemented_by: None, openrig_gate: None,
+        }) });
+    }
+    if !args.artifacts.is_empty() || args.previous.is_some() || args.mode.is_some() || args.poster.is_some() {
+        return Err(CliError::new("invalid_request", "Artifact options require --type visual-review"));
+    }
+    let options = match args.request_type.as_str() {
+        "decision" if args.options.len() >= 2 => args.options.clone(),
+        "decision" => return Err(CliError::new("options_required", "A decision requires at least two --option choices")),
+        "verification" => vec!["Done".into(), "Needs changes".into()],
+        "action" => args.options.clone(),
+        _ => return Err(CliError::new("invalid_request_type", "Use decision, visual-review, verification, or action")),
+    };
+    task.question = Some(TaskQuestion { request_type: Some(args.request_type.clone()),
+        prompt: args.question.trim().into(), options, answer: None });
+    if !task.attention.contains(&TaskAttention::Question) { task.attention.push(TaskAttention::Question); }
+    let saved = store.update(root, task).map_err(map_store_error)?;
+    Ok(json!({ "task": saved, "request_type": args.request_type }))
+}
+
+fn run_finish(store: &FsTaskStore, root: &Path, args: &TaskFinishArgs) -> Result<Value, CliError> {
+    let snapshot = load_checked(store, root)?;
+    let mut task = resolve_task(&snapshot, &args.target, false)?.clone();
+    ensure_task_rewrite_safe(&task)?;
+    if is_human_only(&task) || task.kind != task_core::TaskKind::Task {
+        return Err(CliError::new("not_executable", "Only ordinary AI-owned tasks can use task finish"));
+    }
+    if task.review_status.as_deref() == Some("open") ||
+        task.question.as_ref().is_some_and(|q| q.answer.is_none()) {
+        return Err(CliError::new("request_already_open", "An unresolved human request exists on this task"));
+    }
+    let done = snapshot.config.columns.iter().filter(|c| c.terminal).min_by_key(|c| c.order)
+        .ok_or_else(|| CliError::new("invalid_column", "No Done column available"))?;
+    match args.verification.as_str() {
+        "none" => {},
+        "user" => {
+            let instructions = args.instructions.as_deref().unwrap_or("").trim();
+            if instructions.is_empty() {
+                return Err(CliError::new("verification_instructions_required", "Provide --instructions with concrete verification steps and deployed evidence"));
+            }
+            task.question = Some(TaskQuestion { request_type: Some("verification".into()),
+                prompt: instructions.into(), options: vec!["Done".into(), "Needs changes".into()], answer: None });
+            if !task.attention.contains(&TaskAttention::Question) { task.attention.push(TaskAttention::Question); }
+        }
+        _ => return Err(CliError::new("invalid_verification", "Use --verification none or user")),
+    }
+    task.column = done.id.clone();
+    task.claimed_by = None;
+    let saved = store.update(root, task).map_err(map_store_error)?;
+    Ok(json!({ "task": saved, "verification": args.verification }))
+}
+
+
+fn run_live(store: &FsTaskStore, root: &Path, command: &TaskLiveCommand) -> Result<Value, CliError> {
+    use task_core::{LiveTaskState, TaskLive};
+    let target = match command {
+        TaskLiveCommand::WithMe { target, .. } |
+        TaskLiveCommand::Ready { target, .. } |
+        TaskLiveCommand::Start { target } |
+        TaskLiveCommand::Later { target, .. } |
+        TaskLiveCommand::Clear { target } => target,
+    };
+    let snapshot = load_checked(store, root)?;
+    let mut task = resolve_task(&snapshot, target, false)?.clone();
+    ensure_task_rewrite_safe(&task)?;
+    if !matches!(task.kind, task_core::TaskKind::Task | task_core::TaskKind::Recurring)
+        || task.archived || task.completed.is_some() {
+        return Err(CliError::new("invalid_live_task", "Live collaboration requires an active agent task"));
+    }
+    // Legacy needs-user is a human-owned task, not a live collaboration request.
+    if task.live.is_none() && task.attention.contains(&TaskAttention::NeedsUser) {
+        return Err(CliError::new("for_user_only", "Cannot convert an existing For user task to live collaboration"));
+    }
+    let was_ready = task.live.as_ref().is_some_and(|live|
+        matches!(live.state, Some(LiveTaskState::Ready)));
+    let blank = || TaskLive {
+        with_me: true, state: None, brief: None, est_minutes: None,
+        ready_at: None, later_until: None,
+    };
+    match command {
+        TaskLiveCommand::WithMe { off: true, .. } | TaskLiveCommand::Clear { .. } => {
+            task.live = None;
+        }
+        TaskLiveCommand::WithMe { off: false, .. } => {
+            task.live.get_or_insert_with(blank).with_me = true;
+        }
+        TaskLiveCommand::Ready { brief, est, .. } => {
+            if brief.trim().is_empty() {
+                return Err(CliError::new("brief_required", "Ready for you requires a nonempty brief"));
+            }
+            if est.is_some_and(|n| !(1..=1440).contains(&n)) {
+                return Err(CliError::new("invalid_estimate", "--est must be between 1 and 1440 minutes"));
+            }
+            let live = task.live.get_or_insert_with(blank);
+            live.with_me = true;
+            live.state = Some(LiveTaskState::Ready);
+            live.brief = Some(brief.trim().to_string());
+            live.est_minutes = *est;
+            live.ready_at = Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+            live.later_until = None;
+        }
+        TaskLiveCommand::Start { .. } => {
+            let live = task.live.get_or_insert_with(blank);
+            live.with_me = true;
+            live.state = Some(LiveTaskState::InSession);
+            live.later_until = None;
+        }
+        TaskLiveCommand::Later { until, .. } => {
+            let time = chrono::DateTime::parse_from_rfc3339(until)
+                .map_err(|_| CliError::new("invalid_until", "--until must be an ISO 8601 time with timezone"))?;
+            if time <= chrono::Utc::now() {
+                return Err(CliError::new("invalid_until", "--until must be in the future"));
+            }
+            let Some(live) = task.live.as_mut() else {
+                return Err(CliError::new("not_ready", "Set task live ready before Later"));
+            };
+            if !matches!(live.state, Some(LiveTaskState::Ready)) {
+                return Err(CliError::new("not_ready", "Later is only available for Ready tasks"));
+            }
+            live.later_until = Some(time.to_rfc3339());
+        }
+    }
+    let is_ready = task.live.as_ref().is_some_and(|live|
+        matches!(live.state, Some(LiveTaskState::Ready)));
+    if is_ready && !task.attention.contains(&TaskAttention::NeedsUser) {
+        task.attention.push(TaskAttention::NeedsUser);
+    } else if was_ready && !is_ready {
+        task.attention.retain(|flag| *flag != TaskAttention::NeedsUser);
+    }
+    let saved = store.update(root, task).map_err(map_store_error)?;
+    Ok(json!(saved))
 }
 
 fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<Value, CliError> {
     match command {
+        TaskCommand::Review { command } => match command {
+            ReviewCommand::Request(args) => {
+                let snapshot = load_checked(store, root)?;
+                let task = resolve_task(&snapshot, &args.task, false)?;
+                let existing = store.review_show(root, &task.id).ok();
+                let parse = |value: &String| {
+                    let (source, label) = value.rsplit_once('=').unwrap_or((value.as_str(), ""));
+                    ReviewInputArtifact {
+                        source: source.to_string(),
+                        label: if label.is_empty() {
+                            std::path::Path::new(source).file_name()
+                                .and_then(|s| s.to_str()).unwrap_or(source).to_string()
+                        } else { label.to_string() },
+                    }
+                };
+                let review = store.review_request(root, ReviewRequest {
+                    task_id: task.id.clone(), mode: args.mode.clone(), judge: args.judge.clone(),
+                    criteria: args.criteria.clone(),
+                    artifacts: args.artifact.iter().map(&parse).collect(),
+                    references: args.reference.iter().map(&parse).collect(),
+                    previous: args.previous.as_ref().map(&parse),
+                    poster: args.poster.clone(), top_k: args.top,
+                    implemented_by: args.implemented_by.clone(),
+                    openrig_gate: args.openrig_gate.clone(),
+                    expected_task_revision: Some(task.revision.clone()),
+                    expected_manifest_revision: existing.map(|m| m.revision),
+                }).map_err(map_store_error)?;
+                let mut result = json!(review);
+                if let Some(gate) = &args.openrig_gate {
+                    result["openrig_link"] = review_gate_link::register(root, &task.id, &review.revision, gate, &task.title);
+                }
+                Ok(result)
+            }
+            ReviewCommand::Show(args) => {
+                let snapshot = load_checked(store, root)?;
+                let task = resolve_task(&snapshot, &args.target, true)?;
+                let review = store.review_show(root, &task.id).map_err(map_store_error)?;
+                Ok(json!({ "task": task, "review": review }))
+            }
+            ReviewCommand::Thumbnails(args) => {
+                let manifest = store.review_capture_thumbnails(root, &args.target)
+                    .map_err(map_store_error)?;
+                Ok(json!(manifest))
+            }
+            ReviewCommand::Resolve(args) => {
+                if !args.human_confirmed {
+                    return Err(CliError::new("human_only", "Only the human reviewer may resolve a review. Human callers must pass --human-confirmed. Agents must never supply it."));
+                }
+                let snapshot = load_checked(store, root)?;
+                let task = resolve_task(&snapshot, &args.task, false)?;
+                let existing = store.review_show(root, &task.id).map_err(map_store_error)?;
+                let pins: Vec<ReviewPin> = match &args.pins_json {
+                    Some(value) => serde_json::from_str(value)
+                        .map_err(|e| CliError::new("usage_error", format!("invalid pins JSON: {e}")))?,
+                    None => Vec::new(),
+                };
+                let review = store.review_resolve(root, ReviewResolution {
+                    task_id: task.id.clone(), verdict: args.verdict.clone(),
+                    choices: args.choice.clone(), ranking: args.rank.clone(),
+                    pins, note: args.note.clone(),
+                    expected_task_revision: task.revision.clone(),
+                    expected_manifest_revision: existing.revision,
+                }).map_err(map_store_error)?;
+                Ok(json!(review))
+            }
+            ReviewCommand::Gc { dry_run, all_boards } => {
+                let mut roots = vec![root.to_path_buf()];
+                if *all_boards {
+                    roots.clear();
+                    let appdata = std::env::var_os("APPDATA")
+                        .ok_or_else(|| CliError::new("io_error", "APPDATA is not defined"))?;
+                    let config = PathBuf::from(appdata).join("TaskBoard").join("projects.json");
+                    let catalog: Value = serde_json::from_slice(&fs::read(config)
+                        .map_err(|e| CliError::new("io_error", e.to_string()))?)
+                        .map_err(|e| CliError::new("invalid_board_task_data", e.to_string()))?;
+                    for project in catalog["projects"].as_array().into_iter().flatten() {
+                        if let Some(path) = project["path"].as_str() {
+                            if Path::new(path).join("_board.md").exists() {
+                                let board = PathBuf::from(path);
+                                if !roots.iter().any(|existing| existing == &board) { roots.push(board); }
+                            }
+                        }
+                    }
+                    if roots.is_empty() {
+                        return Err(CliError::new("io_error", "No mounted project boards found"));
+                    }
+                }
+                let mut reports = Vec::new();
+                for directory in roots {
+                    reports.push(store.review_gc(&directory, *dry_run).map_err(map_store_error)?);
+                }
+                Ok(json!({ "dry_run": dry_run, "reports": reports }))
+            },
+        },
         TaskCommand::List(args) => {
+            if args.live_state.as_ref().is_some_and(|state| !matches!(state.as_str(), "ready" | "in_session")) {
+                return Err(CliError::new("usage_error", "--live-state must be ready or in_session"));
+            }
             if args.roots && args.parent.is_some() {
                 return Err(CliError::new("usage_error", "--roots cannot be combined with --parent"));
             }
@@ -319,10 +732,13 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
                 .filter(|column| column.ai_ready)
                 .map(|column| column.id.as_str())
                 .collect();
-            let tasks: Vec<&Task> = snapshot.tasks.iter()
+            let mut tasks: Vec<&Task> = snapshot.tasks.iter()
                 .filter(|task| args.include_archived || !task.archived)
+                .filter(|task| args.live_state.as_ref().is_none_or(|state| task.live.as_ref().and_then(|live| live.state.as_ref())
+                    .is_some_and(|value| matches!((state.as_str(), value),
+                        ("ready", task_core::LiveTaskState::Ready) | ("in_session", task_core::LiveTaskState::InSession)))))
                 .filter(|task| column_id.as_ref().is_none_or(|column| &task.column == column))
-                .filter(|task| !args.ai_ready || (task.kind == task_core::TaskKind::Task
+                .filter(|task| !args.ai_ready || (matches!(task.kind, task_core::TaskKind::Task | task_core::TaskKind::Recurring)
                     && ready_columns.contains(task.column.as_str())
                     && ensure_ready(&snapshot, task)))
                 .filter(|task| {
@@ -330,7 +746,9 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
                     else { parent_id.as_ref().is_none_or(|parent| task.parent.as_ref() == Some(parent)) }
                 })
                 .collect();
-            Ok(json!({ "tasks": tasks }))
+            // Actionable priorities first for agent discovery; stable otherwise.
+            tasks.sort_by_key(|task| if ensure_ready(&snapshot, task) && task.attention.contains(&TaskAttention::Priority) { 0 } else { 1 });
+            Ok(json!({ "tasks": tasks, "advisories": board_advisories(&snapshot) }))
         }
         TaskCommand::Show(args) => {
             let snapshot = load_checked(store, root)?;
@@ -353,7 +771,8 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
                 let done = descendants.iter().filter(|t| t.archived || t.completed.is_some()).count();
                 Some(json!({"completed":done,"total":descendants.len(),"remaining":descendants.len()-done}))
             } else { None };
-            Ok(with_work_advisory(json!({ "task": task, "children": children, "waiting_for": blockers, "blocks": blocked_by, "readiness": readiness(&snapshot, task), "epic_progress": epic_status }), task))
+            let (blocked_reason, blocked_reason_source) = effective_blocked_reason(task);
+            Ok(with_work_advisory(json!({ "task": task, "children": children, "waiting_for": blockers, "blocks": blocked_by, "readiness": readiness(&snapshot, task), "blocked_reason": blocked_reason, "blocked_reason_source": blocked_reason_source, "epic_progress": epic_status, "advisories": board_advisories(&snapshot) }), task))
         }
         TaskCommand::Search(args) => {
             let snapshot = load_checked(store, root)?;
@@ -366,6 +785,14 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
         }
         TaskCommand::Create(args) => {
             let snapshot = load_checked(store, root)?;
+            // A question about existing implementation belongs on that task,
+            // not on a duplicate Review/Verify card with a new ID.
+            if args.question.is_some() {
+                if let Some(owner) = args.related_to.iter().find(|id| snapshot.tasks.iter().any(|t| t.id == **id && !t.archived)) {
+                    return Err(CliError::new("duplicate_feedback_task",
+                        format!("{owner} already owns this work. Use task update {owner} --question ... or task review request {owner} instead of creating another task.")));
+                }
+            }
             let mut kind = parse_kind(&args.kind)?;
             let mut attention = parse_attention_values(&args.attention)?;
             if attention.contains(&TaskAttention::NeedsUser) {
@@ -385,6 +812,7 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
                 None => None,
             };
             let question = args.question.as_ref().map(|prompt| TaskQuestion {
+                request_type: None,
                 prompt: prompt.trim().to_string(),
                 options: args.options.clone(),
                 answer: None,
@@ -396,23 +824,34 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
                 attention.push(TaskAttention::UserNote);
             }
             let draft = TaskDraft {
+                reserved_id: None,
+                reservation_token: None,
                 title: args.title.clone(),
                 column,
                 parent,
                 kind,
+                deployable: None,
+                repeat_every_days: args.repeat_every_days,
+                next_due: args.next_due.clone(),
                 depends_on: args.depends_on.clone(),
                 related_to: args.related_to.clone(),
                 category: args.category.clone().filter(|value| !value.trim().is_empty()),
                 icon: args.icon.clone(),
                 attention,
                 question,
+                blocked_reason: args.blocked_reason.clone(),
                 description: args.description.clone(),
                 acceptance_criteria: args.acceptance_criteria.clone(),
                 ai_notes: args.ai_notes.clone(),
                 user_notes: args.user_notes.clone(),
                 notes: String::new(),
             };
-            Ok(json!(store.create(root, draft).map_err(map_store_error)?))
+            let mut task = store.create_as_confirmed(root, draft, task_core::MutationActor::Agent, args.confirm_genuine_block.as_deref()).map_err(map_store_error)?;
+            if let Some(reason) = &args.blocked_reason {
+                task.blocked_reason = Some(reason.clone());
+                task = store.update(root, task).map_err(map_store_error)?;
+            }
+            Ok(json!(task))
         }
         TaskCommand::Update(args) => {
             let snapshot = load_checked(store, root)?;
@@ -425,6 +864,9 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
                 }
                 task.kind = new_kind;
             }
+            if args.clear_recurrence { task.repeat_every_days = None; task.next_due = None; }
+            if let Some(days) = args.repeat_every_days { task.repeat_every_days = Some(days); }
+            if let Some(due) = &args.next_due { task.next_due = Some(due.clone()); }
             if args.clear_dependencies { task.depends_on.clear(); }
             else if !args.depends_on.is_empty() { task.depends_on = args.depends_on.clone(); }
             if args.clear_related { task.related_to.clear(); }
@@ -479,6 +921,7 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
                 task.attention.retain(|flag| flag != &TaskAttention::Question);
             } else if let Some(prompt) = &args.question {
                 task.question = Some(TaskQuestion {
+                    request_type: None,
                     prompt: prompt.trim().to_string(),
                     options: args.options.clone(),
                     answer: None,
@@ -492,7 +935,12 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
             } else if !args.acceptance_criteria.is_empty() {
                 task.acceptance_criteria = args.acceptance_criteria.clone();
             }
-            Ok(json!(store.update(root, task).map_err(map_store_error)?))
+            if let Some(deployable) = args.deployable { task.deployable = Some(deployable); }
+            if let Some(reason) = &args.blocked_reason {
+                validate_agent_block_reason(Some(reason))?;
+                task.blocked_reason = Some(reason.clone());
+            }
+            Ok(json!(store.update_as_confirmed(root, task, task_core::MutationActor::Agent, args.confirm_genuine_block.as_deref(), "update").map_err(map_store_error)?))
         }
         TaskCommand::Move(args) => {
             let snapshot = load_checked(store, root)?;
@@ -502,8 +950,14 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
             if is_human_only(&task) && snapshot.config.columns.iter().any(|c| c.id == column && c.terminal) {
                 return Err(CliError::new("for_user_only", "For user tasks can only be completed by the user in TaskBoard").exit(4));
             }
+            if column == "blocked" && task.column == "blocked" && args.confirm_genuine_block.is_some() {
+                return Err(CliError::new("blocked_confirmation_invalid", "challenge token cannot be reused for an already blocked task").exit(3));
+            }
+            let entering_blocked = column == "blocked";
             task.column = column;
-            Ok(json!(store.update(root, task).map_err(map_store_error)?))
+            if entering_blocked { validate_agent_block_reason(args.blocked_reason.as_deref())?; }
+            if let Some(reason) = &args.blocked_reason { task.blocked_reason = Some(reason.clone()); }
+            Ok(json!(store.update_as_confirmed(root, task, task_core::MutationActor::Agent, args.confirm_genuine_block.as_deref(), "move").map_err(map_store_error)?))
         }
         TaskCommand::Parent(args) => {
             if !args.clear && args.parent.is_none() {
@@ -523,6 +977,7 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
             };
             Ok(json!(store.update(root, task).map_err(map_store_error)?))
         }
+        TaskCommand::Live { command } => run_live(store, root, command),
         TaskCommand::Execution(args) => {
             let snapshot = load_checked(store, root)?;
             let task = resolve_task(&snapshot, &args.target, false)?;
@@ -541,6 +996,8 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
             }.map_err(map_store_error)?;
             Ok(json!(result))
         }
+        TaskCommand::Finish(args) => run_finish(store, root, args),
+        TaskCommand::AskUser(args) => run_ask_user(store, root, args),
         TaskCommand::CompleteManaged(args) => {
             let snapshot = load_checked(store, root)?;
             let task = resolve_task(&snapshot, &args.target, false)?;
@@ -585,11 +1042,16 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
             let snapshot = load_checked(store, root)?;
             let task = resolve_task(&snapshot, &args.target, false)?;
             ensure_task_rewrite_safe(task)?;
-            // Advisory only: never reject a claim based on the task type or agent name.
+            if snapshot.config.columns.iter().any(|column| column.id == task.column && column.advisory) {
+                return Err(CliError::new("not_executable", "Advisory cards are board-wide instructions, not executable tasks"));
+            }
             let managed = if args.managed { Some(store.claim_managed(root, &task.id, &args.agent).map_err(map_store_error)?) } else { None };
             let claimed = if let Some(ref managed) = managed { managed.task.clone() } else { store.claim(root, &task.id, &args.agent).map_err(map_store_error)? };
             let mut result = with_work_advisory(json!(claimed), &claimed);
             if let Some(managed) = managed { result["claim_token"] = json!(managed.claim_token); }
+            if let Some(object) = result.as_object_mut() {
+                object.insert("advisories".into(), json!(board_advisories(&snapshot)));
+            }
             Ok(result)
         }
         TaskCommand::Release(args) => {
@@ -603,6 +1065,48 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
             }
         }
     }
+}
+
+fn run_release(store: &FsTaskStore, root: &Path, command: &ReleaseCommand) -> Result<Value, CliError> {
+    use task_core::SourceRef;
+    let result = match command {
+        ReleaseCommand::List => json!(store.releases(root).map_err(map_store_error)?),
+        ReleaseCommand::New => json!(store.release_new(root).map_err(map_store_error)?),
+        ReleaseCommand::Show(target) => {
+            let data = store.releases(root).map_err(map_store_error)?;
+            json!(data.releases.into_iter().find(|r| r.id == target.target).ok_or_else(|| CliError::new("release_not_found", &target.target))?)
+        },
+        ReleaseCommand::Enable {enabled} => json!(store.release_enable(root, *enabled).map_err(map_store_error)?),
+        ReleaseCommand::Reconcile {historical} => json!(store.reconcile_releases(root, *historical).map_err(map_store_error)?),
+        ReleaseCommand::BlockedCandidates => {
+            let board = load_checked(store, root)?;
+            json!({"candidates_for_manual_review": board.tasks.iter().filter(|t| !t.archived &&
+                (t.column == "blocked" || t.attention.contains(&TaskAttention::Blocked)))
+                .map(|t| json!({"id":t.id,"title":t.title,"column":t.column,"blocked_reason":t.blocked_reason,"kind":t.kind}))
+                .collect::<Vec<_>>()})
+        },
+        ReleaseCommand::MigrateBlocked {task, validated, evidence} => {
+            if !validated { return Err(CliError::new("explicit_validation_required",
+                "Do not migrate a blocked task unless source implementation is already complete, committed and tested; retry with --validated and specific --evidence").exit(3)); }
+            json!(store.release_migrate_blocked(root, task, evidence).map_err(map_store_error)?)
+        },
+        ReleaseCommand::Include {release,task} => json!(store.release_edit(root, "include", release, Some(task), None, None).map_err(map_store_error)?),
+        ReleaseCommand::Exclude {release,task} => json!(store.release_edit(root, "exclude", release, Some(task), None, None).map_err(map_store_error)?),
+        ReleaseCommand::Move {release,task,destination} => json!(store.release_edit(root, "move", release, Some(task), None, Some(destination)).map_err(map_store_error)?),
+        ReleaseCommand::Source {release,task,repo,commit,integrated_ref,evidence} =>
+            json!(store.release_edit(root, "source", release, Some(task), Some(SourceRef {repository:repo.clone(),commit:commit.clone(),integrated_ref:integrated_ref.clone()}), evidence.as_deref()).map_err(map_store_error)?),
+        ReleaseCommand::Prepare {release,evidence,run_id} => json!(store.release_prepare_bound(root, release, evidence, run_id.as_deref()).map_err(map_store_error)?),
+        ReleaseCommand::Outcome {release,attempt,status,evidence,run_id} => json!(store.release_outcome_bound(root, release, *attempt, status, evidence, run_id.as_deref()).map_err(map_store_error)?),
+        ReleaseCommand::Verify {release,attempt,task,status,evidence} => {
+            let passed = match status.as_str() {
+                "verified" => true,
+                "verification_failed" => false,
+                _ => return Err(CliError::new("invalid_verification", "status must be verified or verification_failed")),
+            };
+            json!(store.release_verify_member(root, release, *attempt, task, passed, evidence).map_err(map_store_error)?)
+        },
+    };
+    Ok(result)
 }
 
 fn run_column(store: &FsTaskStore, root: &Path, command: &ColumnCommand) -> Result<Value, CliError> {
@@ -633,7 +1137,8 @@ fn run_column(store: &FsTaskStore, root: &Path, command: &ColumnCommand) -> Resu
                 hidden: false,
                 snoozed_until: None,
                 awake_until: None,
-                ai_ready: false,
+                ai_ready: task_core::default_column_ai_ready(&args.id.clone().unwrap_or_else(|| slugify(&args.name)), &args.name, args.terminal),
+                advisory: false,
                 color: column_color(order),
             });
             let saved = store.save_config(root, config).map_err(map_store_error)?;
@@ -688,6 +1193,21 @@ fn run_column(store: &FsTaskStore, root: &Path, command: &ColumnCommand) -> Resu
                 ));
             }
             column.ai_ready = args.value;
+            if args.value { column.advisory = false; }
+            let saved = store.save_config(root, config).map_err(map_store_error)?;
+            Ok(json!(saved))
+        }
+        ColumnCommand::Advisory(args) => {
+            let snapshot = load_checked(store, root)?;
+            ensure_board_rewrite_safe(root, &snapshot.config)?;
+            let id = resolve_column(&snapshot.config, &args.target)?.id.clone();
+            let mut config = snapshot.config.clone();
+            let column = config.columns.iter_mut().find(|c| c.id == id).unwrap();
+            if args.value && (column.id == "draft" || column.id == AI_READY_COLUMN_ID || column.terminal) {
+                return Err(CliError::new("invalid_column", "Draft, canonical AI Ready and terminal columns cannot be advisory"));
+            }
+            column.advisory = args.value;
+            if args.value { column.ai_ready = false; }
             let saved = store.save_config(root, config).map_err(map_store_error)?;
             Ok(json!(saved))
         }
@@ -725,7 +1245,8 @@ fn parse_kind(value: &str) -> Result<task_core::TaskKind, CliError> {
         "task" => Ok(task_core::TaskKind::Task),
         "epic" => Ok(task_core::TaskKind::Epic),
         "for_user" | "for-user" => Ok(task_core::TaskKind::ForUser),
-        _ => Err(CliError::new("usage_error", "kind must be task, epic or for_user")),
+        "recurring" => Ok(task_core::TaskKind::Recurring),
+        _ => Err(CliError::new("usage_error", "kind must be task, epic, for_user or recurring")),
     }
 }
 fn unfinished_dependencies<'a>(snapshot: &'a BoardSnapshot, task: &'a Task) -> Vec<&'a str> {
@@ -735,17 +1256,51 @@ fn unfinished_dependencies<'a>(snapshot: &'a BoardSnapshot, task: &'a Task) -> V
     }).map(String::as_str).collect()
 }
 fn is_human_only(task: &Task) -> bool {
-    task.kind == task_core::TaskKind::ForUser || task.attention.contains(&TaskAttention::NeedsUser)
+    task.kind == task_core::TaskKind::ForUser || (task.attention.contains(&TaskAttention::NeedsUser)
+        && !task.live.as_ref().is_some_and(|live|
+            matches!(live.state, Some(task_core::LiveTaskState::Ready))))
+}
+/// Board-wide temporary notices are returned alongside actionable tasks,
+/// never mixed into the execution queue. Moving one to Draft hides it here.
+fn board_advisories(snapshot: &BoardSnapshot) -> Vec<&Task> {
+    let advisory_columns: HashSet<&str> = snapshot.config.columns.iter()
+        .filter(|column| column.advisory)
+        .map(|column| column.id.as_str()).collect();
+    snapshot.tasks.iter().filter(|task| !task.archived
+        && advisory_columns.contains(task.column.as_str())).collect()
 }
 fn ensure_ready(snapshot: &BoardSnapshot, task: &Task) -> bool {
-    task.kind == task_core::TaskKind::Task && !is_human_only(task) && unfinished_dependencies(snapshot, task).is_empty() && !task.attention.contains(&TaskAttention::Blocked)
+    matches!(task.kind, task_core::TaskKind::Task | task_core::TaskKind::Recurring) &&
+        task_core::recurring_due(task) && !is_human_only(task) &&
+        !task.live.as_ref().is_some_and(|live| live.state.is_some()) &&
+        unfinished_dependencies(snapshot, task).is_empty() &&
+        !task.attention.contains(&TaskAttention::Blocked) &&
+        task.column != "blocked"
 }
 fn readiness(snapshot: &BoardSnapshot, task: &Task) -> &'static str {
+    if snapshot.config.columns.iter().any(|column| column.id == task.column && column.advisory) {
+        return "advisory";
+    }
     if task.kind == task_core::TaskKind::Epic { "epic" }
     else if is_human_only(task) { "for_user" }
     else if task.attention.contains(&TaskAttention::Blocked) || task.column == "blocked" { "blocked" }
     else if !unfinished_dependencies(snapshot, task).is_empty() { "waiting" }
+    else if task.kind == task_core::TaskKind::Recurring && !task_core::recurring_due(task) { "scheduled" }
     else { "ready" }
+}
+/// Legacy blocked tasks predate `blocked_reason`; fall back to the first line
+/// of their AI Notes so agents still see why they are blocked.
+fn effective_blocked_reason(task: &Task) -> (Option<String>, Option<&'static str>) {
+    if !task_core::is_task_blocked(task) { return (None, None); }
+    if let Some(reason) = task.blocked_reason.as_deref().filter(|r| !r.trim().is_empty()) {
+        return (Some(reason.to_string()), Some("blocked_reason"));
+    }
+    let legacy = task.ai_notes.lines().map(str::trim).find(|line| !line.is_empty())
+        .map(|line| line.chars().take(200).collect::<String>());
+    match legacy {
+        Some(line) => (Some(line), Some("legacy_ai_notes")),
+        None => (None, Some("missing_legacy")),
+    }
 }
 fn ensure_task_rewrite_safe(task: &Task) -> Result<(), CliError> {
     let text = fs::read_to_string(&task.path)
@@ -865,9 +1420,10 @@ fn parse_attention_values(values: &[String]) -> Result<Vec<TaskAttention>, CliEr
             "needs-user" | "needsuser" | "needs_user" => Ok(TaskAttention::NeedsUser),
             "user-note" | "usernote" | "user_note" => Ok(TaskAttention::UserNote),
             "blocked" => Ok(TaskAttention::Blocked),
+            "priority" => Ok(TaskAttention::Priority),
             other => Err(CliError::new(
                 "usage_error",
-                format!("unknown attention flag {other:?}; expected question, needs-user, user-note, or blocked"),
+                format!("unknown attention flag {other:?}; expected question, needs-user, user-note, blocked, or priority"),
             )),
         }
     }).collect()
@@ -920,6 +1476,9 @@ fn slugify(name: &str) -> String {
 
 fn map_store_error(error: TaskStoreError) -> CliError {
     match error {
+        TaskStoreError::BlockedChallenge { token, task, action } => CliError::new("blocked_confirmation_required",
+            "Self-check: is implementation genuinely impossible to continue? Waiting for deployment, restart or live acceptance belongs to Releases, NOT Blocked. If source is committed and tested, move Done; if work remains possible, stay In Progress. ONLY for a real blocker, retry the identical command with --confirm-genuine-block TOKEN from this response.")
+            .details(json!({"token": token, "task": task, "action": action, "expires_in_seconds":600, "retry_flag": "--confirm-genuine-block"})).exit(3),
         TaskStoreError::NotFound(value) => CliError::new("task_not_found", format!("task not found: {value}")),
         TaskStoreError::ClaimInstanceMismatch(message) => CliError::new("claim_instance_mismatch", message).exit(3),
         TaskStoreError::Conflict(message) => CliError::new("write_conflict", message).exit(3),
@@ -930,8 +1489,13 @@ fn map_store_error(error: TaskStoreError) -> CliError {
         TaskStoreError::Parse(message) => CliError::new("invalid_board_task_data", message).exit(4),
         TaskStoreError::Io(error) => CliError::new("io_error", error.to_string()).exit(5),
         TaskStoreError::Invalid(message) => {
+            if message.starts_with("blocked_") {
+                return CliError::new(if message.starts_with("blocked_reason_required") { "blocked_reason_required" } else { "blocked_confirmation_invalid" }, message).exit(3);
+            }
             let lower = message.to_lowercase();
-            if lower.contains("for user") && lower.contains("agents may not claim") {
+            if lower.contains("blocked without a reason") {
+                CliError::new("blocked_reason_required", message).exit(4)
+            } else if lower.contains("for user") && lower.contains("agents may not claim") {
                 CliError::new("for_user_only", message).exit(4)
             } else if lower.contains("epic") && lower.contains("not executable") {
                 CliError::new("epic_not_executable", message).exit(4)
@@ -964,8 +1528,12 @@ fn with_work_advisory(mut result: Value, task: &Task) -> Value {
     }
     let advisory = match task.icon.as_deref() {
         Some("visual-work") => Some((
-            "visual_work_claude_only",
-            "VISUAL WORK: Only Claude agents should work on this task. If you are not Claude, stop and leave it for Claude. This is an advisory, not an enforced restriction.",
+            "visual_work_claude_opus_only",
+            "VISUAL WORK: Only Claude Opus may work on this task. If you are not Claude Opus, do not claim or implement it; leave it for a Claude Opus agent. This is advisory metadata, not an enforced restriction.",
+        )),
+        Some("visual-implementation") => Some((
+            "visual_implementation_approved",
+            "VISUAL IMPLEMENTATION: Approved visual mockup is ready for implementation. Any suitable agent, including non-Claude agents, may implement against the approved reference.",
         )),
         Some("design") => Some((
             "design_initial_draft_opus_astra_only",
@@ -973,12 +1541,23 @@ fn with_work_advisory(mut result: Value, task: &Task) -> Value {
         )),
         _ => None,
     };
+    let mut warnings: Vec<Value> = Vec::new();
+    if task.attention.contains(&TaskAttention::Priority) {
+        warnings.push(json!({
+            "code": "priority_first",
+            "message": "PRIORITY: Prefer this ready task over ordinary ready tasks. Respect blocked status and unfinished dependencies.",
+            "advisory_only": true
+        }));
+    }
     if let Some((code, message)) = advisory {
-        result["warnings"] = json!([{
+        warnings.push(json!({
             "code": code,
             "message": message,
             "advisory_only": true
-        }]);
+        }));
+    }
+    if !warnings.is_empty() {
+        result["warnings"] = json!(warnings);
     }
     result
 }
@@ -995,7 +1574,10 @@ fn print_success(json_mode: bool, value: Value) {
             let title = task.get("title").and_then(Value::as_str).unwrap_or("");
             let column = task.get("column").and_then(Value::as_str).unwrap_or("");
             let kind = task.get("kind").and_then(Value::as_str).unwrap_or("task");
-            println!("{id}\t{column}\t{kind}\t{title}");
+            match task.get("blocked_reason").and_then(Value::as_str) {
+                Some(reason) => println!("{id}\t{column}\t{kind}\t{title}\t[blocked: {reason}]"),
+                None => println!("{id}\t{column}\t{kind}\t{title}"),
+            }
         }
         return;
     }
@@ -1050,8 +1632,12 @@ mod tests {
 
     fn draft(title: &str) -> TaskDraft {
         TaskDraft {
+            reserved_id: None,
+            reservation_token: None,
             title: title.into(),
             kind: task_core::TaskKind::Task,
+            deployable: None,
+            repeat_every_days: None, next_due: None,
             depends_on: vec![],
             related_to: vec![],
             column: AI_READY_COLUMN_ID.into(),
@@ -1060,6 +1646,7 @@ mod tests {
             icon: None,
             attention: Vec::new(),
             question: None,
+            blocked_reason: None,
             description: String::new(),
             acceptance_criteria: Vec::new(),
             ai_notes: String::new(),
@@ -1095,8 +1682,8 @@ mod tests {
 
         let claim = run_task(&store, &root, &TaskCommand::Claim(TaskClaimArgs {
             target: human.id.clone(), agent: "assistant".into(),
-            managed: false,
-            claim_token: None,
+                    managed: false,
+                    claim_token: None,
         })).unwrap_err();
         assert!(claim.message.contains("FOR USER"));
 
@@ -1105,6 +1692,7 @@ mod tests {
 
         let move_done = run_task(&store, &root, &TaskCommand::Move(TaskMoveArgs {
             target: human.id.clone(), column: "done".into(),
+            blocked_reason: None, confirm_genuine_block: None,
         })).unwrap_err();
         assert_eq!(move_done.code, "for_user_only");
 
@@ -1117,6 +1705,98 @@ mod tests {
         store.update(&root, finished).unwrap();
         let done = store.load(&root).unwrap().tasks.into_iter().find(|t| t.id == human.id).unwrap();
         assert!(done.completed.is_some());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ask_user_and_finish_attach_one_request_to_the_original_task() {
+        let root = temp_board("human-input");
+        let store = FsTaskStore::default();
+        store.ensure_board(&root, "Test").unwrap();
+        let one = store.create(&root, draft("Implement feature")).unwrap();
+        let id = one.id.clone();
+        let user = TaskCommand::AskUser(TaskAskUserArgs {
+            target: id.clone(), request_type: "decision".into(),
+            question: "Which approach?".into(), options: vec!["A".into(), "B".into()],
+            artifacts: vec![], mode: None, previous: None, poster: None,
+        });
+        let response = run_task(&store, &root, &user).unwrap();
+        assert_eq!(response["task"]["question"]["request_type"], "decision");
+        assert_eq!(run_task(&store, &root, &user).unwrap_err().code, "request_already_open");
+        let snapshot = store.load(&root).unwrap();
+        assert_eq!(snapshot.tasks.len(), 1);
+        let mut answer = snapshot.tasks.into_iter().find(|task| task.id == id).unwrap();
+        answer.question.as_mut().unwrap().answer = Some("A".into());
+        answer.attention.retain(|flag| flag != &TaskAttention::Question);
+        store.update(&root, answer).unwrap();
+        store.claim(&root, &id, "TestWorker").unwrap();
+        let finish = TaskCommand::Finish(TaskFinishArgs {
+            target: id.clone(), verification: "user".into(),
+            instructions: Some("Open the built app and check feature X".into()),
+        });
+        let completed = run_task(&store, &root, &finish).unwrap();
+        assert_eq!(completed["task"]["column"], "done");
+        assert!(completed["task"]["claimed_by"].is_null());
+        assert_eq!(completed["task"]["question"]["request_type"], "verification");
+        assert_eq!(completed["task"]["question"]["options"], json!(["Done", "Needs changes"]));
+        assert!(completed["task"]["completed"].is_string());
+        assert_eq!(run_task(&store, &root, &finish).unwrap_err().code, "request_already_open");
+        assert_eq!(store.load(&root).unwrap().tasks.len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn visual_ask_user_requires_evidence_and_uses_the_original_review_manifest() {
+        let root = temp_board("visual-request");
+        let store = FsTaskStore::default();
+        store.ensure_board(&root, "Test").unwrap();
+        let created = store.create(&root, draft("Review design")).unwrap();
+        let mut request = TaskAskUserArgs { target: created.id.clone(),
+            request_type: "visual-review".into(), question: "Approve this design?".into(),
+            options: vec![], artifacts: vec![], mode: None, previous: None, poster: None };
+        assert_eq!(run_ask_user(&store, &root, &request).unwrap_err().code, "visual_artifact_required");
+        let image = root.join("design.png");
+        fs::write(&image, b"\x89PNG\r\n\x1a\n").unwrap();
+        request.artifacts.push(format!("{}=Design preview", image.display()));
+        let review = run_ask_user(&store, &root, &request).unwrap();
+        assert_eq!(review["status"], "open");
+        let updated = store.load(&root).unwrap();
+        assert_eq!(updated.tasks.len(), 1);
+        assert_eq!(updated.tasks[0].id, created.id);
+        assert_eq!(updated.tasks[0].review_status.as_deref(), Some("open"));
+        assert_eq!(run_ask_user(&store, &root, &request).unwrap_err().code, "request_already_open");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn blocked_reason_is_required_and_surfaced_by_cli() {
+        let root = temp_board("blocked-reason");
+        let store = FsTaskStore::default();
+        store.ensure_board(&root, "Test").unwrap();
+        let task = store.create(&root, draft("Needs asset")).unwrap();
+        let id = task.id.as_str();
+        let root_arg = root.to_string_lossy().to_string();
+        let exec = |extra: &[&str]| {
+            let mut argv = vec!["taskboard", "--root", root_arg.as_str(), "task"];
+            argv.extend_from_slice(extra);
+            run(&Cli::try_parse_from(argv).unwrap())
+        };
+
+        let missing = exec(&["update", id, "--add-attention", "blocked"]).unwrap_err();
+        assert_eq!(missing.code, "blocked_reason_required");
+        let missing_move = exec(&["move", id, "blocked"]).unwrap_err();
+        assert_eq!(missing_move.code, "blocked_reason_required");
+
+        let first = exec(&["move", id, "blocked", "--blocked-reason", "Waiting for artist mesh."]).unwrap_err();
+        assert_eq!(first.code, "blocked_confirmation_required");
+        let challenge = first.details["token"].as_str().unwrap();
+        exec(&["move", id, "blocked", "--blocked-reason", "Waiting for artist mesh.", "--confirm-genuine-block", challenge]).unwrap();
+        let shown = exec(&["show", id]).unwrap();
+        assert_eq!(shown["blocked_reason"], "Waiting for artist mesh.");
+        assert_eq!(shown["task"]["blocked_reason"], "Waiting for artist mesh.");
+        assert_eq!(shown["readiness"], "blocked");
+        let listed = exec(&["list"]).unwrap();
+        assert_eq!(listed["tasks"][0]["blocked_reason"], "Waiting for artist mesh.");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1158,7 +1838,7 @@ mod tests {
             hidden: false,
             snoozed_until: None,
             awake_until: None,
-            ai_ready: true,
+            ai_ready: true, advisory: false,
             color: "#777777".into(),
         });
         store.save_config(&root, config).unwrap();
@@ -1196,6 +1876,7 @@ mod tests {
         let args = TaskCreateArgs {
             title: "Human feedback".into(),
             kind: "task".into(),
+            repeat_every_days: None, next_due: None,
             depends_on: vec![],
             related_to: vec![],
             column: None,
@@ -1209,6 +1890,7 @@ mod tests {
             attention: Vec::new(),
             question: None,
             options: Vec::new(),
+            blocked_reason: None, confirm_genuine_block: None,
         };
 
         run_task(&store, &root, &TaskCommand::Create(args)).unwrap();
@@ -1216,6 +1898,84 @@ mod tests {
         assert_eq!(task.user_notes, "Make a proposed design first.");
         assert!(task.attention.contains(&TaskAttention::UserNote));
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn release_attempt_run_id_is_idempotent_and_verifies_per_member() {
+        let root = temp_board("release-bound");
+        let store = FsTaskStore::default();
+        store.ensure_board(&root, "Release contract").unwrap();
+        store.release_enable(&root, true).unwrap();
+        let mut first = store.create(&root, draft("First change")).unwrap();
+        first.column = "done".into();
+        first = store.update(&root, first).unwrap();
+        let rel = store.releases(&root).unwrap().releases.pop().unwrap();
+        assert_eq!(rel.members.len(), 1);
+        let source = task_core::SourceRef {
+            repository: "T3 Code".into(),
+            commit: "exact-commit-A".into(),
+            integrated_ref: Some("main-build-sha-A".into()),
+        };
+        store.release_edit(&root, "source", &rel.id, Some(&first.id),
+            Some(source), Some("code reviewed, merged")).unwrap();
+        let run = "release-test-run-0001";
+        let prepared = store.release_prepare_bound(&root, &rel.id, "immutable sha256=test", Some(run)).unwrap();
+        assert_eq!(prepared.attempts.len(), 1);
+        assert_eq!(prepared.attempts[0].members.len(), 1);
+        assert_eq!(store.release_prepare_bound(&root, &rel.id, "retry", Some(run)).unwrap().attempts.len(), 1);
+        let mut late = store.create(&root, draft("Late addition")).unwrap();
+        late.column = "done".into();
+        late = store.update(&root, late).unwrap();
+        assert_eq!(store.releases(&root).unwrap().releases[0].members.len(), 2);
+        assert_eq!(store.releases(&root).unwrap().releases[0].attempts[0].members.len(), 1);
+        store.release_outcome_bound(&root, &rel.id, 1, "unknown", "restart receipt lost", Some(run)).unwrap();
+        assert_eq!(store.release_outcome_bound(&root, &rel.id, 1, "unknown",
+            "restart receipt lost", Some(run)).unwrap().attempts[0].evidence.len(), 2);
+        let deployed = store.release_outcome_bound(&root, &rel.id, 1, "deployed",
+            "binary hash and live PID verified", Some(run)).unwrap();
+        assert_eq!(deployed.attempts[0].status, "deployed");
+        assert!(store.release_verify_member(&root, &rel.id, 1, &late.id, true, "not in bundle").is_err());
+        let verified = store.release_verify_member(&root, &rel.id, 1, &first.id, true, "targeted UI smoke passed").unwrap();
+        assert_eq!(verified.attempts[0].status, "verified");
+        assert_eq!(verified.members.iter().find(|m| m.task_id == late.id).unwrap().stage,
+            task_core::ReleaseStage::AwaitingIntegration);
+        assert_eq!(store.release_verify_member(&root, &rel.id, 1, &first.id, true,
+            "targeted UI smoke passed").unwrap().attempts.len(), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn recurring_runs_reopen_and_wait_for_due_date() {
+        let root = temp_board("recurring");
+        let store = FsTaskStore::default();
+        store.ensure_board(&root, "Recurring fixture").unwrap();
+        let mut initial = draft("Repeat my audit");
+        initial.kind = task_core::TaskKind::Recurring;
+        initial.repeat_every_days = Some(3);
+        let created = store.create(&root, initial).unwrap();
+        assert_eq!(created.run_count, 0);
+        let mut completing = created.clone();
+        completing.column = "done".into();
+        let cycled = store.update(&root, completing).unwrap();
+        assert_eq!(cycled.kind, task_core::TaskKind::Recurring);
+        assert_eq!(cycled.column, AI_READY_COLUMN_ID);
+        assert_eq!(cycled.run_count, 1);
+        assert!(cycled.last_run_at.is_some());
+        assert!(cycled.next_due.is_some());
+        assert!(cycled.completed.is_none());
+        assert!(!task_core::recurring_due(&cycled));
+        let ready = run_task(&store, &root, &TaskCommand::List(TaskListArgs {
+            include_archived: false, column: None, parent: None,
+            roots: false, ai_ready: true,
+        })).unwrap();
+        assert!(ready["tasks"].as_array().unwrap().is_empty());
+        assert!(store.claim(&root, &cycled.id, "early-agent").is_err());
+        let mut due = cycled.clone();
+        due.next_due = Some("2000-01-01".into());
+        let due = store.update(&root, due).unwrap();
+        assert!(task_core::recurring_due(&due));
+        assert_eq!(store.claim(&root, &due.id, "ready-agent").unwrap().claimed_by.as_deref(), Some("ready-agent"));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1314,13 +2074,33 @@ mod tests {
     }
 
     #[test]
+    fn priority_list_precedes_normal_ready_work() {
+        let root = temp_board("priority-list");
+        let store = FsTaskStore::default();
+        store.ensure_board(&root, "Test").unwrap();
+        let normal = store.create(&root, draft("Normal")).unwrap();
+        let mut urgent_draft = draft("Urgent");
+        urgent_draft.attention.push(TaskAttention::Priority);
+        let urgent = store.create(&root, urgent_draft).unwrap();
+        let result = run_task(&store, &root, &TaskCommand::List(TaskListArgs {
+            include_archived: false, column: None, parent: None, roots: false, ai_ready: true,
+        })).unwrap();
+        assert_eq!(result["tasks"][0]["id"], urgent.id);
+        assert_eq!(result["tasks"][1]["id"], normal.id);
+        let shown = run_task(&store, &root, &TaskCommand::Show(TaskTarget { target: urgent.id })).unwrap();
+        assert_eq!(shown["warnings"][0]["code"], "priority_first");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn typed_task_show_and_claim_emit_advisories_without_blocking_agents() {
         let root = temp_board("work-advisories");
         let store = FsTaskStore::default();
         store.ensure_board(&root, "Test").unwrap();
 
         for (icon, expected_code, expected_phrase) in [
-            ("visual-work", "visual_work_claude_only", "Only Claude"),
+            ("visual-work", "visual_work_claude_opus_only", "Only Claude Opus"),
+            ("visual-implementation", "visual_implementation_approved", "Any suitable agent"),
             ("design", "design_initial_draft_opus_astra_only", "INITIAL design draft"),
         ] {
             let mut draft = draft("Restricted work");
@@ -1347,8 +2127,8 @@ mod tests {
                 &TaskCommand::Claim(TaskClaimArgs {
                     target: task.id.clone(),
                     agent: "generic-non-claude-non-opus".into(),
-            managed: false,
-            claim_token: None,
+                    managed: false,
+                    claim_token: None,
                 }),
             )
             .unwrap();
@@ -1373,8 +2153,8 @@ mod tests {
             &TaskCommand::Claim(TaskClaimArgs {
                 target: ordinary.id,
                 agent: "any-agent".into(),
-            managed: false,
-            claim_token: None,
+                    managed: false,
+                    claim_token: None,
             }),
         )
         .unwrap();
@@ -1408,5 +2188,83 @@ mod tests {
         assert_eq!(released.claimed_by, None);
 
         let _ = fs::remove_dir_all(root);
+    }
+}
+
+// Agent-facing CLI gate integration: the exact JSON error carries the one-use retry instruction.
+// Tauri's human update is intentionally a different entrypoint and remains exempt.
+#[cfg(test)]
+mod rolling_release_cli_tests {
+    use super::*;
+    use clap::Parser;
+    use std::{fs, time::{SystemTime, UNIX_EPOCH}};
+    fn board() -> PathBuf {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("taskboard-release-cli-{}-{nonce}", process::id()));
+        FsTaskStore::default().ensure_board(&path, "Gate QA").unwrap();
+        path
+    }
+    fn parse(root: &Path, args: &[&str]) -> Cli {
+        let mut all = vec!["taskboard".to_string(), "--root".to_string(), root.to_string_lossy().into_owned()];
+        all.extend(args.iter().map(|s| s.to_string()));
+        Cli::try_parse_from(all).unwrap()
+    }
+    #[test]
+    fn blocked_move_update_and_create_require_a_one_time_self_review() {
+        let root = board();
+        let cli = parse(&root, &["task","create","--title","Feature"]);
+        let task = run(&cli).unwrap();
+        let id = task["id"].as_str().unwrap();
+        let first = parse(&root, &["task","move",id,"blocked","--blocked-reason","waiting for source mesh"]);
+        let denied = run(&first).unwrap_err();
+        assert_eq!(denied.code, "blocked_confirmation_required");
+        assert!(denied.message.contains("deployment"));
+        let token = denied.details["token"].as_str().unwrap().to_string();
+        let wrong = parse(&root, &["task","move",id,"blocked","--blocked-reason","restart pending","--confirm-genuine-block",&token]);
+        assert_eq!(run(&wrong).unwrap_err().code, "blocked_confirmation_invalid");
+        let confirmed = parse(&root, &["task","move",id,"blocked","--blocked-reason","waiting for source mesh","--confirm-genuine-block",&token]);
+        assert_eq!(run(&confirmed).unwrap()["column"], "blocked");
+        assert_eq!(run(&confirmed).unwrap_err().code, "blocked_confirmation_invalid");
+
+        let new = parse(&root, &["task","create","--title","Blocked from outset","--column","blocked","--blocked-reason","missing API"]);
+        let challenge = run(&new).unwrap_err();
+        assert_eq!(challenge.code, "blocked_confirmation_required");
+        let token2 = challenge.details["token"].as_str().unwrap();
+        let create = parse(&root, &["task","create","--title","Blocked from outset","--column","blocked","--blocked-reason","missing API","--confirm-genuine-block",token2]);
+        assert_eq!(run(&create).unwrap()["column"], "blocked");
+
+        let in_progress = parse(&root, &["task","create","--title","Other task"]);
+        let other = run(&in_progress).unwrap();
+        let id2 = other["id"].as_str().unwrap();
+        let update = parse(&root, &["task","update",id2,"--add-attention","blocked","--blocked-reason","vendor missing"]);
+        assert_eq!(run(&update).unwrap_err().code, "blocked_confirmation_required");
+        let from_help = Cli::try_parse_from(["taskboard","task","move","--help"]).err().unwrap().to_string();
+        assert!(!from_help.contains("confirm-genuine-block"));
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn release_cli_is_opaque_argument_forwardable_and_ui_store_remains_human() {
+        let root = board();
+        let configured = parse(&root, &["release", "enable", "true"]);
+        assert!(run(&configured).is_ok());
+        let create = run(&parse(&root, &["task","create","--title","Implement"])).unwrap();
+        let id = create["id"].as_str().unwrap();
+        // Ordinary worker completes as before; release enrollment is central.
+        assert_eq!(run(&parse(&root, &["task","complete",id])).unwrap()["column"], "done");
+        let result = run(&parse(&root, &["release","list"])).unwrap();
+        assert_eq!(result["releases"][0]["members"][0]["task_id"], id);
+        // UI/human core path may move directly without agent challenge.
+        let store = FsTaskStore::default();
+        let mut human = store.create(&root, TaskDraft {
+            reserved_id: None, reservation_token: None,
+            kind: task_core::TaskKind::Task, deployable: None,
+            repeat_every_days: None, next_due: None,
+            depends_on: vec![], related_to: vec![], title: "Human task".into(), column: "ai-ready".into(),
+            parent: None, category: None, icon: None, attention: vec![], question: None, blocked_reason: None, description: String::new(),
+            acceptance_criteria: vec![], ai_notes: String::new(), user_notes: String::new(), notes: String::new(),
+        }).unwrap();
+        human.column = "blocked".into();
+        assert_eq!(store.update_as(&root, human, task_core::MutationActor::Human).unwrap().column, "blocked");
+        fs::remove_dir_all(root).unwrap();
     }
 }

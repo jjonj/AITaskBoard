@@ -17,7 +17,7 @@
         "height": 900,
         "minWidth": 500,
         "minHeight": 325,
-        "visible": false,
+        "visible": true,
         "backgroundColor": "#121417"
       }
     ],

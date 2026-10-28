@@ -2,6 +2,10 @@
 
 ## Implemented (2026-10-22)
 
+### Live board discovery (2026-10-23)
+
+The desktop now merges its local catalog with existing `jjj\[ProjectName]\Tasks\_board.md` boards on each project-list read. Agent-created boards appear without manual catalog registration. Discovery reads only metadata, preserves existing tab IDs and folder associations, uses stable path-based IDs for discovered boards, and follows board names from Markdown. It never loads task stores or writes the catalog merely to list projects. The UI refreshes every two seconds and on window focus, pauses during editors/dialogs/drags/operations, and preserves the window's selected project when another window changes the shared active tab. Explicit tab removal records a backward-compatible `hiddenPaths` list in the local catalog; explicit project addition clears that suppression.
+
 The desktop application now hosts a project tab strip. A native per-user project catalog
 is stored in `%APPDATA%\TaskBoard\projects.json` (with a prior-copy backup as
 `projects.json.bak`). A fresh installation uses the existing Wartribes board as
@@ -30,11 +34,15 @@ single board root. No cross-project dependencies are available or implied.
 
 ## Important current limitations / next phase
 
-1. **Project-specific ID prefixes:** The core still creates `WT-####` tasks
-   and `WTE-####` epics and discovers Markdown files with those prefixes.
-   Define a backward-compatible `task_prefix` in `_board.md`, then update
-   generators, scanners, dependency parsing, search, and UI link pickers. Never
-   silently rename existing Wartribes IDs or rewrite cross-references.
+1. **Project-specific ID prefixes (implemented in source 2026-10-23; deployment pending):**
+   `_board.md` optional `task_prefix` and `epic_prefix` govern only NEW IDs. The
+   legacy default remains WT/WTE when absent, including Wartribes. Core scans
+   task filenames by general ID shape rather than current prefix, so legacy
+   WT/WTE and earlier custom-prefix Markdown stay intact after configuration.
+   The desktop creation dialog suggests editable prefixes; tab settings edit
+   them, storing the result in `_board.md` for `--root` CLI compatibility.
+   T3Code must be explicitly set to T3/T3E after safe deployment; no live
+   board files are changed by source-stage implementation. No bulk renaming.
 2. **Shared project catalog API for agents:** Extract the catalog module from
    the Tauri desktop to a reusable Rust crate or library. Add explicit
    `taskboard --project <stable-id>` resolution while retaining `--root`
@@ -65,3 +73,11 @@ single board root. No cross-project dependencies are available or implied.
 - Each new board remains immediately usable with the existing CLI
   `--root` path even before the later generic prefix/CLI phases.
 - Registered source folders are read-only metadata in TaskBoard: creating a project never generates files in or moves the original source folders.
+
+## Live changes 2026-10-24: safe project tab and task moves
+
+- The accidental closure of **Citizen** was restored using its original Markdown board. Closed tabs suppress rediscovery by adding their board path to the local catalog's `hiddenPaths`; source folders and Markdown tasks are never deleted. The naked top-bar **×** has been removed. To close a tab: click that project's ⚙, then **Close tab…**, then **Confirm close**. Ctrl+Z or the **↶ Undo close** control reopens the most recently closed tab with its original stable catalog ID and folder associations. Ctrl+Z also undoes project tab reordering. A project catalog backup was retained during the Citizen repair.
+- Tasks can be dragged from their cards onto a *different project tab* to transfer them. The native backend reserves a destination ID using its own board's allocator, keeps the original task body/notes, verifies unchanged source revision, and deletes the original only after a valid destination is persisted. It switches to the destination after success and displays `oldID → project/newID`. Transfer intentionally refuses claimed tasks, epics, cards with review media, attachment references, hierarchy, dependency/related links, or incoming references so the destination cannot silently orphan related tasks. Unlinked active tasks transfer directly. Movement of a card within the board is unchanged.
+- **Related to** now searches all registered project boards and stores remote task links as `<board root>#<task ID>`. These are informational references, never hard dependencies. The picker displays the short project name and task ID; the backend stores the qualified string, and validation accepts it without requiring the remote board to be online. Ordinary `Depends on` stays strictly local.
+- Manual migration requested: OMN-0005 → MISC-0033 (Inbox improvements), OMN-0004 → MISC-0034 (Better Undo support), preserving all text and removing Omni originals only after verifying the destination content. Originals backed up in `artifacts/cross-project-transfer-20261024-omn/`.
+- The 2026-10-24 Tauri release built and restarted successfully; screenshot confirmed the Citizen tab visible and the project tabs no longer have × buttons. 

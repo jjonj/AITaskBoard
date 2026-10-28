@@ -18,6 +18,11 @@ use std::{
     time::Duration,
 };
 
+#[path = "review.rs"]
+pub mod review;
+#[path = "store/review_link.rs"]
+mod review_link;
+
 const BOARD_FILE: &str = "_board.md";
 const ACTIVE_DIR: &str = "Active";
 const ARCHIVE_DIR: &str = "Archive";
@@ -25,6 +30,8 @@ const COMPLETED_RETENTION_DAYS: i64 = 7;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TaskStoreError {
+    #[error("blocked_confirmation_required: {task} {action}; retry only for a genuine blocker with --confirm-genuine-block {token}")]
+    BlockedChallenge { token: String, task: String, action: String },
     #[error("board data is invalid: {0}")]
     Invalid(String),
     #[error("task not found: {0}")]
@@ -62,10 +69,46 @@ pub trait TaskStore {
 #[derive(Default)]
 pub struct FsTaskStore;
 
+/// Temporary, lock-protected ID claim used by the desktop New Task dialog.
+/// It does not create a phantom task in the board.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskIdReservation {
+    pub id: String,
+    pub token: String,
+}
+
+const RESERVATIONS_DIR: &str = ".id-reservations";
+
+fn next_task_id(root: &Path, snapshot: &BoardSnapshot, kind: TaskKind) -> String {
+    let configured = if kind == TaskKind::Epic {
+        snapshot.config.epic_prefix.as_deref().unwrap_or("WTE")
+    } else {
+        snapshot.config.task_prefix.as_deref().unwrap_or("WT")
+    };
+    let prefix = format!("{configured}-");
+    let mut next = snapshot.tasks.iter()
+        .filter_map(|task| task.id.strip_prefix(&prefix)?.parse::<u32>().ok())
+        .max().unwrap_or(0) + 1;
+    loop {
+        let id = format!("{prefix}{next:04}");
+        if !root.join(RESERVATIONS_DIR).join(format!("{id}.txt")).exists()
+            && !root.join(ACTIVE_DIR).join(format!("{id}.md")).exists()
+            && !root.join(ARCHIVE_DIR).join(format!("{id}.md")).exists() {
+            return id;
+        }
+        next += 1;
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TaskMeta {
     #[serde(default)]
     kind: TaskKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")] deployable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] repeat_every_days: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] next_due: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] last_run_at: Option<String>,
+    #[serde(default)] run_count: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     depends_on: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -86,10 +129,18 @@ struct TaskMeta {
     icon: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     claimed_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    live: Option<crate::TaskLive>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     attention: Vec<TaskAttention>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     question: Option<TaskQuestion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    blocked_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    review_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    review_round: Option<u32>,
     created: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     completed: Option<String>,
@@ -97,7 +148,7 @@ struct TaskMeta {
     completed_at: Option<String>,
 }
 
-struct LockGuard {
+pub(crate) struct LockGuard {
     file: fs::File,
 }
 
@@ -107,20 +158,32 @@ impl Drop for LockGuard {
     }
 }
 
+pub fn default_column_ai_ready(id: &str, name: &str, terminal: bool) -> bool {
+    !terminal && !["draft", "done", "blocked", "review"]
+        .iter()
+        .any(|excluded| id.trim().eq_ignore_ascii_case(excluded) ||
+            name.trim().eq_ignore_ascii_case(excluded))
+}
+
 pub fn default_board_config(name: impl Into<String>) -> BoardConfig {
     BoardConfig {
         schema: SCHEMA_VERSION,
         name: name.into(),
+        releases_enabled: false,
+        release_enabled_at: None,
+        task_prefix: None,
+        epic_prefix: None,
         columns: vec![
             Column {
                 id: DRAFT_COLUMN_ID.into(),
-                name: "Draft".into(),
+                name: "User Drafts".into(),
                 order: 0,
                 terminal: false,
                 hidden: false,
                 snoozed_until: None,
                 awake_until: None,
                 ai_ready: false,
+                advisory: false,
                 color: "#8e7da8".into(),
             },
             Column {
@@ -132,6 +195,7 @@ pub fn default_board_config(name: impl Into<String>) -> BoardConfig {
                 snoozed_until: None,
                 awake_until: None,
                 ai_ready: true,
+                advisory: false,
                 color: "#718f78".into(),
             },
             Column {
@@ -142,7 +206,8 @@ pub fn default_board_config(name: impl Into<String>) -> BoardConfig {
                 hidden: false,
                 snoozed_until: None,
                 awake_until: None,
-                ai_ready: false,
+                ai_ready: true,
+                advisory: false,
                 color: "#7388a8".into(),
             },
             Column {
@@ -154,6 +219,7 @@ pub fn default_board_config(name: impl Into<String>) -> BoardConfig {
                 snoozed_until: None,
                 awake_until: None,
                 ai_ready: false,
+                advisory: false,
                 color: "#a48669".into(),
             },
             Column {
@@ -165,6 +231,7 @@ pub fn default_board_config(name: impl Into<String>) -> BoardConfig {
                 snoozed_until: None,
                 awake_until: None,
                 ai_ready: false,
+                advisory: false,
                 color: "#6f8679".into(),
             },
         ],
@@ -173,6 +240,69 @@ pub fn default_board_config(name: impl Into<String>) -> BoardConfig {
 }
 
 impl FsTaskStore {
+    pub fn reserve_task_id(&self, root: &Path, kind: TaskKind) -> Result<TaskIdReservation, TaskStoreError> {
+        let _lock = acquire_lock(root)?;
+        let snapshot = self.load_unlocked(root)?;
+        let dir = root.join(RESERVATIONS_DIR);
+        fs::create_dir_all(&dir)?;
+        // Crashed or discarded dialogs cannot hold IDs indefinitely.
+        for entry in fs::read_dir(&dir)?.flatten() {
+            let old = entry.metadata().ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|elapsed| elapsed > Duration::from_secs(24 * 60 * 60));
+            if old && entry.path().extension().is_some_and(|extension| extension == "txt") {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+        let id = next_task_id(root, &snapshot, kind);
+        let token = revision(&format!("{}:{}:{}:{:?}", id, std::process::id(),
+            Local::now().timestamp_nanos_opt().unwrap_or_default(), std::thread::current().id()));
+        fs::write(dir.join(format!("{id}.txt")), &token)?;
+        Ok(TaskIdReservation { id, token })
+    }
+
+    pub fn release_task_id(&self, root: &Path, reservation: &TaskIdReservation) -> Result<(), TaskStoreError> {
+        let _lock = acquire_lock(root)?;
+        let file = root.join(RESERVATIONS_DIR).join(format!("{}.txt", reservation.id));
+        if file.is_file() && fs::read_to_string(&file)? == reservation.token {
+            fs::remove_file(file)?;
+        }
+        Ok(())
+    }
+
+    /// Store an immutable image under the synced Tasks folder. The owning task
+    /// must exist or have a live New Task reservation.
+    pub fn attach_task_image(
+        &self, root: &Path, task_id: &str, bytes: &[u8], extension: &str,
+    ) -> Result<String, TaskStoreError> {
+        let _lock = acquire_lock(root)?;
+        if task_id.is_empty() || !task_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-') {
+            return Err(TaskStoreError::Invalid("invalid attachment task ID".into()));
+        }
+        if bytes.is_empty() || bytes.len() > 20 * 1024 * 1024 {
+            return Err(TaskStoreError::Invalid("clipboard image must be 1 byte to 20 MB".into()));
+        }
+        if !matches!(extension, "png" | "jpg" | "webp" | "gif") {
+            return Err(TaskStoreError::Invalid("unsupported clipboard image type".into()));
+        }
+        let is_active = root.join(ACTIVE_DIR).join(format!("{task_id}.md")).is_file();
+        let is_reserved = root.join(RESERVATIONS_DIR).join(format!("{task_id}.txt")).is_file();
+        if !is_active && !is_reserved {
+            return Err(TaskStoreError::NotFound(task_id.into()));
+        }
+        let dir = root.join("Attachments").join(task_id);
+        fs::create_dir_all(&dir)?;
+        let digest = Sha256::digest(bytes);
+        let name = format!("{digest:x}.{extension}");
+        let target = dir.join(&name);
+        if !target.exists() {
+            // New immutable name; concurrent writes serialize through the board lock.
+            fs::write(&target, bytes)?;
+        }
+        Ok(format!("Attachments/{task_id}/{name}"))
+    }
+
     pub fn ensure_board(&self, root: &Path, name: &str) -> Result<(), TaskStoreError> {
         fs::create_dir_all(root.join(ACTIVE_DIR))?;
         fs::create_dir_all(root.join(ARCHIVE_DIR))?;
@@ -184,7 +314,7 @@ impl FsTaskStore {
         Ok(())
     }
 
-    fn load_unlocked(&self, root: &Path) -> Result<BoardSnapshot, TaskStoreError> {
+    pub(crate) fn load_unlocked(&self, root: &Path) -> Result<BoardSnapshot, TaskStoreError> {
         self.ensure_board(root, "TaskBoard")?;
         let board_text = fs::read_to_string(root.join(BOARD_FILE))?;
         let mut config = parse_board(&board_text)?;
@@ -279,6 +409,7 @@ impl FsTaskStore {
             } else {
                 ready_column.id.clone()
             };
+            released.blocked_reason = None;
             apply_completion_state(&snapshot.config, &mut released);
             write_text_atomic(&path, &render_task(&released, Some(&existing))?)?;
             changed = true;
@@ -349,6 +480,17 @@ impl FsTaskStore {
         // Normalize completion timestamps. Existing terminal tasks that predate
         // this field receive today's date, giving them a full retention period.
         for task in &mut active_tasks {
+            if task.kind == TaskKind::Release { continue; }
+            if task.kind == TaskKind::Recurring && terminal_columns.contains(task.column.as_str()) {
+                let path = PathBuf::from(&task.path);
+                let existing = fs::read_to_string(&path)?;
+                apply_completion_state(&snapshot.config, task);
+                let text = render_task(task, Some(&existing))?;
+                write_text_atomic(&path, &text)?;
+                task.revision = revision(&text);
+                changed = true;
+                continue;
+            }
             let is_terminal = terminal_columns.contains(task.column.as_str());
             let normalized = if is_terminal {
                 task.completed
@@ -365,7 +507,11 @@ impl FsTaskStore {
             if task.completed != normalized || stale_user_status {
                 let path = PathBuf::from(&task.path);
                 let existing = fs::read_to_string(&path)?;
+                let newly_completed = task.completed.is_none() && normalized.is_some();
                 task.completed = normalized;
+                if newly_completed && task.completed_at.is_none() {
+                    task.completed_at = Some(Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true));
+                }
                 if stale_user_status {
                     if task.kind == TaskKind::ForUser { task.kind = TaskKind::Task; }
                     task.attention.retain(|flag| flag != &TaskAttention::NeedsUser);
@@ -381,6 +527,10 @@ impl FsTaskStore {
         let mut remaining: HashSet<String> = active_tasks
             .iter()
             .filter(|task| terminal_columns.contains(task.column.as_str()))
+            // Implementation can be Done while human acceptance is still open.
+            .filter(|task| task.review_status.as_deref() != Some("open") &&
+                !(task.attention.contains(&TaskAttention::Question) &&
+                  task.question.as_ref().is_some_and(|q| q.answer.is_none())))
             .filter_map(|task| {
                 let completed = task.completed.as_deref().and_then(parse_task_date)?;
                 (today.signed_duration_since(completed).num_days() >= COMPLETED_RETENTION_DAYS)
@@ -432,6 +582,239 @@ impl FsTaskStore {
     }
 }
 
+impl FsTaskStore {
+    fn load_impl(&self, root: &Path) -> Result<BoardSnapshot, TaskStoreError> {
+        let _lock = acquire_lock(root)?;
+        let mut snapshot = self.load_unlocked(root)?;
+        if self.maintain_snoozed_columns(root, &snapshot.config)? {
+            snapshot = self.load_unlocked(root)?;
+        }
+        if self.maintain_completed_tasks(root, &snapshot)? {
+            snapshot = self.load_unlocked(root)?;
+        }
+        if self.maintain_dependency_unblocks(&snapshot)? {
+            snapshot = self.load_unlocked(root)?;
+        }
+        if self.maintain_epic_columns(&snapshot)? {
+            snapshot = self.load_unlocked(root)?;
+        }
+        let synced_review_bytes = review::measure_review_bytes(root);
+        if synced_review_bytes > 1024 * 1024 * 1024 {
+            snapshot.warnings.push(format!(
+                "Review media above 1 GB soft cap ({} MB). Nothing blocked.",
+                synced_review_bytes / (1024 * 1024)));
+        }
+        let stale = review::stale_open_review_ids(root);
+        if !stale.is_empty() {
+            snapshot.warnings.push(format!(
+                "Open reviews older than 30 days: {} (never auto-deleted).",
+                stale.join(", ")));
+        }
+        crate::release::reconcile_unlocked(root, &snapshot.config, &snapshot.tasks, false)?;
+        if crate::release::reconcile_repairs_unlocked(root)? {
+            snapshot = self.load_unlocked(root)?;
+        }
+        Ok(snapshot)
+    }
+
+    /// `create` with an explicit actor. The desktop app creates as `Human`;
+    /// agents/CLI use the trait method, which requires a blocked reason.
+    pub fn create_as(&self, root: &Path, draft: TaskDraft, actor: MutationActor) -> Result<Task, TaskStoreError> {
+        self.create_as_confirmed(root, draft, actor, None)
+    }
+
+    /// Agent confirmation is verified under the same board lock as creation.
+    /// The ordinary public Agent create route cannot bypass the review.
+    pub fn create_as_confirmed(&self, root: &Path, draft: TaskDraft, actor: MutationActor, confirmation: Option<&str>) -> Result<Task, TaskStoreError> {
+        let _lock = acquire_lock(root)?;
+        let blocking = draft.column == BLOCKED_COLUMN_ID || draft.attention.contains(&TaskAttention::Blocked);
+        if actor == MutationActor::Agent && blocking {
+            crate::block_gate::challenge_agent_block_unlocked(root, &format!("new:{}", draft.title), "create", draft.blocked_reason.as_deref().unwrap_or(""), confirmation)?;
+        } else if confirmation.is_some() {
+            return Err(TaskStoreError::Invalid("blocked_confirmation_invalid: no new agent Blocked transition".into()));
+        }
+        self.create_as_unlocked(root, draft, actor)
+    }
+
+    pub(crate) fn create_as_unlocked(&self, root: &Path, draft: TaskDraft, actor: MutationActor) -> Result<Task, TaskStoreError> {
+        let snapshot = self.load_unlocked(root)?;
+        validate_draft(&snapshot, &draft)?;
+
+        let reserved = match (&draft.reserved_id, &draft.reservation_token) {
+            (None, None) => None,
+            (Some(id), Some(token)) => {
+                // Require a live reservation for the exact task/epic namespace.
+                let configured = if draft.kind == TaskKind::Epic {
+                    snapshot.config.epic_prefix.as_deref().unwrap_or("WTE")
+                } else {
+                    snapshot.config.task_prefix.as_deref().unwrap_or("WT")
+                };
+                if !id.strip_prefix(&format!("{configured}-"))
+                    .is_some_and(|digits| digits.len() >= 4 && digits.bytes().all(|b| b.is_ascii_digit())) {
+                    return Err(TaskStoreError::Invalid("reserved ID has wrong task kind or prefix".into()));
+                }
+                let file = root.join(RESERVATIONS_DIR).join(format!("{id}.txt"));
+                if !file.is_file() || fs::read_to_string(&file)? != *token {
+                    return Err(TaskStoreError::Conflict(format!("{id} reservation expired or changed")));
+                }
+                Some((id.clone(), file))
+            }
+            _ => return Err(TaskStoreError::Invalid("reserved ID and reservation token must be supplied together".into())),
+        };
+        let id = reserved.as_ref().map(|(id, _)| id.clone())
+            .unwrap_or_else(|| next_task_id(root, &snapshot, draft.kind));
+        let created = Local::now().date_naive().to_string();
+        let path = root.join(ACTIVE_DIR).join(format!("{id}.md"));
+        if path.exists() {
+            return Err(TaskStoreError::Conflict(format!("{id} already exists")));
+        }
+
+        let mut task = Task {
+            schema: SCHEMA_VERSION,
+            id,
+            kind: draft.kind,
+            deployable: draft.deployable,
+            repeat_every_days: draft.repeat_every_days,
+            next_due: draft.next_due,
+            last_run_at: None,
+            run_count: 0,
+            depends_on: draft.depends_on,
+            related_to: draft.related_to,
+            position_after: None,
+            positioned_at: None,
+            title: draft.title.trim().to_string(),
+            column: draft.column,
+            parent: draft.parent,
+            category: draft.category,
+            icon: draft.icon,
+            claimed_by: None,
+            live: None,
+            attention: draft.attention,
+            question: draft.question,
+            blocked_reason: draft.blocked_reason,
+            review_status: None,
+            review_round: None,
+            created,
+            completed: None,
+            completed_at: None,
+            description: draft.description,
+            acceptance_criteria: draft.acceptance_criteria,
+            ai_notes: draft.ai_notes,
+            user_notes: draft.user_notes,
+            notes: draft.notes,
+            archived: false,
+            path: path.to_string_lossy().to_string(),
+            revision: String::new(),
+        };
+        if task.kind == TaskKind::Epic {
+            task.column = DRAFT_COLUMN_ID.to_string();
+        }
+        apply_completion_state(&snapshot.config, &mut task);
+        apply_blocked_state(None, &mut task, actor)?;
+        validate_task(&snapshot, &task)?;
+        let text = render_task(&task, None)?;
+        write_new(&path, &text)?;
+        if let Some((_, reservation_file)) = reserved {
+            // Task creation is already durable; stale reservation cleanup is safe.
+            let _ = fs::remove_file(reservation_file);
+        }
+        task.revision = revision(&text);
+        if !task.archived && task.completed.is_some() {
+            let current = self.load_unlocked(root)?;
+            crate::release::reconcile_unlocked(root, &current.config, &current.tasks, false)?;
+        }
+        Ok(task)
+    }
+
+    /// `update` with an explicit actor. Human edits can never author or change
+    /// `blocked_reason`; agent edits must supply one when entering Blocked.
+    pub fn update_as(&self, root: &Path, task: Task, actor: MutationActor) -> Result<Task, TaskStoreError> {
+        self.update_as_confirmed(root, task, actor, None, "update")
+    }
+
+    /// Validates a one-use agent Blocked confirmation inside the transaction.
+    /// `action` distinguishes move from update, matching the CLI challenge.
+    pub fn update_as_confirmed(&self, root: &Path, mut task: Task, actor: MutationActor, confirmation: Option<&str>, action: &str) -> Result<Task, TaskStoreError> {
+        let _lock = acquire_lock(root)?;
+        let snapshot = self.load_unlocked(root)?;
+        let path = find_task_path(root, &task.id)?;
+        let existing = fs::read_to_string(&path)?;
+        if !task.revision.is_empty() && revision(&existing) != task.revision {
+            return Err(TaskStoreError::Conflict(format!(
+                "{} changed on disk",
+                task.id
+            )));
+        }
+
+        task.archived = path.starts_with(root.join(ARCHIVE_DIR));
+        task.path = path.to_string_lossy().to_string();
+        let previous = parse_task(&path, task.archived, &existing)?;
+        if actor == MutationActor::Human && previous.kind == TaskKind::ForUser &&
+            review_link::is_implementation_review(&task) {
+            let answer = task.question.as_ref().and_then(|q| q.answer.as_deref()).unwrap_or("").trim();
+            if ["approve", "approved", "accepted", "needs changes", "rejected"].iter()
+                .any(|value| answer.eq_ignore_ascii_case(value)) {
+                if let Some(done) = snapshot.config.columns.iter().find(|col| col.terminal) {
+                    task.column = done.id.clone();
+                }
+            }
+        }
+        if previous.kind == TaskKind::Epic && task.column != previous.column {
+            return Err(TaskStoreError::Invalid(format!("{} is an epic: its column is derived from child tasks and cannot be moved directly", task.id)));
+        }
+        if matches!(task.kind, TaskKind::Epic | TaskKind::ForUser) && task.claimed_by.is_some() {
+            return Err(TaskStoreError::Invalid("epics and For user tasks cannot be claimed or assigned to agents".into()));
+        }
+        if !task.archived && task.kind != TaskKind::Epic
+           && previous.column != task.column
+           && (task.column == IN_PROGRESS_COLUMN_ID || snapshot.config.columns.iter().any(|c| c.id == task.column && c.terminal)) {
+            ensure_dependencies_complete(&snapshot, &task)?;
+        }
+        if !task.archived {
+            apply_completion_state(&snapshot.config, &mut task);
+        }
+        review_link::close_question(&mut task,
+            actor == MutationActor::Human && previous.kind == TaskKind::ForUser);
+        let becoming_blocked = !is_task_blocked(&previous) && is_task_blocked(&task);
+        if actor == MutationActor::Agent && becoming_blocked {
+            crate::block_gate::challenge_agent_block_unlocked(root, &task.id, action, task.blocked_reason.as_deref().unwrap_or(""), confirmation)?;
+        } else if confirmation.is_some() {
+            return Err(TaskStoreError::Invalid("blocked_confirmation_invalid: no new agent Blocked transition".into()));
+        }
+        apply_blocked_state(Some(&previous), &mut task, actor)?;
+        validate_task(&snapshot, &task)?;
+        // An advisory is temporary board-wide information. Completing it
+        // removes the Markdown card instead of leaving a misleading Done task.
+        // The update remains protected by the revision check + board lock.
+        let was_advisory = snapshot.config.columns.iter()
+            .any(|column| column.id == previous.column && column.advisory);
+        let now_terminal = snapshot.config.columns.iter()
+            .any(|column| column.id == task.column && column.terminal);
+        if was_advisory && now_terminal && !task.archived {
+            fs::remove_file(&path)?;
+            task.revision.clear();
+            return Ok(task);
+        }
+        let text = if task.claimed_by != previous.claimed_by {
+            render_with_claim_token(&task, &existing, None)?
+        } else { render_task(&task, Some(&existing))? };
+        write_text_atomic(&path, &text)?;
+        task.revision = revision(&text);
+        if actor == MutationActor::Human && previous.completed.is_none() && task.completed.is_some() {
+            review_link::reconcile(root, &snapshot, &task)?;
+        }
+        // Complete dependent release during the same board lock. The next load
+        // also covers out-of-band edits and archived prerequisites.
+        if !task.archived && task.completed.is_some() && previous.completed.is_none() {
+            let current = self.load_unlocked(root)?;
+            self.maintain_dependency_unblocks(&current)?;
+        }
+        let current = self.load_unlocked(root)?;
+        crate::release::reconcile_unlocked(root, &current.config, &current.tasks, false)?;
+        Ok(task)
+    }
+}
+
 /// TaskBoard-owned lifetime token; separate from OpenRig claimant generation.
 #[derive(Debug, Clone, Serialize)]
 pub struct ManagedClaim {
@@ -477,8 +860,10 @@ impl FsTaskStore {
         }
         let existing = fs::read_to_string(&path)?;
         let mut task = parse_task(&path, false, &existing)?;
-        if task.kind != TaskKind::Task || task.attention.contains(&TaskAttention::NeedsUser) {
-            return Err(TaskStoreError::Invalid("task is not executable".into()));
+        if !matches!(task.kind, TaskKind::Task | TaskKind::Recurring)
+            || task.attention.contains(&TaskAttention::NeedsUser)
+            || !recurring_due(&task) {
+            return Err(TaskStoreError::Invalid("task is not executable or its recurrence is not due".into()));
         }
         ensure_dependencies_complete(&self.load_unlocked(root)?, &task)?;
         if let Some(owner) = task.claimed_by.as_deref() {
@@ -520,13 +905,18 @@ impl FsTaskStore {
         }
         let snapshot = self.load_unlocked(root)?;
         ensure_dependencies_complete(&snapshot, &task)?;
+        if !recurring_due(&task) {
+            return Err(TaskStoreError::Invalid("recurring task is not yet due".into()));
+        }
         let terminal = snapshot.config.columns.iter().filter(|column| column.terminal)
             .min_by_key(|column| column.order)
             .ok_or_else(|| TaskStoreError::Invalid("board has no terminal column".into()))?;
         task.column = terminal.id.clone();
         apply_completion_state(&snapshot.config, &mut task);
         validate_task(&snapshot, &task)?;
-        let rendered = render_task(&task, Some(&existing))?;
+        let rendered = if task.kind == TaskKind::Recurring {
+            render_with_claim_token(&task, &existing, None)?
+        } else { render_task(&task, Some(&existing))? };
         write_text_atomic(&path, &rendered)?;
         task.revision = revision(&rendered);
         let current = self.load_unlocked(root)?;
@@ -566,124 +956,15 @@ impl FsTaskStore {
 
 impl TaskStore for FsTaskStore {
     fn load(&self, root: &Path) -> Result<BoardSnapshot, TaskStoreError> {
-        let _lock = acquire_lock(root)?;
-        let mut snapshot = self.load_unlocked(root)?;
-        if self.maintain_snoozed_columns(root, &snapshot.config)? {
-            snapshot = self.load_unlocked(root)?;
-        }
-        if self.maintain_completed_tasks(root, &snapshot)? {
-            snapshot = self.load_unlocked(root)?;
-        }
-        if self.maintain_dependency_unblocks(&snapshot)? {
-            snapshot = self.load_unlocked(root)?;
-        }
-        if self.maintain_epic_columns(&snapshot)? {
-            snapshot = self.load_unlocked(root)?;
-        }
-        Ok(snapshot)
+        self.load_impl(root)
     }
 
     fn create(&self, root: &Path, draft: TaskDraft) -> Result<Task, TaskStoreError> {
-        let _lock = acquire_lock(root)?;
-        let snapshot = self.load_unlocked(root)?;
-        validate_draft(&snapshot, &draft)?;
-
-        let prefix = if draft.kind == TaskKind::Epic { "WTE-" } else { "WT-" };
-        let next = snapshot
-            .tasks
-            .iter()
-            .filter_map(|t| t.id.strip_prefix(prefix)?.parse::<u32>().ok())
-            .max()
-            .unwrap_or(0)
-            + 1;
-        let id = format!("{prefix}{next:04}");
-        let created = Local::now().date_naive().to_string();
-        let path = root.join(ACTIVE_DIR).join(format!("{id}.md"));
-        if path.exists() {
-            return Err(TaskStoreError::Conflict(format!("{id} already exists")));
-        }
-
-        let mut task = Task {
-            schema: SCHEMA_VERSION,
-            id,
-            kind: draft.kind,
-            depends_on: draft.depends_on,
-            related_to: draft.related_to,
-            position_after: None,
-            positioned_at: None,
-            title: draft.title.trim().to_string(),
-            column: draft.column,
-            parent: draft.parent,
-            category: draft.category,
-            icon: draft.icon,
-            claimed_by: None,
-            attention: draft.attention,
-            question: draft.question,
-            created,
-            completed: None,
-            completed_at: None,
-            description: draft.description,
-            acceptance_criteria: draft.acceptance_criteria,
-            ai_notes: draft.ai_notes,
-            user_notes: draft.user_notes,
-            notes: draft.notes,
-            archived: false,
-            path: path.to_string_lossy().to_string(),
-            revision: String::new(),
-        };
-        if task.kind == TaskKind::Epic {
-            task.column = DRAFT_COLUMN_ID.to_string();
-        }
-        apply_completion_state(&snapshot.config, &mut task);
-        validate_task(&snapshot, &task)?;
-        let text = render_task(&task, None)?;
-        write_new(&path, &text)?;
-        task.revision = revision(&text);
-        Ok(task)
+        self.create_as(root, draft, MutationActor::Agent)
     }
 
-    fn update(&self, root: &Path, mut task: Task) -> Result<Task, TaskStoreError> {
-        let _lock = acquire_lock(root)?;
-        let snapshot = self.load_unlocked(root)?;
-        let path = find_task_path(root, &task.id)?;
-        let existing = fs::read_to_string(&path)?;
-        if !task.revision.is_empty() && revision(&existing) != task.revision {
-            return Err(TaskStoreError::Conflict(format!(
-                "{} changed on disk",
-                task.id
-            )));
-        }
-
-        task.archived = path.starts_with(root.join(ARCHIVE_DIR));
-        task.path = path.to_string_lossy().to_string();
-        let previous = parse_task(&path, task.archived, &existing)?;
-        if previous.kind == TaskKind::Epic && task.column != previous.column {
-            return Err(TaskStoreError::Invalid(format!("{} is an epic: its column is derived from child tasks and cannot be moved directly", task.id)));
-        }
-        if matches!(task.kind, TaskKind::Epic | TaskKind::ForUser) && task.claimed_by.is_some() {
-            return Err(TaskStoreError::Invalid("epics and For user tasks cannot be claimed or assigned to agents".into()));
-        }
-        if !task.archived && task.kind != TaskKind::Epic
-           && previous.column != task.column
-           && (task.column == IN_PROGRESS_COLUMN_ID || snapshot.config.columns.iter().any(|c| c.id == task.column && c.terminal)) {
-            ensure_dependencies_complete(&snapshot, &task)?;
-        }
-        if !task.archived {
-            apply_completion_state(&snapshot.config, &mut task);
-        }
-        validate_task(&snapshot, &task)?;
-        let text = if task.claimed_by != previous.claimed_by {
-            render_with_claim_token(&task, &existing, None)?
-        } else { render_task(&task, Some(&existing))? };
-        write_text_atomic(&path, &text)?;
-        task.revision = revision(&text);
-        // Complete dependent release during the same board lock. The next load
-        // also covers out-of-band edits and archived prerequisites.
-        if !task.archived && task.completed.is_some() && previous.completed.is_none() {
-            let current = self.load_unlocked(root)?;
-            self.maintain_dependency_unblocks(&current)?;
-        }
-        Ok(task)
+    fn update(&self, root: &Path, task: Task) -> Result<Task, TaskStoreError> {
+        self.update_as(root, task, MutationActor::Agent)
     }
 
     fn claim(&self, root: &Path, id: &str, agent: &str) -> Result<Task, TaskStoreError> {
@@ -710,6 +991,9 @@ impl TaskStore for FsTaskStore {
         }
         let snapshot = self.load_unlocked(root)?;
         ensure_dependencies_complete(&snapshot, &task)?;
+        if !recurring_due(&task) {
+            return Err(TaskStoreError::Invalid("recurring task is not yet due".into()));
+        }
         if let Some(owner) = task.claimed_by.as_deref() {
             if owner != agent {
                 return Err(TaskStoreError::AlreadyClaimed {
@@ -1126,6 +1410,31 @@ impl TaskStore for FsTaskStore {
 
 /// Only regular tasks can carry hard dependencies, and hard dependency
 /// targets must also be executable tasks. Related links are informational.
+fn validate_cross_project_id(reference: &str) -> Result<(&Path, &str), TaskStoreError> {
+    let (board, id) = reference.rsplit_once('#').ok_or_else(||
+        TaskStoreError::Invalid(format!("invalid cross-project link: {reference}")))?;
+    if board.len() > 512 || !Path::new(board).is_absolute() ||
+        id.len() > 32 || !id.contains('-') ||
+        !id.bytes().all(|ch| ch.is_ascii_alphanumeric() || ch == b'-') {
+        return Err(TaskStoreError::Invalid(format!("invalid cross-project link: {reference}")));
+    }
+    Ok((Path::new(board), id))
+}
+
+fn load_cross_project_task(reference: &str) -> Result<Task, TaskStoreError> {
+    let (root, id) = validate_cross_project_id(reference)?;
+    let active = root.join(ACTIVE_DIR).join(format!("{id}.md"));
+    if active.is_file() {
+        let content = fs::read_to_string(&active)?;
+        return parse_task(&active, false, &content);
+    }
+    let mut archived = Vec::new();
+    let mut warnings = Vec::new();
+    collect_tasks(&root.join(ARCHIVE_DIR), true, &mut archived, &mut warnings)?;
+    archived.into_iter().find(|task| task.id == id).ok_or_else(||
+        TaskStoreError::Invalid(format!("cross-project prerequisite {reference} was not found")))
+}
+
 fn validate_links(tasks: &[Task], own_id: Option<&str>, kind: TaskKind, hard: &[String], related: &[String]) -> Result<(), TaskStoreError> {
     if kind == TaskKind::Epic && !hard.is_empty() {
         return Err(TaskStoreError::Invalid("epics cannot have hard dependencies; add them to subtasks".into()));
@@ -1138,6 +1447,22 @@ fn validate_links(tasks: &[Task], own_id: Option<&str>, kind: TaskKind, hard: &[
             }
             if own_id == Some(id.as_str()) {
                 return Err(TaskStoreError::Invalid("task cannot link to itself".into()));
+            }
+            // Cross-project task links use the same board-path#task-id
+            // identity as informational links. Hard links must resolve to
+            // an executable task; unreadable remote boards remain unfinished.
+            if id.contains('#') {
+                if std::ptr::eq(links, hard) {
+                    let target = load_cross_project_task(id)?;
+                    if target.kind == TaskKind::Epic {
+                        return Err(TaskStoreError::Invalid(format!(
+                            "hard dependency {id} is an epic; depend on an executable task"
+                        )));
+                    }
+                } else {
+                    validate_cross_project_id(id)?;
+                }
+                continue;
             }
             let target = tasks.iter().find(|t| t.id == *id).ok_or_else(|| TaskStoreError::Invalid(format!("link references unknown task {id}")))?;
             if std::ptr::eq(links, hard) && target.kind == TaskKind::Epic {
@@ -1168,6 +1493,9 @@ fn depends_transitively(tasks: &[Task], start: &str, target: &str) -> bool {
 }
 fn ensure_dependencies_complete_for(tasks: &[Task], dependencies: &[String]) -> Result<(), TaskStoreError> {
     let waiting = dependencies.iter().filter(|id| {
+        if id.contains('#') {
+            return load_cross_project_task(id).map(|task| !task.archived && task.completed.is_none()).unwrap_or(true);
+        }
         tasks.iter().find(|t| &t.id == *id).is_none_or(|t| !t.archived && t.completed.is_none())
     }).cloned().collect::<Vec<_>>();
     if !waiting.is_empty() {
@@ -1235,6 +1563,22 @@ fn task_payload_eq(a: &Task, b: &Task) -> bool {
 fn parse_task_date(value: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()
 }
+pub fn recurring_due(task: &Task) -> bool {
+    task.kind != TaskKind::Recurring || task.next_due.as_deref()
+        .and_then(parse_task_date).is_none_or(|date| date <= Local::now().date_naive())
+}
+fn validate_recurrence(kind: TaskKind, days: Option<u32>, due: Option<&str>) -> Result<(), TaskStoreError> {
+    if kind != TaskKind::Recurring && (days.is_some() || due.is_some()) {
+        return Err(TaskStoreError::Invalid("repeat interval and due date require kind recurring".into()));
+    }
+    if days.is_some_and(|days| !(1..=3650).contains(&days)) {
+        return Err(TaskStoreError::Invalid("repeat interval must be 1 to 3650 days".into()));
+    }
+    if due.is_some_and(|value| parse_task_date(value).is_none()) {
+        return Err(TaskStoreError::Invalid("next due must be YYYY-MM-DD".into()));
+    }
+    Ok(())
+}
 
 fn apply_completion_state(config: &BoardConfig, task: &mut Task) {
     let is_terminal = config
@@ -1242,8 +1586,26 @@ fn apply_completion_state(config: &BoardConfig, task: &mut Task) {
         .iter()
         .any(|column| column.id == task.column && column.terminal);
 
+    if task.kind == TaskKind::Recurring && is_terminal {
+        let today = Local::now().date_naive();
+        task.run_count = task.run_count.saturating_add(1);
+        task.last_run_at = Some(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true));
+        task.next_due = task.repeat_every_days
+            .map(|days| (today + chrono::Duration::days(i64::from(days))).to_string());
+        task.column = AI_READY_COLUMN_ID.to_string();
+        task.claimed_by = None;
+        task.live = None;
+        task.completed = None;
+        task.completed_at = None;
+        let due = task.next_due.as_deref().unwrap_or("immediately");
+        task.description = append_description_update(&task.description, "recurring",
+            &format!("Recurring run {} recorded; next eligible: {}.", task.run_count, due));
+        return;
+    }
     if is_terminal {
-        // Done is always final work, never pending human input.
+        task.live = None;
+        // Done records completed implementation. A separate unanswered question
+        // may still await human acceptance in the Inbox without reopening work.
         if task.kind == TaskKind::ForUser { task.kind = TaskKind::Task; }
         task.attention.retain(|flag| flag != &TaskAttention::NeedsUser);
         if task
@@ -1261,6 +1623,68 @@ fn apply_completion_state(config: &BoardConfig, task: &mut Task) {
     }
 }
 
+/// Who is performing a task mutation. Only affects `blocked_reason` handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutationActor {
+    /// CLI/agents: entering Blocked requires a reason.
+    Agent,
+    /// Desktop editor: may block/unblock but never authors the reason.
+    Human,
+}
+
+pub const BLOCKED_COLUMN_ID: &str = "blocked";
+
+/// Executable work is blocked by the `blocked` flag or the Blocked column.
+pub fn is_task_blocked(task: &Task) -> bool {
+    task.kind != TaskKind::Epic &&
+        (task.column == BLOCKED_COLUMN_ID || task.attention.contains(&TaskAttention::Blocked))
+}
+
+/// Enforce `blocked_reason` semantics and record the reason as a red
+/// `blocked` Description timeline update when an agent blocks a task (or
+/// replaces the reason). Leaving Blocked clears the reason. Tasks that were
+/// already blocked before this field existed are grandfathered: they keep
+/// working without a reason, so legacy blocked items are never stranded.
+fn apply_blocked_state(previous: Option<&Task>, task: &mut Task, actor: MutationActor) -> Result<(), TaskStoreError> {
+    if !is_task_blocked(task) {
+        task.blocked_reason = None;
+        return Ok(());
+    }
+    let was_blocked = previous.is_some_and(is_task_blocked);
+    let previous_reason = previous.filter(|_| was_blocked).and_then(|p| p.blocked_reason.clone());
+    if actor == MutationActor::Human {
+        task.blocked_reason = previous_reason;
+        return Ok(());
+    }
+    let reason = task.blocked_reason.as_deref().map(str::trim)
+        .filter(|reason| !reason.is_empty()).map(str::to_string);
+    match reason {
+        None if !was_blocked => return Err(TaskStoreError::Invalid(format!(
+            "{} cannot become blocked without a reason: supply a concise blocked_reason (CLI: --blocked-reason \"...\")",
+            task.id))),
+        None => task.blocked_reason = previous_reason,
+        Some(text) => {
+            if !was_blocked || previous_reason.as_deref() != Some(text.as_str()) {
+                task.description = append_description_update(&task.description, "blocked", &text);
+            }
+            task.blocked_reason = Some(text);
+        }
+    }
+    Ok(())
+}
+
+/// Appends one Description timeline block in the format of
+/// `src/descriptionTimeline.ts`.
+fn append_description_update(description: &str, kind: &str, text: &str) -> String {
+    let stamp = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    let quoted = text.trim().replace("\r\n", "\n").lines()
+        .map(|line| if line.is_empty() { ">".to_string() } else { format!("> {line}") })
+        .collect::<Vec<_>>().join("\n");
+    let block = format!("<!-- taskboard:update:{kind}|{stamp} -->\n{quoted}\n<!-- taskboard:end-update -->");
+    let base = description.trim_end();
+    if base.is_empty() { block } else { format!("{base}\n\n{block}") }
+}
+
 fn validate_draft(snapshot: &BoardSnapshot, draft: &TaskDraft) -> Result<(), TaskStoreError> {
     if draft.title.trim().is_empty() {
         return Err(TaskStoreError::Invalid("title cannot be empty".into()));
@@ -1271,7 +1695,9 @@ fn validate_draft(snapshot: &BoardSnapshot, draft: &TaskDraft) -> Result<(), Tas
             draft.column
         )));
     }
+    if draft.kind == TaskKind::Release { return Err(TaskStoreError::Invalid("releases use the Releases lifecycle".into())); }
     validate_parent_epic_only(snapshot, draft.kind, draft.parent.as_deref(), None)?;
+    validate_recurrence(draft.kind, draft.repeat_every_days, draft.next_due.as_deref())?;
     validate_attention(&draft.attention, draft.question.as_ref())?;
     validate_icon(draft.icon.as_deref())?;
     validate_epic_fields(draft.kind, draft.icon.as_deref(), &draft.attention,
@@ -1286,6 +1712,37 @@ fn validate_draft(snapshot: &BoardSnapshot, draft: &TaskDraft) -> Result<(), Tas
     Ok(())
 }
 
+
+fn validate_live(task: &Task) -> Result<(), TaskStoreError> {
+    let Some(live) = &task.live else { return Ok(()); };
+    if !live.with_me || !matches!(task.kind, TaskKind::Task | TaskKind::Recurring) {
+        return Err(TaskStoreError::Invalid("live collaboration requires with_me on an agent task".into()));
+    }
+    if live.est_minutes.is_some_and(|minutes| !(1..=1440).contains(&minutes)) {
+        return Err(TaskStoreError::Invalid("live estimate must be between 1 and 1440 minutes".into()));
+    }
+    if let Some(value) = live.ready_at.as_deref() {
+        DateTime::parse_from_rfc3339(value).map_err(|_| TaskStoreError::Invalid("invalid ready_at ISO timestamp".into()))?;
+    }
+    if let Some(value) = live.later_until.as_deref() {
+        DateTime::parse_from_rfc3339(value).map_err(|_| TaskStoreError::Invalid("invalid later_until ISO timestamp".into()))?;
+    }
+    match live.state {
+        Some(crate::LiveTaskState::Ready) => {
+            if !task.attention.contains(&TaskAttention::NeedsUser)
+                || live.brief.as_deref().is_none_or(|brief| brief.trim().is_empty())
+                || live.ready_at.is_none() {
+                return Err(TaskStoreError::Invalid("Ready for you requires needs-user, brief and ready_at".into()));
+            }
+        }
+        Some(crate::LiveTaskState::InSession) if task.attention.contains(&TaskAttention::NeedsUser) => {
+            return Err(TaskStoreError::Invalid("in_session must clear needs-user".into()));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn validate_task(snapshot: &BoardSnapshot, task: &Task) -> Result<(), TaskStoreError> {
     if task.title.trim().is_empty() {
         return Err(TaskStoreError::Invalid("title cannot be empty".into()));
@@ -1296,8 +1753,11 @@ fn validate_task(snapshot: &BoardSnapshot, task: &Task) -> Result<(), TaskStoreE
             task.column
         )));
     }
+    if task.kind == TaskKind::Release { return Err(TaskStoreError::Invalid("releases use the Releases lifecycle".into())); }
     validate_parent_epic_only(snapshot, task.kind, task.parent.as_deref(), Some(&task.id))?;
+    validate_recurrence(task.kind, task.repeat_every_days, task.next_due.as_deref())?;
     validate_attention(&task.attention, task.question.as_ref())?;
+    validate_live(task)?;
     validate_icon(task.icon.as_deref())?;
     validate_epic_fields(task.kind, task.icon.as_deref(), &task.attention,
         task.question.as_ref(), &task.acceptance_criteria, &task.ai_notes)?;
@@ -1329,6 +1789,9 @@ fn age_archive_selection<'a>(
 ) -> Vec<&'a Task> {
     let qualified = snapshot.tasks.iter().filter(|task| {
         !task.archived && task.column == column_id &&
+            task.review_status.as_deref() != Some("open") &&
+            !(task.attention.contains(&TaskAttention::Question) &&
+              task.question.as_ref().is_some_and(|q| q.answer.is_none())) &&
             task.completed_at.as_deref()
                 .and_then(|timestamp| DateTime::parse_from_rfc3339(timestamp).ok())
                 .is_some_and(|date| date.with_timezone(&Utc) <= cutoff)
@@ -1386,7 +1849,7 @@ fn validate_epic_fields(kind: TaskKind, icon: Option<&str>, attention: &[TaskAtt
 
 fn validate_icon(icon: Option<&str>) -> Result<(), TaskStoreError> {
     if let Some(icon) = icon {
-        if !matches!(icon, "bug" | "feature" | "refactor" | "content" | "validation" | "design" | "visual-work") {
+        if !matches!(icon, "bug" | "feature" | "refactor" | "content" | "validation" | "design" | "visual-work" | "visual-implementation") {
             return Err(TaskStoreError::Invalid(format!("unknown task icon {icon}")));
         }
     }
@@ -1436,6 +1899,18 @@ fn validate_attention(
 }
 
 fn validate_config(config: &BoardConfig) -> Result<(), TaskStoreError> {
+    let task_prefix = config.task_prefix.as_deref().unwrap_or("WT");
+    let epic_prefix = config.epic_prefix.as_deref().unwrap_or("WTE");
+    for (label, prefix) in [("task", task_prefix), ("epic", epic_prefix)] {
+        if !valid_prefix(prefix) {
+            return Err(TaskStoreError::Invalid(format!(
+                "{label}_prefix must be 2-12 uppercase ASCII letters/digits, starting with a letter (without '-')"
+            )));
+        }
+    }
+    if task_prefix == epic_prefix {
+        return Err(TaskStoreError::Invalid("task_prefix and epic_prefix must differ".into()));
+    }
     if config.columns.is_empty() {
         return Err(TaskStoreError::Invalid(
             "board needs at least one column".into(),
@@ -1465,8 +1940,29 @@ fn validate_config(config: &BoardConfig) -> Result<(), TaskStoreError> {
                 column.id
             )));
         }
+        if column.advisory && (column.ai_ready || column.id == DRAFT_COLUMN_ID
+            || column.id == AI_READY_COLUMN_ID || column.terminal) {
+            return Err(TaskStoreError::Invalid(format!(
+                "column {} cannot be advisory and must not be AI ready, Draft or terminal",
+                column.id
+            )));
+        }
     }
     Ok(())
+}
+
+// Use the filename shape, not the currently configured prefix, to discover tasks.
+// This retains WT/WTE and any earlier custom prefix when a board switches IDs.
+fn valid_prefix(prefix: &str) -> bool {
+    (2..=12).contains(&prefix.len())
+        && prefix.as_bytes()[0].is_ascii_uppercase()
+        && prefix.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+
+fn looks_like_task_id(file_name: &str) -> bool {
+    let Some(stem) = file_name.strip_suffix(".md") else { return false; };
+    let Some((prefix, number)) = stem.rsplit_once('-') else { return false; };
+    valid_prefix(prefix) && number.len() >= 4 && number.bytes().all(|b| b.is_ascii_digit())
 }
 
 fn collect_tasks(
@@ -1486,15 +1982,16 @@ fn collect_tasks(
             continue;
         }
         let file_name = path.file_name().and_then(|x| x.to_str()).unwrap_or("");
-        if !(file_name.starts_with("WT-") || file_name.starts_with("WTE-")) || path.extension().and_then(|x| x.to_str()) != Some("md")
-        {
+        if !looks_like_task_id(file_name) {
+
             continue;
         }
         match fs::read_to_string(&path)
             .map_err(TaskStoreError::from)
             .and_then(|text| parse_task(&path, archived, &text))
         {
-            Ok(task) => out.push(task),
+            Ok(task) if path.file_stem().and_then(|s| s.to_str()) == Some(task.id.as_str()) => out.push(task),
+            Ok(task) => warnings.push(format!("{}: filename does not match task id {}", path.display(), task.id)),
             Err(err) => warnings.push(format!("{}: {err}", path.display())),
         }
     }
@@ -1522,7 +2019,7 @@ fn parse_board(text: &str) -> Result<BoardConfig, TaskStoreError> {
     Ok(config)
 }
 
-fn render_board(config: &BoardConfig, existing: Option<&str>) -> Result<String, TaskStoreError> {
+pub(crate) fn render_board(config: &BoardConfig, existing: Option<&str>) -> Result<String, TaskStoreError> {
     let (mut mapping, body) = if let Some(existing) = existing {
         let (yaml, body) = split_frontmatter(existing)?;
         let mapping = serde_yaml::from_str::<serde_yaml::Mapping>(&yaml)
@@ -1559,6 +2056,11 @@ fn parse_task(path: &Path, archived: bool, text: &str) -> Result<Task, TaskStore
         schema: meta.schema,
         id: meta.id,
         kind: meta.kind,
+        deployable: meta.deployable,
+        repeat_every_days: meta.repeat_every_days,
+        next_due: meta.next_due,
+        last_run_at: meta.last_run_at,
+        run_count: meta.run_count,
         depends_on: meta.depends_on,
         related_to: meta.related_to,
         position_after: meta.position_after,
@@ -1569,8 +2071,12 @@ fn parse_task(path: &Path, archived: bool, text: &str) -> Result<Task, TaskStore
         category: meta.category,
         icon: meta.icon,
         claimed_by: meta.claimed_by,
+        live: meta.live,
         attention: meta.attention,
         question: meta.question,
+        blocked_reason: meta.blocked_reason,
+        review_status: meta.review_status,
+        review_round: meta.review_round,
         created: meta.created,
         completed: meta.completed,
         completed_at: meta.completed_at,
@@ -1599,6 +2105,11 @@ fn render_task(task: &Task, existing: Option<&str>) -> Result<String, TaskStoreE
         schema: task.schema,
         id: task.id.clone(),
         kind: task.kind,
+        deployable: task.deployable,
+        repeat_every_days: task.repeat_every_days,
+        next_due: task.next_due.clone(),
+        last_run_at: task.last_run_at.clone(),
+        run_count: task.run_count,
         depends_on: task.depends_on.clone(),
         related_to: task.related_to.clone(),
         position_after: task.position_after.clone(),
@@ -1609,14 +2120,24 @@ fn render_task(task: &Task, existing: Option<&str>) -> Result<String, TaskStoreE
         category: task.category.clone(),
         icon: task.icon.clone(),
         claimed_by: task.claimed_by.clone(),
+        live: task.live.clone(),
         attention: task.attention.clone(),
         question: task.question.clone(),
+        blocked_reason: task.blocked_reason.clone(),
+        review_status: task.review_status.clone(),
+        review_round: task.review_round,
         created: task.created.clone(),
         completed: task.completed.clone(),
         completed_at: task.completed_at.clone(),
     };
     let known = serde_yaml::to_value(&meta).map_err(|e| TaskStoreError::Parse(e.to_string()))?;
     if let serde_yaml::Value::Mapping(known) = known {
+        mapping.remove(serde_yaml::Value::String("deployable".into()));
+        mapping.remove(serde_yaml::Value::String("repeat_every_days".into()));
+        mapping.remove(serde_yaml::Value::String("next_due".into()));
+        mapping.remove(serde_yaml::Value::String("last_run_at".into()));
+        mapping.remove(serde_yaml::Value::String("run_count".into()));
+        mapping.remove(serde_yaml::Value::String("blocked_reason".into()));
         mapping.remove(serde_yaml::Value::String("parent".into()));
         mapping.remove(serde_yaml::Value::String("depends_on".into()));
         mapping.remove(serde_yaml::Value::String("related_to".into()));
@@ -1625,8 +2146,12 @@ fn render_task(task: &Task, existing: Option<&str>) -> Result<String, TaskStoreE
         mapping.remove(serde_yaml::Value::String("category".into()));
         mapping.remove(serde_yaml::Value::String("icon".into()));
         mapping.remove(serde_yaml::Value::String("claimed_by".into()));
+        mapping.remove(serde_yaml::Value::String("live".into()));
         mapping.remove(serde_yaml::Value::String("attention".into()));
         mapping.remove(serde_yaml::Value::String("question".into()));
+        mapping.remove(serde_yaml::Value::String("blocked_reason".into()));
+        mapping.remove(serde_yaml::Value::String("review_status".into()));
+        mapping.remove(serde_yaml::Value::String("review_round".into()));
         mapping.remove(serde_yaml::Value::String("completed".into()));
         mapping.remove(serde_yaml::Value::String("completed_at".into()));
         for (key, value) in known {
@@ -1820,7 +2345,7 @@ fn split_frontmatter(text: &str) -> Result<(String, String), TaskStoreError> {
     ))
 }
 
-fn acquire_lock(root: &Path) -> Result<LockGuard, TaskStoreError> {
+pub(crate) fn acquire_lock(root: &Path) -> Result<LockGuard, TaskStoreError> {
     let lock_dir = std::env::temp_dir().join("TaskBoard").join("locks");
     fs::create_dir_all(&lock_dir)?;
 
@@ -1903,7 +2428,7 @@ fn write_new(path: &Path, text: &str) -> Result<(), TaskStoreError> {
     Ok(())
 }
 
-fn write_text_atomic(path: &Path, text: &str) -> Result<(), TaskStoreError> {
+pub(crate) fn write_text_atomic(path: &Path, text: &str) -> Result<(), TaskStoreError> {
     let parent = path
         .parent()
         .ok_or_else(|| TaskStoreError::Invalid("target has no parent directory".into()))?;

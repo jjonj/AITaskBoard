@@ -1,9 +1,13 @@
 mod model;
 mod store;
-
+mod release;
+mod block_gate;
+pub use release::*;
+pub use block_gate::challenge_agent_block;
 
 pub use model::*;
-pub use store::{ExecutionIntent, ExecutionMode, default_board_config, FsTaskStore, TaskStore, TaskStoreError};
+pub use store::review::*;
+pub use store::{default_board_config, default_column_ai_ready, recurring_due, is_task_blocked, ExecutionIntent, ExecutionMode, FsTaskStore, MutationActor, TaskIdReservation, TaskStore, TaskStoreError, BLOCKED_COLUMN_ID};
 
 pub const SCHEMA_VERSION: u32 = 1;
 pub const DRAFT_COLUMN_ID: &str = "draft";

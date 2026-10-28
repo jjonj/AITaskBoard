@@ -14,7 +14,7 @@ type Props = {
   initialTaskId?: string;
   userTasks?: Task[];
   onOpenUserTask?: (task: Task) => void;
-  onUserTaskUpdated?: () => void;
+  onUserTaskUpdated?: (notice?: string) => void;
   onSnoozeUserTask?: (task: Task, path: string, until: number) => void;
 };
 const keyOf = (item: QueueItem) => `${item.path}|${item.task.id}`;
@@ -32,6 +32,8 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   const [items, setItems] = useState<QueueItem[]>([]);
   const [selectedKey, setSelectedKey] = useState("");
   const initialSelectionApplied = useRef(false);
+  // Skips last for this Inbox pass; manual selection can still revisit the item.
+  const skippedThisPass = useRef<Set<string>>(new Set());
   const [manifest, setManifest] = useState<ReviewManifest | null>(null);
   const [assets, setAssets] = useState<Record<string, string>>({});
   const [htmlDocuments, setHtmlDocuments] = useState<Record<string, string>>({});
@@ -117,8 +119,11 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
         setSelectedKey(target ? keyOf(target) : "");
         if (!target) setError(`The requested ${initialTaskId} is no longer pending in this board.`);
       } else {
-        setSelectedKey((current) => pending.some((item) => keyOf(item) === current)
-          ? current : pending.length ? keyOf(pending[0]) : "");
+        setSelectedKey((current) => {
+          if (pending.some((item) => keyOf(item) === current)) return current;
+          const first = pending.find((item) => !skippedThisPass.current.has(keyOf(item)));
+          return first ? keyOf(first) : "";
+        });
       }
       // Do not erase a submission error on every three-second queue refresh.
     } catch (cause) {
@@ -287,11 +292,13 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   }, [activeArtifact?.path]);
   const activeSrc = (artifact?: ReviewArtifact) => artifact &&
     (assets[artifact.path] || (artifact.poster && assets[artifact.poster]) || "");
-  const advance = (excludingKey?: string) => {
-    const available = items.filter((item) => keyOf(item) !== excludingKey &&
+  const advance = (excludingKey?: string, skipCurrent = false) => {
+    if (skipCurrent && selectedKey) skippedThisPass.current.add(selectedKey);
+    const index = items.findIndex((item) => keyOf(item) === selectedKey);
+    const ordered = index < 0 ? items : [...items.slice(index + 1), ...items.slice(0, index)];
+    const next = ordered.find((item) => keyOf(item) !== excludingKey &&
+      !skippedThisPass.current.has(keyOf(item)) &&
       !(Number(snoozedLocally[keyOf(item)]) > Date.now()));
-    const index = available.findIndex((item) => keyOf(item) === selectedKey);
-    const next = available[index + 1] ?? available.find((item) => keyOf(item) !== selectedKey);
     if (next) setSelectedKey(keyOf(next));
     else onClose();
   };
@@ -347,8 +354,19 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
         attention,
         question: old.question ? { ...old.question, answer: answer || null } : null,
       };
-      await updateTask(updated, reviewTask.path);
-      onUserTaskUpdated?.();
+      const saved = await updateTask(updated, reviewTask.path);
+      let notice: string | undefined;
+      if (saved.completed && saved.category === "Implementation Review" && saved.related_to.length === 1) {
+        const board = await loadBoard(reviewTask.path);
+        const parent = board.tasks.find((task) => task.id === saved.related_to[0]);
+        const entry = parent?.notes.split("\n").find((line) => line.includes(`[review:${saved.id}]`));
+        if (parent && entry) notice = `Review ${saved.id} — ${parent.id}: ` +
+          (entry.includes("approved_parent_done") ? "approved, original moved to Done"
+            : entry.includes("needs_changes") ? "needs changes, original returned to work"
+            : entry.includes("partial_or_blocked") ? "partial approval or other work remains"
+            : "review closed; original disposition unresolved");
+      }
+      onUserTaskUpdated?.(notice);
       // A response may deliberately leave "For user" enabled. Do not ask for
       // the same answer again in this Inbox pass.
       hideLocally(reviewTask, 60 * 60 * 1000);
@@ -570,7 +588,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       saving={saving}
       outcome={responseOutcome}
       onOutcome={setResponseOutcome}
-      onSkip={() => advance()}
+      onSkip={() => advance(undefined, true)}
       onSnooze={snoozeSelected}
       resolved={resolved}
       awaitingNextRound={awaitingNextRound}
@@ -699,7 +717,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
               mode="reply"
               outcome="respond"
               onOutcome={() => {}}
-              onSkip={() => advance()}
+              onSkip={() => advance(undefined, true)}
               onSnooze={snoozeSelected}
               onSubmit={() => void submitUser()}
               onComplete={() => void submitUser(true)}

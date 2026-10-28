@@ -18,6 +18,13 @@ export function TaskLinkPicker({ label, values, onChange, tasks, excludeId, allo
   const [highlighted, setHighlighted] = useState(0);
 
   const taskById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
+  const prettyId = (id: string) => {
+    const hash = id.lastIndexOf("#");
+    if (hash < 0) return id;
+    const board = id.slice(0, hash).split(/[\\/]/).filter(Boolean);
+    // The file is at <project>/Tasks; show the project, not a drive path.
+    return `${board[board.length - 2] || "Project"} / ${id.slice(hash + 1)}`;
+  };
   const needle = search.trim().toLowerCase();
   const matches = useMemo(() => {
     if (!needle) return [];
@@ -27,7 +34,7 @@ export function TaskLinkPicker({ label, values, onChange, tasks, excludeId, allo
       .map((task) => {
         const id = task.id.toLowerCase();
         const title = task.title.toLowerCase();
-        const idWithoutPrefix = id.replace(/^wte?-/, "");
+        const idWithoutPrefix = id.split("#").pop()?.replace(/^[a-z][a-z0-9]*-/, "") || id;
         const rank = id === needle || idWithoutPrefix === needle ? 0
           : id.startsWith(needle) || idWithoutPrefix.startsWith(needle) ? 1
           : id.includes(needle) ? 2
@@ -57,7 +64,7 @@ export function TaskLinkPicker({ label, values, onChange, tasks, excludeId, allo
         <div className="task-link-control" onClick={() => document.getElementById(inputId)?.focus()}>
           {values.map((id) => (
             <span className="task-link-chip" key={id} title={taskById.get(id)?.title || id}>
-              <span>{id}</span>
+              <span>{prettyId(id)}</span>
               <button type="button" title={`Remove ${id}`} aria-label={`Remove ${id}`}
                 onClick={(event) => {
                   event.stopPropagation();
@@ -119,7 +126,7 @@ export function TaskLinkPicker({ label, values, onChange, tasks, excludeId, allo
                 onMouseEnter={() => setHighlighted(index)}
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={() => select(task.id)}>
-                <span className="task-link-result-id">{task.id}</span>
+                <span className="task-link-result-id">{prettyId(task.id)}</span>
                 <span className="task-link-result-title">{task.title}</span>
                 {task.archived && <span className="task-link-result-archived">Archived</span>}
               </button>

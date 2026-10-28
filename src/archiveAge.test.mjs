@@ -43,6 +43,18 @@ test("will not archive an epic with still-active children elsewhere", () => {
   assert.deepEqual(eligibleForAgeArchive(items, "done", cutoff), []);
 });
 
+test("unfinished human acceptance keeps a completed implementation out of age cleanup", () => {
+  const old = "2026-10-01T12:00:00Z";
+  const items = [
+    { ...task("pending-question", old), attention: ["question"],
+      question: { prompt: "Does it work?", answer: null } },
+    { ...task("pending-visual", old), review_status: "open" },
+    { ...task("accepted", old), attention: ["question"],
+      question: { prompt: "Does it work?", answer: "Done" } },
+  ];
+  assert.deepEqual(eligibleForAgeArchive(items, "done", cutoff).map(t => t.id), ["accepted"]);
+});
+
 test("invalid or unknown timestamps are never assumed old", () => {
   const items = [task("garbled", "not-a-date"), task("legacy", null)];
   assert.deepEqual(eligibleForAgeArchive(items, "done", cutoff), []);

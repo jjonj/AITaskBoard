@@ -7,7 +7,8 @@ export const TASK_ICON_OPTIONS: { value: TaskIcon; label: string }[] = [
   { value: "content", label: "Content" },
   { value: "validation", label: "Validation" },
   { value: "design", label: "Design" },
-  { value: "visual-work", label: "Visual Work" },
+  { value: "visual-work", label: "Visual Work (Claude Opus)" },
+  { value: "visual-implementation", label: "Visual Implementation (approved mockup)" },
 ];
 
 export function TaskIconGlyph({ icon, size = 19 }: { icon: TaskIcon; size?: number }) {
@@ -38,6 +39,14 @@ export function TaskIconGlyph({ icon, size = 19 }: { icon: TaskIcon; size?: numb
           <path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6-10-6-10-6z" />
           <circle cx="12" cy="12" r="3" />
           <path d="m18.5 2 .6 2.4L21.5 5l-2.4.6-.6 2.4-.6-2.4L15.5 5l2.4-.6z" strokeWidth="1.25" />
+        </svg>
+      );
+    case "visual-implementation":
+      return (
+        <svg {...shared}>
+          <path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6-10-6-10-6z" />
+          <circle cx="12" cy="12" r="3" />
+          <path d="m16 19 2.2 2.2L23 16.5" strokeWidth="2.5" />
         </svg>
       );
     case "bug":

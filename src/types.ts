@@ -7,28 +7,45 @@ export type Column = {
   snoozed_until?: string | null;
   awake_until?: string | null;
   ai_ready: boolean;
+  advisory?: boolean;
   color: string;
 };
 
 export type BoardConfig = {
   schema: number;
   name: string;
+  task_prefix?: string | null;
+  epic_prefix?: string | null;
   columns: Column[];
+  releases_enabled?: boolean;
+  release_enabled_at?: string | null;
   revision: string;
 };
 
-export type TaskAttention = "question" | "needs-user" | "user-note" | "blocked";
-export type TaskIcon = "bug" | "feature" | "refactor" | "content" | "validation" | "design" | "visual-work";
+export type TaskAttention = "question" | "needs-user" | "user-note" | "blocked" | "priority";
+export type TaskIcon = "bug" | "feature" | "refactor" | "content" | "validation" | "design" | "visual-work" | "visual-implementation";
 
 export type TaskQuestion = {
+  request_type?: "decision" | "verification" | "action" | null;
   prompt: string;
   options: string[];
   answer: string | null;
 };
 
-export type TaskKind = "task" | "epic" | "for_user";
+export type TaskKind = "task" | "epic" | "for_user" | "recurring" | "release";
+export type TaskLive = {
+  with_me: boolean;
+  state?: "ready" | "in_session" | null;
+  brief?: string | null;
+  est_minutes?: number | null;
+  ready_at?: string | null;
+  later_until?: string | null;
+};
 export type Task = {
   kind: TaskKind;
+  deployable?: boolean | null;
+  repeat_every_days?: number | null;
+  next_due?: string | null;
   depends_on: string[];
   related_to: string[];
   position_after?: string | null;
@@ -41,11 +58,18 @@ export type Task = {
   category: string | null;
   icon: TaskIcon | null;
   claimed_by: string | null;
+  live?: TaskLive | null;
   attention: TaskAttention[];
   question: TaskQuestion | null;
+  /** AI-authored, read-only in the desktop app; cleared when unblocked. */
+  blocked_reason?: string | null;
+  review_status?: "open" | "resolved" | null;
+  review_round?: number | null;
   created: string;
   completed: string | null;
   completed_at?: string | null;
+  last_run_at?: string | null;
+  run_count?: number;
   description: string;
   acceptance_criteria: string[];
   ai_notes: string;
@@ -57,7 +81,12 @@ export type Task = {
 };
 
 export type TaskDraft = {
+  reserved_id?: string | null;
+  reservation_token?: string | null;
   kind: TaskKind;
+  deployable?: boolean | null;
+  repeat_every_days?: number | null;
+  next_due?: string | null;
   depends_on: string[];
   related_to: string[];
   title: string;
@@ -67,6 +96,7 @@ export type TaskDraft = {
   icon: TaskIcon | null;
   attention: TaskAttention[];
   question: TaskQuestion | null;
+  blocked_reason?: string | null;
   description: string;
   acceptance_criteria: string[];
   ai_notes: string;

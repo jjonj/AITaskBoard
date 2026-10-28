@@ -15,8 +15,13 @@ fn temp_board(name: &str) -> PathBuf {
 
 fn draft(title: &str, column: &str, parent: Option<&str>) -> TaskDraft {
     TaskDraft {
+        reserved_id: None,
+        reservation_token: None,
         title: title.into(),
         kind: task_core::TaskKind::Task,
+        deployable: None,
+        repeat_every_days: None,
+        next_due: None,
         depends_on: Vec::new(),
         related_to: Vec::new(),
         column: column.into(),
@@ -25,12 +30,40 @@ fn draft(title: &str, column: &str, parent: Option<&str>) -> TaskDraft {
         icon: None,
         attention: Vec::new(),
         question: None,
+        blocked_reason: None,
         description: format!("Description for {title}"),
         acceptance_criteria: vec!["Works".into()],
         ai_notes: String::new(),
         user_notes: String::new(),
         notes: String::new(),
     }
+}
+
+#[test]
+fn reserved_task_ids_prevent_collision_and_support_clipboard_attachments() {
+    let root = temp_board("task-id-reservations");
+    let store = FsTaskStore::default();
+    store.ensure_board(&root, "Test").unwrap();
+
+    let first = store.reserve_task_id(&root, task_core::TaskKind::Task).unwrap();
+    let second = store.reserve_task_id(&root, task_core::TaskKind::Task).unwrap();
+    assert_ne!(first.id, second.id);
+
+    let mut work = draft("New reserved task", "ai-ready", None);
+    work.reserved_id = Some(first.id.clone());
+    work.reservation_token = Some(first.token.clone());
+    let created = store.create(&root, work).unwrap();
+    assert_eq!(created.id, first.id);
+
+    let reference = store.attach_task_image(&root, &created.id, b"example image bytes", "png").unwrap();
+    assert!(reference.starts_with(&format!("Attachments/{}/", created.id)));
+    assert_eq!(std::fs::read(root.join(reference.replace('/', std::path::MAIN_SEPARATOR_STR))).unwrap(), b"example image bytes");
+
+    store.release_task_id(&root, &second).unwrap();
+    let third = store.reserve_task_id(&root, task_core::TaskKind::Task).unwrap();
+    assert_eq!(third.id, second.id);
+
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -318,7 +351,7 @@ fn saves_dynamic_columns() {
         hidden: false,
         snoozed_until: None,
         awake_until: None,
-        ai_ready: false,
+        ai_ready: false, advisory: false,
         color: "#777777".into(),
     });
     let config = store.save_config(&root, config).unwrap();
@@ -501,6 +534,7 @@ fn question_attention_and_ai_notes_round_trip_and_answer_cleanly() {
     d.ai_notes = "Two implementations are viable; user preference decides the UX.".into();
     d.attention = vec![task_core::TaskAttention::Question];
     d.question = Some(task_core::TaskQuestion {
+        request_type: None,
         prompt: "Which interaction should we use?".into(),
         options: vec!["Radial menu".into(), "Context menu".into()],
         answer: None,
@@ -555,6 +589,7 @@ fn unresolved_question_requires_question_attention() {
 
     let mut d = draft("Bad question", "ai-ready", None);
     d.question = Some(task_core::TaskQuestion {
+        request_type: None,
         prompt: "Pick one?".into(),
         options: vec!["A".into(), "B".into()],
         answer: None,
@@ -732,36 +767,30 @@ fn snapshot_undo_removes_created_task_and_restores_board_config() {
     assert!(restored.tasks.is_empty());
 
     let before_config = store.load(&root).unwrap();
+    let initially_ready = before_config.config.columns.iter()
+        .find(|column| column.id == "in-progress").unwrap().ai_ready;
     let mut changed = before_config.config.clone();
     changed
         .columns
         .iter_mut()
         .find(|column| column.id == "in-progress")
         .unwrap()
-        .ai_ready = true;
+        .ai_ready = !initially_ready;
     store.save_config(&root, changed).unwrap();
     let after_config = store.load(&root).unwrap();
-    assert!(
-        after_config
-            .config
-            .columns
-            .iter()
-            .find(|column| column.id == "in-progress")
-            .unwrap()
-            .ai_ready
+    assert_eq!(
+        after_config.config.columns.iter()
+            .find(|column| column.id == "in-progress").unwrap().ai_ready,
+        !initially_ready
     );
 
     let restored = store
         .restore_snapshot(&root, before_config, after_config)
         .unwrap();
-    assert!(
-        !restored
-            .config
-            .columns
-            .iter()
-            .find(|column| column.id == "in-progress")
-            .unwrap()
-            .ai_ready
+    assert_eq!(
+        restored.config.columns.iter()
+            .find(|column| column.id == "in-progress").unwrap().ai_ready,
+        initially_ready
     );
 
     fs::remove_dir_all(root).unwrap();
@@ -1084,7 +1113,7 @@ fn epics_reject_icons_attention_questions_criteria_and_ai_notes() {
     }
     let mut question = base.clone();
     question.attention.push(TaskAttention::Question);
-    question.question = Some(TaskQuestion { prompt: "Choose".into(), options: vec![], answer: None });
+    question.question = Some(TaskQuestion { request_type: None, prompt: "Choose".into(), options: vec![], answer: None });
     assert!(matches!(store.create(&root, question), Err(TaskStoreError::Invalid(_))));
     let mut changed = epic.clone();
     changed.ai_notes = "Should be in Notes instead".into();
@@ -1251,12 +1280,14 @@ fn finished_dependencies_release_blocked_tasks_without_clearing_other_blockers()
 
     let mut waiting = draft("Waiting on both", "blocked", None);
     waiting.depends_on = vec![first.id.clone(), second.id.clone()];
-    let waiting = store.create(&root, waiting).unwrap();
+    waiting.blocked_reason = Some("Waiting on both prerequisites.".into());
+    let waiting = store.create_as(&root, waiting, task_core::MutationActor::Human).unwrap();
 
     let mut independently_blocked = draft("Separate explicit blocker", "blocked", None);
     independently_blocked.depends_on = vec![first.id.clone()];
+    independently_blocked.blocked_reason = Some("Missing source asset.".into());
     independently_blocked.attention.push(task_core::TaskAttention::Blocked);
-    let independently_blocked = store.create(&root, independently_blocked).unwrap();
+    let independently_blocked = store.create_as(&root, independently_blocked, task_core::MutationActor::Human).unwrap();
 
     let mut first_done = first.clone();
     first_done.column = "done".into();
@@ -1269,9 +1300,100 @@ fn finished_dependencies_release_blocked_tasks_without_clearing_other_blockers()
     store.update(&root, second_done).unwrap();
     let released = store.load(&root).unwrap();
     assert_eq!(released.tasks.iter().find(|t| t.id == waiting.id).unwrap().column, "ai-ready");
+    assert_eq!(released.tasks.iter().find(|t| t.id == waiting.id).unwrap().blocked_reason, None);
     assert_eq!(
         released.tasks.iter().find(|t| t.id == independently_blocked.id).unwrap().column,
         "blocked"
     );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn blocked_reason_required_for_agents_recorded_once_and_cleared_on_unblock() {
+    use task_core::{MutationActor, TaskAttention};
+    let root = temp_board("blocked-reason");
+    let store = FsTaskStore::default();
+    store.ensure_board(&root, "Test").unwrap();
+    let task = store.create(&root, draft("Needs asset", "in-progress", None)).unwrap();
+
+    // Agents cannot block without a reason (column or flag).
+    let mut no_reason = task.clone();
+    no_reason.column = "blocked".into();
+    assert!(matches!(store.update(&root, no_reason), Err(TaskStoreError::Invalid(_))));
+    let mut flag_only = task.clone();
+    flag_only.attention.push(TaskAttention::Blocked);
+    flag_only.blocked_reason = Some("   ".into());
+    assert!(matches!(store.update(&root, flag_only), Err(TaskStoreError::Invalid(_))));
+
+    // With a reason: persisted in frontmatter and recorded as a red timeline update.
+    let mut blocked = task.clone();
+    blocked.column = "blocked".into();
+    blocked.attention.push(TaskAttention::Blocked);
+    blocked.blocked_reason = Some("  Missing source mesh from artist.  ".into());
+    let challenge = store.update(&root, blocked.clone()).unwrap_err();
+    let token = match challenge { TaskStoreError::BlockedChallenge { token, .. } => token, _ => panic!("expected agent blocked challenge") };
+    let blocked = store.update_as_confirmed(&root, blocked, MutationActor::Agent, Some(&token), "update").unwrap();
+    assert_eq!(blocked.blocked_reason.as_deref(), Some("Missing source mesh from artist."));
+    let text = fs::read_to_string(&blocked.path).unwrap();
+    assert!(text.contains("blocked_reason: Missing source mesh from artist."));
+    assert_eq!(text.matches("taskboard:update:blocked|").count(), 1);
+    assert!(text.contains("> Missing source mesh from artist."));
+
+    // Ordinary agent and human edits do not duplicate the update; the human
+    // editor cannot change the reason.
+    let mut edit = store.load(&root).unwrap().tasks.into_iter().find(|t| t.id == task.id).unwrap();
+    edit.title = "Needs asset (edited)".into();
+    let edit = store.update(&root, edit).unwrap();
+    let mut human = edit.clone();
+    human.blocked_reason = Some("Human tried to rewrite".into());
+    human.notes = "human note".into();
+    let human = store.update_as(&root, human, MutationActor::Human).unwrap();
+    assert_eq!(human.blocked_reason.as_deref(), Some("Missing source mesh from artist."));
+    assert_eq!(fs::read_to_string(&human.path).unwrap().matches("taskboard:update:blocked|").count(), 1);
+
+    // A changed agent reason is a new red update.
+    let mut changed = human.clone();
+    changed.blocked_reason = Some("Artist replied; waiting on license.".into());
+    let changed = store.update(&root, changed).unwrap();
+    assert_eq!(fs::read_to_string(&changed.path).unwrap().matches("taskboard:update:blocked|").count(), 2);
+
+    // Unblocking (e.g. Authorize Unblock from the desktop editor) clears the reason.
+    let mut unblocked = changed.clone();
+    unblocked.column = "ai-ready".into();
+    unblocked.attention.retain(|flag| flag != &TaskAttention::Blocked);
+    let unblocked = store.update_as(&root, unblocked, MutationActor::Human).unwrap();
+    assert_eq!(unblocked.blocked_reason, None);
+    assert!(!fs::read_to_string(&unblocked.path).unwrap().contains("blocked_reason:"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn human_and_legacy_blocked_tasks_are_not_stranded() {
+    use task_core::MutationActor;
+    let root = temp_board("blocked-legacy");
+    let store = FsTaskStore::default();
+    store.ensure_board(&root, "Test").unwrap();
+
+    // Desktop drag into Blocked needs no reason.
+    let task = store.create(&root, draft("Dragged", "ai-ready", None)).unwrap();
+    let mut dragged = task.clone();
+    dragged.column = "blocked".into();
+    let dragged = store.update_as(&root, dragged, MutationActor::Human).unwrap();
+    assert_eq!(dragged.blocked_reason, None);
+
+    // Legacy file without blocked_reason, already in Blocked: agents may keep editing it.
+    let legacy = store.create_as(&root, draft("Legacy", "blocked", None), MutationActor::Human).unwrap();
+    let mut edited = legacy.clone();
+    edited.ai_notes = "Still waiting.".into();
+    let edited = store.update(&root, edited).unwrap();
+    assert_eq!(edited.blocked_reason, None);
+    // ...and may add a reason later, which is then recorded.
+    let mut explained = edited.clone();
+    explained.blocked_reason = Some("Waiting on upstream fix.".into());
+    let explained = store.update(&root, explained).unwrap();
+    assert!(fs::read_to_string(&explained.path).unwrap().contains("taskboard:update:blocked|"));
+
+    // Agent creation directly into Blocked requires a reason.
+    assert!(store.create(&root, draft("Agent blocked", "blocked", None)).is_err());
     fs::remove_dir_all(root).unwrap();
 }
