@@ -619,6 +619,37 @@ impl FsTaskStore {
 
     /// `create` with an explicit actor. The desktop app creates as `Human`;
     /// agents/CLI use the trait method, which requires a blocked reason.
+    /** OW-0023: phone archive must compare the exact source revision inside
+     * the PC TaskBoard core's existing board lock, not in a separate preflight.
+     * Existing desktop archive behavior remains unchanged. */
+    pub fn archive_if_revision(&self, root: &Path, id: &str, expected: &str) -> Result<Task, TaskStoreError> {
+        if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(TaskStoreError::Invalid("phone archive requires an exact SHA-256 revision".into()));
+        }
+        let _lock = acquire_lock(root)?;
+        let source = find_task_path(root, id)?;
+        if source.starts_with(root.join(ARCHIVE_DIR)) {
+            return Err(TaskStoreError::Conflict(format!("{id} is already archived")));
+        }
+        let existing = fs::read_to_string(&source)?;
+        if revision(&existing) != expected {
+            return Err(TaskStoreError::Conflict(format!("{id} changed since the phone snapshot")));
+        }
+        let snapshot = self.load_unlocked(root)?;
+        if snapshot.tasks.iter().any(|task| !task.archived && task.parent.as_deref() == Some(id)) {
+            return Err(TaskStoreError::Invalid(format!("{id} has active subtasks")));
+        }
+        let year = Local::now().year().to_string();
+        let destination_dir = root.join(ARCHIVE_DIR).join(year);
+        fs::create_dir_all(&destination_dir)?;
+        let destination = destination_dir.join(format!("{id}.md"));
+        if destination.exists() {
+            return Err(TaskStoreError::Conflict(format!("archive already contains {id}")));
+        }
+        fs::rename(&source, &destination)?;
+        parse_task(&destination, true, &existing)
+    }
+
     pub fn create_as(&self, root: &Path, draft: TaskDraft, actor: MutationActor) -> Result<Task, TaskStoreError> {
         self.create_as_confirmed(root, draft, actor, None)
     }
