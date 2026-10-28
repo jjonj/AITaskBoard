@@ -103,6 +103,12 @@ async fn task_queue_reprioritize(path: Option<String>, id: String, expected_qite
 }
 
 #[tauri::command]
+async fn task_queue_move(path: Option<String>, id: String, expected_qitem: String, direction: String)
+    -> Result<queue_bridge::QueueSyncStatus, String> {
+    queue_bridge::move_pending(root(path), id, expected_qitem, direction).await
+}
+
+#[tauri::command]
 async fn task_queue_reconcile(path: Option<String>) -> Result<serde_json::Value, String> {
     queue_bridge::reconcile(root(path)).await
 }
@@ -539,6 +545,7 @@ pub fn run() {
             task_queue_overview,
             task_queue_capacity,
             task_queue_reprioritize,
+            task_queue_move,
             task_queue_reconcile,
             task_openrig_trace,
             task_set_execution_mode,

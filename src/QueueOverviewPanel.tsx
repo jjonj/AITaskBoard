@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import {
-  taskQueueOverview, taskExecutionIntent, taskSetExecutionMode, taskSyncQueue, taskQueueReprioritize,
+  taskQueueOverview, taskExecutionIntent, taskSetExecutionMode, taskSyncQueue, taskQueueReprioritize, taskQueueMove,
   type QueueOverview, type QueueOverviewItem,
 } from "./api";
 import "./QueueOverviewPanel.css";
@@ -17,6 +17,9 @@ const statusLabel = (item: QueueOverviewItem) => {
   const reported = typeof pickup?.status === "string" ? pickup.status
     : typeof pickup?.state === "string" ? pickup.state : null;
   if (reported) return `${item.state} · ${reported}`;
+  if (item.startupState === "reserved") return "Capacity reserved · launch not attempted";
+  if (item.startupState === "starting") return "Launch submitted · reply not verified";
+  if (item.startupState === "indeterminate") return "Launch outcome UNKNOWN · reconciliation required";
   if (item.state === "pending") return "Pending · pickup not verified";
   return item.state;
 };
@@ -66,6 +69,22 @@ export function QueueOverviewPanel({ boardPath, onClose, onOpenTask, onChanged }
       const result = await taskQueueReprioritize(item.taskId, item.qitemId, priority, boardPath);
       if (result.status !== "registered")
         setActionWarning(`${item.taskId}: ${result.status} — ${result.reason ?? "inspect the exact OpenRig receipt"}`);
+      await refresh();
+    } catch (cause) {
+      setActionWarning(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const movePending = async (item: QueueOverviewItem, direction: "up" | "down") => {
+    if (!item.taskId || busyId) return;
+    setBusyId(item.qitemId);
+    setActionWarning(null);
+    try {
+      const result = await taskQueueMove(item.taskId, item.qitemId, direction, boardPath);
+      if (result.status !== "registered")
+        setActionWarning(`${item.taskId}: ${result.status} — ${result.reason ?? "verify OpenRig order receipt"}`);
       await refresh();
     } catch (cause) {
       setActionWarning(cause instanceof Error ? cause.message : String(cause));
@@ -127,7 +146,7 @@ export function QueueOverviewPanel({ boardPath, onClose, onOpenTask, onChanged }
             <div className="omni-queue-actions">
               <button type="button" disabled={!item.taskId}
                 onClick={() => { if (item.taskId) onOpenTask(item.taskId); }}>Open task</button>
-              {item.state === "pending" && (
+              {item.state === "pending" && !["starting","indeterminate"].includes(item.startupState ?? "") && (
                 <>
                   <label className="omni-queue-priority-label">
                     Priority
@@ -139,6 +158,18 @@ export function QueueOverviewPanel({ boardPath, onClose, onOpenTask, onChanged }
                       <option value="critical">Critical</option>
                     </select>
                   </label>
+                  <button type="button" disabled={!!busyId || !item.taskId ||
+                    !snapshot?.items.some(other => other.priority === item.priority &&
+                      other.qitemId !== item.qitemId && other.state === "pending" &&
+                      snapshot.items.indexOf(other) < snapshot.items.indexOf(item))}
+                    title="Move ahead within the same priority group" aria-label={`Move ${item.taskId} earlier`}
+                    onClick={() => void movePending(item, "up")}>↑</button>
+                  <button type="button" disabled={!!busyId || !item.taskId ||
+                    !snapshot?.items.some(other => other.priority === item.priority &&
+                      other.qitemId !== item.qitemId && other.state === "pending" &&
+                      snapshot.items.indexOf(other) > snapshot.items.indexOf(item))}
+                    title="Move later within the same priority group" aria-label={`Move ${item.taskId} later`}
+                    onClick={() => void movePending(item, "down")}>↓</button>
                   <button type="button" disabled={!!busyId || !item.taskId}
                     onClick={() => void cancel(item)}>{busyId === item.qitemId ? "Updating…" : "Cancel queue"}</button>
                 </>

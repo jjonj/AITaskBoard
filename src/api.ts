@@ -74,7 +74,8 @@ export type QueueOverviewItem = {
   qitemId: string; taskId: string | null; summary: string | null;
   state: string; priority: "routine" | "urgent" | "critical";
   createdAt: string; updatedAt: string; claimedAt: string | null;
-  pickup: unknown | null; waiting: unknown | null; t3SessionId: string | null;
+  pickup: unknown | null; waiting: unknown | null; startupState: string | null;
+  t3SessionId: string | null;
 };
 export type QueueOverview = {
   schema: "openrig-taskboard-queue-overview/v1";
@@ -96,6 +97,10 @@ export const taskQueueCapacity = () =>
 export const taskQueueReprioritize = (id: string, expectedQitem: string,
   priority: "routine" | "urgent" | "critical", path?: string) =>
   invoke<QueueSyncResult>("task_queue_reprioritize", { path, id, expectedQitem, priority });
+
+export const taskQueueMove = (id: string, expectedQitem: string,
+  direction: "up" | "down", path?: string) =>
+  invoke<QueueSyncResult>("task_queue_move", { path, id, expectedQitem, direction });
 
 export type QueueReconciliation = {
   checked: number; truncated: boolean;

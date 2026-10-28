@@ -379,3 +379,43 @@ pub(crate) async fn trace(path: PathBuf, id: String) -> Result<Value, String> {
     }
     Ok(result)
 }
+
+/** User-scoped pending Queue reorder; no T3 start or retry. */
+pub(crate) async fn move_pending(
+    path: PathBuf, id: String, expected_qitem: String, direction: String
+) -> Result<QueueSyncStatus, String> {
+    if !["up","down"].contains(&direction.as_str()) { return Err("Invalid direction".into()); }
+    let store = FsTaskStore::default();
+    let snapshot = store.load(&path).map_err(|e| e.to_string())?;
+    let task = snapshot.tasks.into_iter().find(|row| row.id == id && !row.archived)
+        .ok_or("TaskBoard task is missing or archived")?;
+    let intent = store.execution_intent(&path,&id).map_err(|e|e.to_string())?;
+    let request = intent.queue_request.as_deref().ok_or("Queue request missing")?;
+    let qid = format!("qitem-taskboard-{request}");
+    if intent.mode != ExecutionMode::Queue || intent.queue_receipt.as_deref() != Some(qid.as_str()) ||
+       qid != expected_qitem || intent.queue_retired_receipt.is_some() {
+        return Ok(status("conflict",Some(expected_qitem),Some("Queue receipt changed; no move attempted".into())));
+    }
+    let bearer=token()?;
+    let client=client()?;
+    let reference=ref_json(&path,&id);
+    let (code,row)=get(&client,&bearer,&format!("/api/queue/{qid}")).await?;
+    if !code.is_success() || !row_matches(&row,&reference,request,None,&task) {
+        return Ok(status("conflict",Some(qid),Some("OpenRig Queue identity mismatch".into())));
+    }
+    if row["state"]!="pending" || row["claimedAt"].as_str().is_some_and(|s|!s.is_empty()) {
+        return Ok(status("running",Some(qid),Some("Queued task already claimed".into())));
+    }
+    let (code,result)=match post(&client,&bearer,&format!("/api/queue/taskboard/{qid}/sync"),json!({
+        "action":"move","direction":direction,"actorSession":SOURCE,
+        "requestId":request,"taskRef":reference
+    })).await {
+        Ok(x)=>x,
+        Err(err)=>return Ok(status("unknown",Some(qid),Some(err)))
+    };
+    if code.is_success() && result["qitemId"].as_str()==Some(qid.as_str()) {
+        return Ok(status("registered",Some(qid),None));
+    }
+    Ok(status("conflict",Some(qid),Some(format!("OpenRig move refused: {}",
+        result["error"].as_str().unwrap_or("unknown error")))))
+}
