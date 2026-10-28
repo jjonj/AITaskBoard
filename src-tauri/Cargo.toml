@@ -28,7 +28,7 @@ task-core = { path = "../packages/task-core" }
 taskboard-cli = { path = "../packages/task-cli" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.13.5", features = ["json"] }
+reqwest = { version = "0.13.5", features = ["json", "query"] }
 base64 = "0.22"
 serde_yaml = "0.9"
 

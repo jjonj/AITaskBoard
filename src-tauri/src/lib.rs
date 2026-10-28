@@ -87,6 +87,11 @@ async fn task_sync_queue(path: Option<String>, id: String) -> Result<queue_bridg
 }
 
 #[tauri::command]
+async fn task_queue_overview(path: Option<String>) -> Result<serde_json::Value, String> {
+    queue_bridge::overview(root(path)).await
+}
+
+#[tauri::command]
 fn task_execution_intent(path: Option<String>, id: String) -> Result<ExecutionIntent, String> {
     FsTaskStore::default().execution_intent(&root(path), &id).map_err(|e| e.to_string())
 }
@@ -510,6 +515,7 @@ pub fn run() {
             create_task,
             task_execution_intent,
             task_sync_queue,
+            task_queue_overview,
             task_set_execution_mode,
             task_request_start_now,
             task_live_with_me,

@@ -222,3 +222,29 @@ pub(crate) async fn sync(path: PathBuf, id: String) -> Result<QueueSyncStatus, S
     }
     Ok(status("registered",qid,None))
 }
+
+/** OW-0019: read-only projection of the ONE OpenRig task queue. Authentication
+ * remains in native code, not in renderer JS or HTML. */
+pub(crate) async fn overview(path: PathBuf) -> Result<Value, String> {
+    let bearer = token()?;
+    let client = client()?;
+    let board_root = path.to_string_lossy().trim_end_matches(['\\','/']).replace('/', "\\");
+    let response = client.get(format!("{DAEMON}/api/queue/taskboard/overview"))
+        .bearer_auth(&bearer)
+        .query(&[("environmentId", "pc"), ("boardRoot", board_root.as_str())])
+        .send().await
+        .map_err(|_| "OpenRig queue overview unavailable; no queue write attempted".to_owned())?;
+    let code = response.status();
+    let result = response.json::<Value>().await
+        .map_err(|_| "OpenRig queue overview returned invalid JSON".to_owned())?;
+    if !code.is_success() {
+        return Err(format!("OpenRig queue overview refused ({code}): {}",
+            result["error"].as_str().unwrap_or("unknown error")));
+    }
+    if result["schema"] != "openrig-taskboard-queue-overview/v1" ||
+        result["environmentId"] != "pc" ||
+        result["boardRoot"] != board_root {
+        return Err("OpenRig queue overview identity/schema mismatch".into());
+    }
+    Ok(result)
+}

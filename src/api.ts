@@ -49,6 +49,7 @@ export type ExecutionIntent = {
   queue_request: string | null;
   queue_attempt: string | null;
   queue_receipt: string | null;
+  queue_retired_receipt: string | null;
   start_now_request: string | null;
   start_now_receipt: string | null;
   revision: string;
@@ -68,6 +69,22 @@ export type QueueSyncResult = {
 /** Native authenticated one-shot bridge; never exposes OpenRig bearer to renderer. */
 export const taskSyncQueue = (id: string, path?: string) =>
   invoke<QueueSyncResult>("task_sync_queue", { path, id });
+
+export type QueueOverviewItem = {
+  qitemId: string; taskId: string | null; summary: string | null;
+  state: string; priority: "routine" | "urgent" | "critical";
+  createdAt: string; updatedAt: string; claimedAt: string | null;
+  pickup: unknown | null; waiting: unknown | null; t3SessionId: string | null;
+};
+export type QueueOverview = {
+  schema: "openrig-taskboard-queue-overview/v1";
+  observedAt: string; environmentId: "pc"; boardRoot: string;
+  activeCount: number | null; hasMore: boolean; limit: number;
+  items: QueueOverviewItem[];
+};
+/** Read-only canonical OpenRig board queue. Credentials never reach the renderer. */
+export const taskQueueOverview = (path?: string) =>
+  invoke<QueueOverview>("task_queue_overview", { path });
 export const taskLiveWithMe = (id: string, expectedRevision: string, withMe: boolean, path?: string) =>
   invoke<Task>("task_live_with_me", { path, id, expectedRevision, withMe });
 
