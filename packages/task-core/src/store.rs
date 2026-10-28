@@ -655,6 +655,45 @@ impl FsTaskStore {
     /// OW-0023: phone column edits have exact-revision CAS AND referential
     /// integrity for every active task, under one canonical TaskBoard lock.
     /// A column cannot disappear while task cards still point to it.
+    /** OW-0023: the PC alone creates project TaskBoards inside the configured
+     * vault. Atomic directory creation prevents colliding phone/PC project
+     * names; leave partial state visible on I/O failure, never erase an
+     * unexpected concurrent file. */
+    pub fn create_project_in_vault(&self, vault: &Path, name: &str) -> Result<PathBuf, TaskStoreError> {
+        let name = name.trim();
+        if !(2..=60).contains(&name.chars().count()) ||
+            !name.chars().all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '_' || c == '-') {
+            return Err(TaskStoreError::Invalid("project name must be 2..60 characters (letters, digits, space, hyphen, underscore)".into()));
+        }
+        if matches!(name.to_ascii_uppercase().as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "COM1" | "COM2" | "COM3" | "COM4" |
+            "LPT1" | "LPT2" | "LPT3") {
+            return Err(TaskStoreError::Invalid("reserved Windows project folder name".into()));
+        }
+        let vault = fs::canonicalize(vault)?;
+        let project = vault.join(name);
+        fs::create_dir(&project)?;
+        let tasks = project.join("Tasks");
+        fs::create_dir(&tasks)?;
+        let mut config = default_board_config(name);
+        let letters: String = name.chars().filter(|ch| ch.is_ascii_alphanumeric())
+            .map(|ch| ch.to_ascii_uppercase()).take(9).collect();
+        let prefix = if letters.chars().next().is_some_and(|ch| ch.is_ascii_alphabetic()) {
+            letters
+        } else {
+            format!("TB{letters}")
+        };
+        let prefix = format!("{prefix:T<2}").chars().take(10).collect::<String>();
+        config.task_prefix = Some(prefix.clone());
+        config.epic_prefix = Some(format!("{prefix}E").chars().take(11).collect());
+        validate_config(&config)?;
+        let text = render_board(&config, None)?;
+        write_new(&tasks.join(BOARD_FILE), &text)?;
+        fs::create_dir(&tasks.join(ACTIVE_DIR))?;
+        fs::create_dir(&tasks.join(ARCHIVE_DIR))?;
+        Ok(tasks)
+    }
+
     pub fn save_phone_columns(&self, root: &Path, columns: Vec<Column>, expected: &str) -> Result<BoardConfig, TaskStoreError> {
         if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(TaskStoreError::Invalid("phone board edit needs exact revision".into()));
