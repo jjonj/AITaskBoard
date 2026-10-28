@@ -652,6 +652,36 @@ impl FsTaskStore {
 
     /// OW-0023: the phone's create request validates the source board revision
     /// under the SAME lock as ID allocation and Markdown creation.
+    /// OW-0023: phone column edits have exact-revision CAS AND referential
+    /// integrity for every active task, under one canonical TaskBoard lock.
+    /// A column cannot disappear while task cards still point to it.
+    pub fn save_phone_columns(&self, root: &Path, columns: Vec<Column>, expected: &str) -> Result<BoardConfig, TaskStoreError> {
+        if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(TaskStoreError::Invalid("phone board edit needs exact revision".into()));
+        }
+        let _lock = acquire_lock(root)?;
+        let snapshot = self.load_unlocked(root)?;
+        if snapshot.config.revision != expected {
+            return Err(TaskStoreError::Conflict("board changed since phone snapshot".into()));
+        }
+        if snapshot.tasks.iter().any(|task| !task.archived &&
+            !columns.iter().any(|column| column.id == task.column)) {
+            return Err(TaskStoreError::Conflict("a column still holds active tasks; move them first".into()));
+        }
+        let mut config = snapshot.config;
+        config.columns = columns;
+        validate_config(&config)?;
+        let path = root.join(BOARD_FILE);
+        let original = fs::read_to_string(&path)?;
+        if revision(&original) != expected {
+            return Err(TaskStoreError::Conflict("board changed during phone save".into()));
+        }
+        let text = render_board(&config, Some(&original))?;
+        write_text_atomic(&path, &text)?;
+        config.revision = revision(&text);
+        Ok(config)
+    }
+
     pub fn create_if_board_revision(&self, root: &Path, draft: TaskDraft, expected: &str) -> Result<Task, TaskStoreError> {
         if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(TaskStoreError::Invalid("phone create requires exact board revision".into()));
