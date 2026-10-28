@@ -650,6 +650,20 @@ impl FsTaskStore {
         parse_task(&destination, true, &existing)
     }
 
+    /// OW-0023: the phone's create request validates the source board revision
+    /// under the SAME lock as ID allocation and Markdown creation.
+    pub fn create_if_board_revision(&self, root: &Path, draft: TaskDraft, expected: &str) -> Result<Task, TaskStoreError> {
+        if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(TaskStoreError::Invalid("phone create requires exact board revision".into()));
+        }
+        let _lock = acquire_lock(root)?;
+        let current = self.load_unlocked(root)?;
+        if current.config.revision != expected {
+            return Err(TaskStoreError::Conflict("board changed since phone snapshot".into()));
+        }
+        self.create_as_unlocked(root, draft, MutationActor::Human)
+    }
+
     pub fn create_as(&self, root: &Path, draft: TaskDraft, actor: MutationActor) -> Result<Task, TaskStoreError> {
         self.create_as_confirmed(root, draft, actor, None)
     }
