@@ -43,6 +43,7 @@ import {
   taskSyncQueue,
   taskQueueOverview,
   taskQueueCapacity,
+  taskQueueReconcile,
   updateTask,
 } from "./api";
 import type {
@@ -298,6 +299,37 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId }: {
     observe();
     const poll = window.setInterval(observe, 20000);
     return () => { alive = false; window.clearInterval(poll); };
+  }, [boardPath]);
+  const [queueRecoveryWarning, setQueueRecoveryWarning] = useState("");
+  useEffect(() => {
+    let active = true;
+    let busy = false;
+    let last = 0;
+    const reconcile = () => {
+      // A bounded activation/focus pass, not a second dispatcher or polling
+      // service. Pre-send UNKNOWN IDs remain lookup-only in the native bridge.
+      const now = Date.now();
+      if (busy || now - last < 45_000) return;
+      last = now;
+      busy = true;
+      void taskQueueReconcile(boardPath).then(result => {
+        if (!active) return;
+        const unresolved = result.items.filter(item =>
+          !["registered", "terminal", "canceled", "not_queued"].includes(item.status));
+        setQueueRecoveryWarning([
+          ...unresolved.slice(0, 3).map(item =>
+            `${item.id}: ${item.status} — ${item.reason ?? "inspect exact OpenRig receipt"}`),
+          ...(unresolved.length > 3 ? [`${unresolved.length - 3} additional unreconciled Queue intents`] : []),
+          ...(result.truncated ? ["More queued tasks remain; reopen/focus this board to reconcile the next batch"] : []),
+        ].join(" · "));
+      }).catch(reason => {
+        if (active) setQueueRecoveryWarning(
+          `OpenRig Queue reconciliation unavailable: ${String(reason)}`);
+      }).finally(() => { busy = false; });
+    };
+    reconcile();
+    window.addEventListener("focus", reconcile);
+    return () => { active = false; window.removeEventListener("focus", reconcile); };
   }, [boardPath]);
   const [reviewNotice, setReviewNotice] = useState("");
   useEffect(() => { if (requestedReviewId) setReviewOpen(true); }, [requestedReviewId]);
@@ -2601,6 +2633,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId }: {
       </div>
 
       {error && <div className="error-banner">{error}</div>}
+      {queueRecoveryWarning && <div className="warning-banner" role="status">Queue reconciliation: {queueRecoveryWarning}</div>}
       {!!snapshot.warnings.length && (
         <div className="warning-banner">{snapshot.warnings.join(" • ")}</div>
       )}

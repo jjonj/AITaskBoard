@@ -316,3 +316,35 @@ pub(crate) async fn reprioritize(
     Ok(status("conflict",Some(qid),Some(format!("OpenRig priority update refused: {}",
         result["error"].as_str().unwrap_or("unknown error")))))
 }
+
+/** OW-0014: bounded startup/focus reconciliation of explicit Queue intents.
+ * This is NOT a second dispatch timer; it only drives the same idempotent
+ * native producer when the TaskBoard UI activates a board. */
+pub(crate) async fn reconcile(path: PathBuf) -> Result<Value, String> {
+    let store = FsTaskStore::default();
+    let snapshot = store.load(&path).map_err(|e| e.to_string())?;
+    let mut checked = 0u32;
+    let mut incomplete = false;
+    let mut outcomes = Vec::<Value>::new();
+    for task in snapshot.tasks {
+        if !matches!(task.kind, TaskKind::Task | TaskKind::Recurring) { continue; }
+        let intent = match store.execution_intent(&path, &task.id) {
+            Ok(intent) => intent,
+            Err(error) => {
+                outcomes.push(json!({"id":task.id,"status":"conflict","reason":error.to_string()}));
+                continue;
+            }
+        };
+        let needs_reconcile = intent.mode == ExecutionMode::Queue ||
+            (intent.queue_attempt.is_some() && intent.queue_retired_receipt.is_none());
+        if !needs_reconcile { continue; }
+        if checked >= 16 { incomplete = true; break; }
+        checked += 1;
+        let result = match sync(path.clone(), task.id.clone()).await {
+            Ok(value) => json!({"id":task.id,"status":value.status,"qitemId":value.qitem_id,"reason":value.reason}),
+            Err(error) => json!({"id":task.id,"status":"unavailable","reason":error}),
+        };
+        outcomes.push(result);
+    }
+    Ok(json!({"checked":checked,"truncated":incomplete,"items":outcomes}))
+}

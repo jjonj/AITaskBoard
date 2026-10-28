@@ -96,6 +96,13 @@ export const taskQueueCapacity = () =>
 export const taskQueueReprioritize = (id: string, expectedQitem: string,
   priority: "routine" | "urgent" | "critical", path?: string) =>
   invoke<QueueSyncResult>("task_queue_reprioritize", { path, id, expectedQitem, priority });
+
+export type QueueReconciliation = {
+  checked: number; truncated: boolean;
+  items: Array<{ id: string; status: string; qitemId?: string | null; reason?: string | null }>;
+};
+export const taskQueueReconcile = (path?: string) =>
+  invoke<QueueReconciliation>("task_queue_reconcile", { path });
 export const taskLiveWithMe = (id: string, expectedRevision: string, withMe: boolean, path?: string) =>
   invoke<Task>("task_live_with_me", { path, id, expectedRevision, withMe });
 
