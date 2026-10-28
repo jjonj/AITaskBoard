@@ -84,3 +84,21 @@
 .omni-queue-actions button:disabled { opacity: .45; cursor: not-allowed; }
 .omni-queue-actions button:not(:disabled):hover { background: #36495d; }
 .omni-queue-actions span { color: #8797aa; font-size: 10px; }
+
+.omni-queue-priority-label {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  color: #abb8c5;
+  font-size: 11px;
+}
+.omni-queue-priority-label select {
+  color: #e5ebf1;
+  background: #283644;
+  border: 1px solid #44556a;
+  border-radius: 5px;
+  padding: 4px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.omni-queue-priority-label select:disabled { opacity: .5; }

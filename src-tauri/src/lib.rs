@@ -97,6 +97,12 @@ async fn task_queue_capacity() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
+async fn task_queue_reprioritize(path: Option<String>, id: String, expected_qitem: String, priority: String)
+    -> Result<queue_bridge::QueueSyncStatus, String> {
+    queue_bridge::reprioritize(root(path), id, expected_qitem, priority).await
+}
+
+#[tauri::command]
 fn task_execution_intent(path: Option<String>, id: String) -> Result<ExecutionIntent, String> {
     FsTaskStore::default().execution_intent(&root(path), &id).map_err(|e| e.to_string())
 }
@@ -522,6 +528,7 @@ pub fn run() {
             task_sync_queue,
             task_queue_overview,
             task_queue_capacity,
+            task_queue_reprioritize,
             task_set_execution_mode,
             task_request_start_now,
             task_live_with_me,

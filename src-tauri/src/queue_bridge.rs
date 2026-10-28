@@ -273,3 +273,46 @@ pub(crate) async fn capacity() -> Result<Value, String> {
     }
     Ok(snapshot)
 }
+
+/** OW-0019: change the ordering priority only for the currently registered
+ * pending queue row; on a transport timeout, return UNKNOWN without retry. */
+pub(crate) async fn reprioritize(
+    path: PathBuf, id: String, expected_qitem: String, priority: String
+) -> Result<QueueSyncStatus, String> {
+    if !["routine","urgent","critical"].contains(&priority.as_str()) {
+        return Err("Invalid Queue priority".into());
+    }
+    let store = FsTaskStore::default();
+    let snapshot = store.load(&path).map_err(|e| e.to_string())?;
+    let task = snapshot.tasks.into_iter().find(|row| row.id == id && !row.archived)
+        .ok_or("TaskBoard task no longer exists or was archived")?;
+    let intent = store.execution_intent(&path,&id).map_err(|e|e.to_string())?;
+    let request = intent.queue_request.as_deref().ok_or("Queue request missing")?;
+    let qid = format!("qitem-taskboard-{request}");
+    if intent.mode != ExecutionMode::Queue || intent.queue_receipt.as_deref() != Some(qid.as_str()) ||
+        qid != expected_qitem || intent.queue_retired_receipt.is_some() {
+        return Ok(status("conflict",Some(expected_qitem),Some("Queue receipt changed; no priority write attempted".into())));
+    }
+    let bearer=token()?;
+    let client=client()?;
+    let reference=ref_json(&path,&id);
+    let (code,row)=get(&client,&bearer,&format!("/api/queue/{qid}")).await?;
+    if !code.is_success() || !row_matches(&row,&reference,request,None,&task) {
+        return Ok(status("conflict",Some(qid),Some("OpenRig Queue identity cannot be verified".into())));
+    }
+    if row["state"] != "pending" || row["claimedAt"].as_str().is_some_and(|s|!s.is_empty()) {
+        return Ok(status("running",Some(qid),Some("Task was claimed; priority cannot change".into())));
+    }
+    let (code,result)=match post(&client,&bearer,&format!("/api/queue/taskboard/{qid}/sync"),json!({
+        "action":"priority","priority":priority,"actorSession":SOURCE,
+        "requestId":request,"taskRef":reference
+    })).await {
+        Ok(x)=>x,
+        Err(err)=>return Ok(status("unknown",Some(qid),Some(err)))
+    };
+    if code.is_success() && result["priority"].as_str()==Some(priority.as_str()) {
+        return Ok(status("registered",Some(qid),None));
+    }
+    Ok(status("conflict",Some(qid),Some(format!("OpenRig priority update refused: {}",
+        result["error"].as_str().unwrap_or("unknown error")))))
+}

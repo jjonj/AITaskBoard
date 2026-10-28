@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import {
-  taskQueueOverview, taskExecutionIntent, taskSetExecutionMode, taskSyncQueue,
+  taskQueueOverview, taskExecutionIntent, taskSetExecutionMode, taskSyncQueue, taskQueueReprioritize,
   type QueueOverview, type QueueOverviewItem,
 } from "./api";
 import "./QueueOverviewPanel.css";
@@ -58,6 +58,22 @@ export function QueueOverviewPanel({ boardPath, onClose, onOpenTask, onChanged }
     return () => { active = false; window.clearInterval(timer); };
   }, [boardPath]);
 
+  const reprioritize = async (item: QueueOverviewItem, priority: "routine" | "urgent" | "critical") => {
+    if (!item.taskId || busyId || item.priority === priority) return;
+    setActionWarning(null);
+    setBusyId(item.qitemId);
+    try {
+      const result = await taskQueueReprioritize(item.taskId, item.qitemId, priority, boardPath);
+      if (result.status !== "registered")
+        setActionWarning(`${item.taskId}: ${result.status} — ${result.reason ?? "inspect the exact OpenRig receipt"}`);
+      await refresh();
+    } catch (cause) {
+      setActionWarning(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   const cancel = async (item: QueueOverviewItem) => {
     if (!item.taskId || busyId) return;
     setActionWarning(null);
@@ -112,8 +128,20 @@ export function QueueOverviewPanel({ boardPath, onClose, onOpenTask, onChanged }
               <button type="button" disabled={!item.taskId}
                 onClick={() => { if (item.taskId) onOpenTask(item.taskId); }}>Open task</button>
               {item.state === "pending" && (
-                <button type="button" disabled={!!busyId || !item.taskId}
-                  onClick={() => void cancel(item)}>{busyId === item.qitemId ? "Canceling…" : "Cancel queue"}</button>
+                <>
+                  <label className="omni-queue-priority-label">
+                    Priority
+                    <select aria-label={`Priority for ${item.taskId ?? item.qitemId}`}
+                      value={item.priority} disabled={!!busyId || !item.taskId}
+                      onChange={event => void reprioritize(item, event.currentTarget.value as "routine" | "urgent" | "critical")}>
+                      <option value="routine">Routine</option>
+                      <option value="urgent">Urgent</option>
+                      <option value="critical">Critical</option>
+                    </select>
+                  </label>
+                  <button type="button" disabled={!!busyId || !item.taskId}
+                    onClick={() => void cancel(item)}>{busyId === item.qitemId ? "Updating…" : "Cancel queue"}</button>
+                </>
               )}
               {item.t3SessionId
                 ? <span>Linked T3: {item.t3SessionId}</span>
