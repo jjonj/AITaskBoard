@@ -54,9 +54,13 @@ fn registration_tag(request: &str, source_revision: &str) -> String {
         serde_json::to_vec(&[request, source_revision]).unwrap_or_default()))
 }
 fn body(task: &Task, reference: &Value) -> String {
-    format!("Execute the exact TaskBoard task {}/{} ({}): {}. Read the TaskBoard card and latest acceptance criteria before work; this queue receipt is NOT a completion claim.",
-        reference["boardRoot"].as_str().unwrap_or(""),
-        task.id, reference["environmentId"].as_str().unwrap_or("pc"), task.title)
+    let mut message = format!("Work on {} — {}. Read the exact TaskBoard card at {}/{} ({}), its latest acceptance criteria and project instructions. This queue receipt is NOT a completion claim.",
+        task.id, task.title, reference["boardRoot"].as_str().unwrap_or(""),
+        task.id, reference["environmentId"].as_str().unwrap_or("pc"));
+    if task.live.as_ref().is_some_and(|live| live.with_me) {
+        message.push_str("\n\nWith me: prepare everything that does not need the human first. When live back-and-forth is genuinely needed, write a three-line brief (Done / Need from you / Minutes), run task live ready <ID> --brief \"Done: ... / Need from you: ... / Minutes: ...\" --est <minutes> on this owning board, then end your turn. Do NOT send an OpenRig Inbox, aispeak or feedback request merely to announce readiness. Quick standalone questions still use the existing TaskBoard question mechanism.");
+    }
+    message
 }
 async fn get(client: &Client, bearer: &str, route: &str) -> Result<(StatusCode, Value), String> {
     let response = client.get(format!("{DAEMON}{route}")).bearer_auth(bearer).send().await
