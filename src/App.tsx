@@ -1278,9 +1278,12 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId }: {
 
   const run = async (operation: () => Promise<void>) => {
     setBusy(true);
+    // Clear the previous error BEFORE the operation. A successful local save
+    // can still report a separate OpenRig registration/UNKNOWN warning; clearing
+    // after operation erased that truthful warning from the UI.
+    setError("");
     try {
       await operation();
-      setError("");
     } catch (err) {
       setError(errorText(err));
       await refresh(boardPath, true);
