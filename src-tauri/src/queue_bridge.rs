@@ -348,3 +348,34 @@ pub(crate) async fn reconcile(path: PathBuf) -> Result<Value, String> {
     }
     Ok(json!({"checked":checked,"truncated":incomplete,"items":outcomes}))
 }
+
+/** OW-0006: source-qualified trace comes solely from the canonical OpenRig
+ * correlation endpoint. No task title/claimed_by inference or second ledger.
+ */
+pub(crate) async fn trace(path: PathBuf, id: String) -> Result<Value, String> {
+    if id.len() > 128 || !id.chars().all(|ch| ch.is_ascii_alphanumeric() || "_.-".contains(ch)) {
+        return Err("Invalid TaskBoard trace ID".into());
+    }
+    let bearer = token()?;
+    let client = client()?;
+    let board_root = path.to_string_lossy().trim_end_matches(['\\','/']).replace('/', "\\");
+    let response = client.get(format!("{DAEMON}/api/integrations/t3/taskboard/trace"))
+        .bearer_auth(&bearer)
+        .query(&[("environmentId", "pc"), ("boardRoot", board_root.as_str()), ("taskId", id.as_str())])
+        .send().await.map_err(|_| "OpenRig trace unavailable; task status not inferred".to_owned())?;
+    let code = response.status();
+    let result = response.json::<Value>().await
+        .map_err(|_| "OpenRig trace returned invalid JSON".to_owned())?;
+    if !code.is_success() {
+        return Err(format!("OpenRig trace refused ({code}): {}",
+            result["error"].as_str().unwrap_or("unavailable")));
+    }
+    if result["schema"] != "openrig-taskboard-trace/v1" ||
+        result["available"] != true ||
+        result["taskRef"]["environmentId"] != "pc" ||
+        result["taskRef"]["boardRoot"] != board_root ||
+        result["taskRef"]["taskId"] != id {
+        return Err("OpenRig trace identity or schema mismatch".into());
+    }
+    Ok(result)
+}

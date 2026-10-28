@@ -1,0 +1,10 @@
+.task-trace-panel { border:1px solid #354352;border-radius:8px;background:#1b2731;margin:10px 0 12px;padding:9px 12px;color:#bac8d8;font-size:12px; }
+.task-trace-toggle { color:#b7d0e9;background:transparent;border:0;cursor:pointer;padding:4px 0;font-size:12px;font-weight:600; }
+.task-trace-content {display:flex;flex-direction:column;gap:8px;margin-top:7px;max-height:235px;overflow:auto;line-height:1.42;}
+.task-trace-warning {color:#e6c495;font-size:12px;overflow-wrap:anywhere;}
+.task-trace-item {padding:8px 10px;border:1px solid #364556;border-radius:6px;background:#24323d;}
+.task-trace-item div {margin-bottom:3px;overflow-wrap:anywhere;}
+.task-trace-item code {font-size:11px;color:#d0e1f2;}
+.task-trace-line {display:flex;justify-content:space-between;gap:8px;}
+.task-trace-line small {color:#899aab;}
+.task-trace-item > small {display:block;margin-top:5px;color:#95a6b6;}

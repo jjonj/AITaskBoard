@@ -18,6 +18,7 @@ import { isHiddenByCollapsedEpic, toggleAllEpicCollapses } from "./epicCollapse"
 import { ProjectTabs } from "./ProjectTabs";
 import { ReleaseCenter } from "./ReleaseCenter";
 import { QueueOverviewPanel } from "./QueueOverviewPanel";
+import { TaskTracePanel } from "./TaskTracePanel";
 import type { ProjectTab, TaskIdReservation, ExecutionMode, QueueOverview, QueueCapacity } from "./api";
 import {
   archiveTask,
@@ -3357,6 +3358,8 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId }: {
               <button className="icon-button" aria-label="Close editor" onClick={() => closeEditor()} disabled={busy}>×</button>
             </div>
 
+            {editor.mode === "edit" && editor.original && editor.original.kind !== "epic" &&
+              <TaskTracePanel path={boardPath} taskId={editor.original.id} />}
             {isQueueCompact ? (
               <h2 className="queue-compact-title">{editor.draft.title}</h2>
             ) : <input
