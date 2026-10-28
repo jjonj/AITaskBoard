@@ -2990,15 +2990,12 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId }: {
           >
             Edit task
           </button>
-          {contextTask.claimed_by && (
+          {contextTask.kind !== "epic" && (
             <button disabled={busy} onClick={() => {
-              const claimedBy = contextTask.claimed_by!;
               setContextMenu(null);
-              void run(async () => {
-                await openClaimedT3Session(claimedBy);
-              });
-            }} title="Focus T3; restore the exact saved conversation if the original session was closed">
-              Open claimed T3 session
+              openForTask(contextTask);
+            }} title="Open the task-qualified T3 session; create one only when no linked session exists">
+              {contextTask.claimed_by || contextTask.live?.with_me ? "Open session" : "Start session with me"}
             </button>
           )}
           {contextTask.kind === "epic" && <button
