@@ -119,6 +119,11 @@ async fn task_openrig_trace(path: Option<String>, id: String) -> Result<serde_js
 }
 
 #[tauri::command]
+async fn task_openrig_worker_proof(qitem_id: String) -> Result<serde_json::Value, String> {
+    queue_bridge::worker_proof(qitem_id).await
+}
+
+#[tauri::command]
 fn task_execution_intent(path: Option<String>, id: String) -> Result<ExecutionIntent, String> {
     FsTaskStore::default().execution_intent(&root(path), &id).map_err(|e| e.to_string())
 }
@@ -548,6 +553,7 @@ pub fn run() {
             task_queue_move,
             task_queue_reconcile,
             task_openrig_trace,
+            task_openrig_worker_proof,
             task_set_execution_mode,
             task_request_start_now,
             task_live_with_me,

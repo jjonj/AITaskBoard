@@ -18,6 +18,16 @@ type TraceRow = {
     taskBoardCompletionVerified: boolean };
   recordedWakes?: { entries: Array<{ deliveryState: string; pickupVerified: boolean }> };
 };
+type WorkerProof = {
+  schema: "openrig-queued-worker-proof/v1";
+  qitemId: string;
+  firstReplyVerified: boolean;
+  activePrimaryVerified: boolean;
+  pickupVerified: boolean;
+  completionVerified: boolean;
+  firstAssistantTurnKey: string | null;
+  reason: string | null;
+};
 type Trace = {
   schema: "openrig-taskboard-trace/v1";
   linked: boolean;
@@ -41,8 +51,19 @@ export function TaskTracePanel({ path, taskId }: { path: string; taskId: string 
   const [open, setOpen] = useState(false);
   const [trace, setTrace] = useState<Trace | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [proofs, setProofs] = useState<Record<string, WorkerProof | { error: string }>>({});
+  const [checking, setChecking] = useState<string | null>(null);
+  const verifyWorker = (qitemId: string) => {
+    if (checking) return;
+    setChecking(qitemId);
+    void invoke<WorkerProof>("task_openrig_worker_proof", { qitemId })
+      .then(result => setProofs(previous => ({...previous, [qitemId]: result})))
+      .catch(cause => setProofs(previous => ({...previous,
+        [qitemId]: {error:cause instanceof Error ? cause.message : String(cause)}})))
+      .finally(() => setChecking(null));
+  };
   useEffect(() => {
-    setTrace(null); setError(null); setOpen(false);
+    setTrace(null); setError(null); setOpen(false); setProofs({});
   }, [path, taskId]);
   useEffect(() => {
     if (!open) return;
@@ -88,6 +109,16 @@ export function TaskTracePanel({ path, taskId }: { path: string; taskId: string 
             <code>{row.t3.primary.conversationId}</code></div>}
         </>}
         {row.queueResult?.closureReason && <div>Queue closure: {row.queueResult.closureReason}</div>}
+        <button type="button" className="task-trace-toggle" disabled={!!checking}
+          onClick={() => verifyWorker(row.queueItemId)}>
+          {checking === row.queueItemId ? "Checking T3…" : "Check first T3 assistant reply"}
+        </button>
+        {proofs[row.queueItemId] && ("error" in proofs[row.queueItemId]!
+          ? <div className="task-trace-warning">{(proofs[row.queueItemId] as {error:string}).error}</div>
+          : <div>{(proofs[row.queueItemId] as WorkerProof).firstReplyVerified
+              ? "First assistant reply verified against exact T3 browser, conversation and spawn ID"
+              : `Reply not verified: ${(proofs[row.queueItemId] as WorkerProof).reason ?? "unknown"}`}
+              {". Task claim and completion remain unverified."}</div>)}
         <small>Recorded: {row.createdAt}. Queue closure does not prove task completion.</small>
       </article>)}
     </div>}

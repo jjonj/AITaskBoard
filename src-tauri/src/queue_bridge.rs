@@ -419,3 +419,28 @@ pub(crate) async fn move_pending(
     Ok(status("conflict",Some(qid),Some(format!("OpenRig move refused: {}",
         result["error"].as_str().unwrap_or("unknown error")))))
 }
+
+/** Bounded read-only provider evidence; not a pickup/claim or worker retry. */
+pub(crate) async fn worker_proof(qitem_id: String) -> Result<Value, String> {
+    if !qitem_id.starts_with("qitem-taskboard-") ||
+        qitem_id.len() != "qitem-taskboard-".len() + 36 ||
+        !qitem_id["qitem-taskboard-".len()..].chars()
+            .all(|ch| ch.is_ascii_hexdigit() || ch == '-') {
+        return Err("Invalid exact TaskBoard Queue ID".into());
+    }
+    let bearer=token()?;
+    let client=client()?;
+    let response=client.get(format!("{DAEMON}/api/integrations/t3/taskboard/worker-proof"))
+        .bearer_auth(&bearer)
+        .query(&[("qitemId",qitem_id.as_str())])
+        .send().await.map_err(|e|format!("OpenRig worker evidence unavailable: {e}"))?;
+    let code=response.status();
+    let result=response.json::<Value>().await
+        .map_err(|_|"OpenRig worker evidence response invalid".to_owned())?;
+    if !code.is_success() || result["schema"]!="openrig-queued-worker-proof/v1" ||
+        result["qitemId"]!=qitem_id {
+        return Err(format!("OpenRig exact worker proof unavailable: {}",
+            result["error"].as_str().unwrap_or("identity mismatch")));
+    }
+    Ok(result)
+}
