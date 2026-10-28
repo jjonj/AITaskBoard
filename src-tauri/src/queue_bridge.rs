@@ -97,7 +97,9 @@ pub(crate) async fn sync(path: PathBuf, id: String) -> Result<QueueSyncStatus, S
     let task = snapshot.tasks.into_iter().find(|task| task.id == id)
         .ok_or_else(|| format!("{id} no longer exists in this board"))?;
     let execution = store.execution_intent(&path, &id).map_err(|e| e.to_string())?;
-    let finished = task.completed.is_some() || snapshot.config.columns.iter().any(|col| col.terminal && col.id == task.column);
+    // Archived tasks are no longer dispatchable even when archived directly
+    // from a nonterminal column. A queued archived task must cancel its row.
+    let finished = task.archived || task.completed.is_some() || snapshot.config.columns.iter().any(|col| col.terminal && col.id == task.column);
     let reference = ref_json(&path, &id);
     let request = execution.queue_request.as_deref();
     let qid = request.map(|request| format!("qitem-taskboard-{request}"));
