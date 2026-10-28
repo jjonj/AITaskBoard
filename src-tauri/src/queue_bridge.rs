@@ -136,6 +136,21 @@ pub(crate) async fn sync(path: PathBuf, id: String) -> Result<QueueSyncStatus, S
         if !code.is_success() || !row_matches(&row,&reference,request,None,&task) {
             return Ok(status("conflict",qid,Some("OpenRig receipt could not be authenticated to task".into())));
         }
+        if row["summary"].as_str() != Some(task.title.as_str()) && !terminal_state(&row) {
+            if row["state"] != "pending" || row["claimedAt"].as_str().is_some_and(|s| !s.is_empty()) {
+                return Ok(status("running",qid,Some("Queued task title changed after pickup; worker must re-read its authoritative TaskBoard card".into())));
+            }
+            let (code, updated) = match post(&client,&bearer,&format!("/api/queue/taskboard/{qitem}/sync"), json!({
+                "taskRef":reference,"action":"refresh","requestId":request,
+                "actorSession":SOURCE,"summary":task.title,
+            })).await {
+                Ok(result) => result,
+                Err(reason) => return Ok(status("unknown",qid,Some(reason))),
+            };
+            if !code.is_success() || updated["summary"].as_str() != Some(task.title.as_str()) {
+                return Ok(status("conflict",qid,Some(format!("Queue title refresh refused: {}",updated["error"].as_str().unwrap_or("unknown reason")))));
+            }
+        }
         return Ok(status(if terminal_state(&row) {"terminal"} else {"registered"},qid,None));
     }
     if execution.queue_attempt.is_some() {
