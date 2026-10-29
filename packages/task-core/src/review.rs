@@ -342,9 +342,16 @@ fn persist_task_review(root: &Path, task: &Task) -> Result<Task, TaskStoreError>
     if revision(&existing) != task.revision {
         return Err(TaskStoreError::Conflict(format!("{} changed on disk", task.id)));
     }
-    let text = render_task(task, Some(&existing))?;
-    write_text_atomic(&path, &text)?;
+    let snapshot = FsTaskStore::default().load_unlocked(root)?;
     let mut saved = task.clone();
+    if pending_human_request(&saved) && is_todo(&snapshot.config, &saved.column) {
+        saved.column = IN_PROGRESS_COLUMN_ID.into();
+    }
+    let previous = parse_task(&path, false, &existing)?;
+    validate_task(&snapshot, &saved)?;
+    let text = update_activity(&render_task(&saved, Some(&existing))?,
+        &existing, &previous, &saved, &snapshot.config)?;
+    write_text_atomic(&path, &text)?;
     saved.revision = revision(&text);
     Ok(saved)
 }

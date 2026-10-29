@@ -439,6 +439,42 @@ impl FsTaskStore {
         Ok(changed)
     }
 
+    /// On each board read, recover genuinely idle In Progress tasks.
+    /// Direct Markdown edits also count because they update the file timestamp.
+    fn maintain_abandoned_tasks(&self, snapshot: &BoardSnapshot) -> Result<bool, TaskStoreError> {
+        let cutoff = Utc::now() - ChronoDuration::hours(ABANDON_AFTER_HOURS);
+        let mut changed = false;
+        for task in snapshot.tasks.iter().filter(|task| !task.archived
+            && matches!(task.kind, TaskKind::Task | TaskKind::Recurring)
+            && task.column == IN_PROGRESS_COLUMN_ID
+            && task.completed.is_none() && !pending_human_request(task)) {
+            let path = PathBuf::from(&task.path);
+            let existing = fs::read_to_string(&path)?;
+            if revision(&existing) != task.revision { continue; }
+            let persisted = claim_metadata(&existing, "last_activity_at")?
+                .and_then(|stamp| DateTime::parse_from_rfc3339(&stamp).ok())
+                .map(|stamp| stamp.with_timezone(&Utc));
+            let file_activity = fs::metadata(&path)?.modified().ok().map(DateTime::<Utc>::from);
+            let latest = match (persisted, file_activity) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (Some(a), None) | (None, Some(a)) => Some(a),
+                (None, None) => None,
+            };
+            if latest.is_none_or(|activity| activity > cutoff) { continue; }
+            let mut abandoned = task.clone();
+            let previous_owner = abandoned.claimed_by.clone().unwrap_or_else(|| "unassigned".into());
+            let origin = claim_metadata(&existing, "in_progress_origin")?;
+            abandoned.column = return_column(&snapshot.config, origin.as_deref());
+            abandoned.claimed_by = None;
+            abandoned.description = append_description_update(&abandoned.description, "abandonment",
+                &format!("Abandonment detected after 24 hours without task updates (previous owner: {previous_owner}). Moved out of In Progress. Please finish."));
+            let rendered = stamp_activity(&render_with_claim_token(&abandoned, &existing, None)?, None, true)?;
+            write_text_atomic(&path, &rendered)?;
+            changed = true;
+        }
+        Ok(changed)
+    }
+
     // Expiration is reconciled by the shared core on every load, including CLI
     // loads. A snoozed column therefore wakes even if the app was closed.
     fn maintain_snoozed_columns(
@@ -615,6 +651,9 @@ impl FsTaskStore {
             snapshot = self.load_unlocked(root)?;
         }
         if self.maintain_completed_tasks(root, &snapshot)? {
+            snapshot = self.load_unlocked(root)?;
+        }
+        if self.maintain_abandoned_tasks(&snapshot)? {
             snapshot = self.load_unlocked(root)?;
         }
         if self.maintain_dependency_unblocks(&snapshot)? {
@@ -847,6 +886,8 @@ impl FsTaskStore {
         };
         if task.kind == TaskKind::Epic {
             task.column = DRAFT_COLUMN_ID.to_string();
+        } else if pending_human_request(&task) && is_todo(&snapshot.config, &task.column) {
+            task.column = IN_PROGRESS_COLUMN_ID.into();
         }
         apply_completion_state(&snapshot.config, &mut task);
         apply_blocked_state(None, &mut task, actor)?;
@@ -930,6 +971,10 @@ impl FsTaskStore {
            && (task.column == IN_PROGRESS_COLUMN_ID || snapshot.config.columns.iter().any(|c| c.id == task.column && c.terminal)) {
             ensure_dependencies_complete(&snapshot, &task)?;
         }
+        if !task.archived && pending_human_request(&task) && is_todo(&snapshot.config, &task.column)
+            && (!pending_human_request(&previous) || is_todo(&snapshot.config, &previous.column)) {
+            task.column = IN_PROGRESS_COLUMN_ID.into();
+        }
         if !task.archived {
             apply_completion_state(&snapshot.config, &mut task);
         }
@@ -955,9 +1000,10 @@ impl FsTaskStore {
             task.revision.clear();
             return Ok(task);
         }
-        let text = if task.claimed_by != previous.claimed_by {
+        let rendered = if task.claimed_by != previous.claimed_by {
             render_with_claim_token(&task, &existing, None)?
         } else { render_task(&task, Some(&existing))? };
+        let text = update_activity(&rendered, &existing, &previous, &task, &snapshot.config)?;
         write_text_atomic(&path, &text)?;
         task.revision = revision(&text);
         if actor == MutationActor::Human && previous.kind == TaskKind::ForUser && previous.completed.is_none() && task.completed.is_some() {
@@ -973,6 +1019,75 @@ impl FsTaskStore {
         crate::release::reconcile_unlocked(root, &current.config, &current.tasks, false)?;
         Ok(task)
     }
+}
+
+
+const ABANDON_AFTER_HOURS: i64 = 24;
+
+/// Human Inbox requests remain in place even when their agent is inactive.
+fn pending_human_request(task: &Task) -> bool {
+    task.review_status.as_deref() == Some("open")
+        || (task.attention.contains(&TaskAttention::Question)
+            && task.question.as_ref().is_some_and(|q| q.answer.is_none() && !q.prompt.trim().is_empty()))
+        || task.attention.contains(&TaskAttention::NeedsUser)
+}
+
+fn is_todo(config: &BoardConfig, column: &str) -> bool {
+    column != IN_PROGRESS_COLUMN_ID && column != DRAFT_COLUMN_ID
+        && config.columns.iter().any(|item| item.id == column
+            && !item.terminal && !item.advisory && item.ai_ready)
+}
+
+fn return_column(config: &BoardConfig, original: Option<&str>) -> String {
+    original.filter(|column| is_todo(config, column))
+        .map(str::to_owned)
+        .unwrap_or_else(|| config.columns.iter()
+            .find(|c| c.id == AI_READY_COLUMN_ID && !c.terminal)
+            .or_else(|| config.columns.iter().filter(|c| is_todo(config, &c.id))
+                .min_by_key(|c| c.order))
+            .map(|c| c.id.clone()).unwrap_or_else(|| AI_READY_COLUMN_ID.to_owned()))
+}
+
+/// Maintain origin and activity timestamps in existing Markdown frontmatter.
+/// Legacy cards without an origin return to AI Ready.
+fn stamp_activity(rendered: &str, origin: Option<&str>, touch: bool) -> Result<String, TaskStoreError> {
+    let (yaml, body) = split_frontmatter(rendered)?;
+    let mut map: serde_yaml::Mapping = serde_yaml::from_str(&yaml)
+        .map_err(|error| TaskStoreError::Parse(error.to_string()))?;
+    let key = serde_yaml::Value::String("in_progress_origin".into());
+    map.remove(&key);
+    if let Some(origin) = origin {
+        map.insert(key, serde_yaml::Value::String(origin.to_owned()));
+    }
+    if touch {
+        map.insert(serde_yaml::Value::String("last_activity_at".into()),
+            serde_yaml::Value::String(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)));
+    }
+    Ok(format!("---\n{}---\n{}", serde_yaml::to_string(&map)
+        .map_err(|error| TaskStoreError::Parse(error.to_string()))?, body))
+}
+
+fn update_activity(rendered: &str, existing: &str, before: &Task, after: &Task, config: &BoardConfig)
+    -> Result<String, TaskStoreError> {
+    let origin = if after.column == IN_PROGRESS_COLUMN_ID {
+        if before.column == IN_PROGRESS_COLUMN_ID {
+            claim_metadata(existing, "in_progress_origin")?
+                .or_else(|| Some(return_column(config, None)))
+        } else {
+            Some(return_column(config, Some(&before.column)))
+        }
+    } else { None };
+    stamp_activity(rendered, origin.as_deref(), before != after)
+}
+
+fn release_to_original(task: &mut Task, config: &BoardConfig, existing: &str)
+    -> Result<(), TaskStoreError> {
+    if task.column == IN_PROGRESS_COLUMN_ID && !pending_human_request(task) && task.completed.is_none() {
+        let origin = claim_metadata(existing, "in_progress_origin")?;
+        task.column = return_column(config, origin.as_deref());
+    }
+    task.claimed_by = None;
+    Ok(())
 }
 
 /// TaskBoard-owned lifetime token; separate from OpenRig claimant generation.
@@ -1025,7 +1140,12 @@ impl FsTaskStore {
             || !recurring_due(&task) {
             return Err(TaskStoreError::Invalid("task is not executable or its recurrence is not due".into()));
         }
-        ensure_dependencies_complete(&self.load_unlocked(root)?, &task)?;
+        let snapshot = self.load_unlocked(root)?;
+        ensure_dependencies_complete(&snapshot, &task)?;
+        if snapshot.config.columns.iter().any(|col| col.id == task.column && col.terminal)
+            || !snapshot.config.columns.iter().any(|col| col.id == IN_PROGRESS_COLUMN_ID) {
+            return Err(TaskStoreError::Invalid("claim requires an unfinished task and an In Progress column".into()));
+        }
         if let Some(owner) = task.claimed_by.as_deref() {
             return Err(if owner == agent {
                 TaskStoreError::ClaimInstanceMismatch(format!("{id}: existing claim requires its original token; cannot recover it from a display name"))
@@ -1033,9 +1153,17 @@ impl FsTaskStore {
                 TaskStoreError::AlreadyClaimed { task_id: id.into(), claimed_by: owner.into() }
             });
         }
+        let origin = if task.column == IN_PROGRESS_COLUMN_ID {
+            claim_metadata(&existing, "in_progress_origin")?
+                .unwrap_or_else(|| return_column(&snapshot.config, None))
+        } else {
+            return_column(&snapshot.config, Some(&task.column))
+        };
+        task.column = IN_PROGRESS_COLUMN_ID.into();
         let token = uuid::Uuid::new_v4().to_string();
         task.claimed_by = Some(agent.to_owned());
-        let rendered = render_with_claim_token(&task, &existing, Some(&token))?;
+        let rendered = stamp_activity(&render_with_claim_token(&task, &existing, Some(&token))?,
+            Some(&origin), true)?;
         write_text_atomic(&path, &rendered)?;
         task.revision = revision(&rendered);
         Ok(ManagedClaim { task, claim_token: token })
@@ -1099,8 +1227,9 @@ impl FsTaskStore {
         if task.claimed_by.as_deref() != Some(agent) || actual.as_deref() != Some(expected) {
             return Err(TaskStoreError::ClaimInstanceMismatch(format!("{id}: expected token does not match current claim; no changes made")));
         }
-        task.claimed_by = None;
-        let rendered = render_with_claim_token(&task, &existing, None)?;
+        let snapshot = self.load_unlocked(root)?;
+        release_to_original(&mut task, &snapshot.config, &existing)?;
+        let rendered = stamp_activity(&render_with_claim_token(&task, &existing, None)?, None, true)?;
         let (yaml, body) = split_frontmatter(&rendered)?;
         let mut map: serde_yaml::Mapping = serde_yaml::from_str(&yaml)
             .map_err(|e| TaskStoreError::Parse(e.to_string()))?;
@@ -1151,6 +1280,10 @@ impl TaskStore for FsTaskStore {
         }
         let snapshot = self.load_unlocked(root)?;
         ensure_dependencies_complete(&snapshot, &task)?;
+        if snapshot.config.columns.iter().any(|col| col.id == task.column && col.terminal)
+            || !snapshot.config.columns.iter().any(|col| col.id == IN_PROGRESS_COLUMN_ID) {
+            return Err(TaskStoreError::Invalid("claim requires an unfinished task and an In Progress column".into()));
+        }
         if !recurring_due(&task) {
             return Err(TaskStoreError::Invalid("recurring task is not yet due".into()));
         }
@@ -1164,8 +1297,15 @@ impl TaskStore for FsTaskStore {
             return Ok(task);
         }
 
+        let origin = if task.column == IN_PROGRESS_COLUMN_ID {
+            claim_metadata(&existing, "in_progress_origin")?
+                .unwrap_or_else(|| return_column(&snapshot.config, None))
+        } else {
+            return_column(&snapshot.config, Some(&task.column))
+        };
+        task.column = IN_PROGRESS_COLUMN_ID.into();
         task.claimed_by = Some(agent.to_string());
-        let text = render_task(&task, Some(&existing))?;
+        let text = stamp_activity(&render_task(&task, Some(&existing))?, Some(&origin), true)?;
         write_text_atomic(&path, &text)?;
         task.revision = revision(&text);
         Ok(task)
@@ -1196,8 +1336,9 @@ impl TaskStore for FsTaskStore {
         if claim_token(&existing)?.is_some() {
             return Err(TaskStoreError::ClaimInstanceMismatch(format!("{id}: managed claim requires token-based release")));
         }
-        task.claimed_by = None;
-        let text = render_task(&task, Some(&existing))?;
+        let snapshot = self.load_unlocked(root)?;
+        release_to_original(&mut task, &snapshot.config, &existing)?;
+        let text = stamp_activity(&render_task(&task, Some(&existing))?, None, true)?;
         write_text_atomic(&path, &text)?;
         task.revision = revision(&text);
         Ok(task)
@@ -1917,6 +2058,9 @@ fn validate_task(snapshot: &BoardSnapshot, task: &Task) -> Result<(), TaskStoreE
     validate_parent_epic_only(snapshot, task.kind, task.parent.as_deref(), Some(&task.id))?;
     validate_recurrence(task.kind, task.repeat_every_days, task.next_due.as_deref())?;
     validate_attention(&task.attention, task.question.as_ref())?;
+    if pending_human_request(task) && is_todo(&snapshot.config, &task.column) {
+        return Err(TaskStoreError::Invalid("Pending Inbox question/review cannot remain in a Todo column; use In Progress or Done".into()));
+    }
     validate_live(task)?;
     validate_icon(task.icon.as_deref())?;
     validate_epic_fields(task.kind, task.icon.as_deref(), &task.attention,

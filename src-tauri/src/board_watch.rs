@@ -1,7 +1,30 @@
 //! Lightweight change detection for all registered boards, including inactive tabs.
 //! Only task Markdown, board config and review manifests participate; attachments
 //! and transient reservation files must not cause constant UI refreshes.
-use std::{collections::hash_map::DefaultHasher, fs, hash::{Hash, Hasher}, path::Path, time::UNIX_EPOCH};
+use std::{collections::{HashMap, hash_map::DefaultHasher}, fs, hash::{Hash, Hasher},
+    path::Path, sync::{Mutex, OnceLock}, time::{Duration, Instant, UNIX_EPOCH}};
+use task_core::{FsTaskStore, TaskStore};
+
+/// Board reads reconcile stale work; limit them to once per five minutes per board.
+/// This hooks into the existing UI change polling, without another background agent.
+fn maintain_if_due(root: &Path) {
+    static LAST: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    let now = Instant::now();
+    let key = root.to_string_lossy().to_string();
+    let should_run = {
+        let mut guard = LAST.get_or_init(|| Mutex::new(HashMap::new())).lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if guard.get(&key).is_some_and(|last| now.duration_since(*last) < Duration::from_secs(300)) {
+            false
+        } else {
+            guard.insert(key, now);
+            true
+        }
+    };
+    if should_run {
+        let _ = FsTaskStore::default().load(root);
+    }
+}
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,6 +76,7 @@ fn scan_tokens(paths: Vec<String>) -> Vec<BoardChangeToken> {
         if !board.is_file() {
             return BoardChangeToken { path, token: None };
         }
+        maintain_if_due(root);
         let mut hasher = DefaultHasher::new();
         record_file(&board, &mut hasher);
         for folder in ["Active", "Archive", "Reviews"] {

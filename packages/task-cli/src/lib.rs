@@ -47,6 +47,7 @@ enum TaskCommand {
     CompleteManaged(TaskManagedCompleteArgs),
     Archive(TaskTarget),
     Claim(TaskClaimArgs),
+    #[command(alias = "release_task")]
     Release(TaskClaimArgs),
     Execution(TaskExecutionCommandArgs),
     Live { #[command(subcommand)] command: TaskLiveCommand },
@@ -1697,6 +1698,7 @@ mod tests {
             parent: None,
             roots: false,
             ai_ready: true,
+            live_state: None,
         })).unwrap();
         assert_eq!(ready["tasks"].as_array().unwrap().len(), 0);
 
@@ -1876,6 +1878,7 @@ mod tests {
                 parent: None,
                 roots: false,
                 ai_ready: true,
+                live_state: None,
             }),
         )
         .unwrap();
@@ -1987,7 +1990,7 @@ mod tests {
         assert!(!task_core::recurring_due(&cycled));
         let ready = run_task(&store, &root, &TaskCommand::List(TaskListArgs {
             include_archived: false, column: None, parent: None,
-            roots: false, ai_ready: true,
+            roots: false, ai_ready: true, live_state: None,
         })).unwrap();
         assert!(ready["tasks"].as_array().unwrap().is_empty());
         assert!(store.claim(&root, &cycled.id, "early-agent").is_err());
@@ -2103,7 +2106,7 @@ mod tests {
         urgent_draft.attention.push(TaskAttention::Priority);
         let urgent = store.create(&root, urgent_draft).unwrap();
         let result = run_task(&store, &root, &TaskCommand::List(TaskListArgs {
-            include_archived: false, column: None, parent: None, roots: false, ai_ready: true,
+            include_archived: false, column: None, parent: None, roots: false, ai_ready: true, live_state: None,
         })).unwrap();
         assert_eq!(result["tasks"][0]["id"], urgent.id);
         assert_eq!(result["tasks"][1]["id"], normal.id);
