@@ -32,7 +32,6 @@ import {
   loadBoard,
   listProjects,
   openInObsidian,
-  openClaimedT3Session,
   openTaskSession,
   taskLiveWithMe,
   restoreSnapshot,
@@ -3367,18 +3366,13 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId }: {
                     {isForUser(editor.draft) ? "●" : "○"} For user
                 </button>}
               </div>}
-              {editor.mode === "edit" && editor.original?.kind !== "epic" && editor.original?.claimed_by && (() => {
-                // Opens the claimant's exact T3 session; IPC only accepts a bare or t3-browser: prefixed UUID.
-                const claimedBy = editor?.original?.claimed_by ?? "";
-                const sessionLinked = /^(t3-browser:)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(claimedBy);
-                return (
-                  <button type="button" className="button secondary" disabled={busy || !sessionLinked}
-                    title={sessionLinked ? "Focus T3; restore the exact saved conversation if the original session was closed" : "No verified T3 session link for this task"}
-                    onClick={() => void run(async () => { await openClaimedT3Session(claimedBy); })}>
-                    Open Session
-                  </button>
-                );
-              })()}
+              {editor.mode === "edit" && editor.original?.kind !== "epic" && (
+                <button type="button" className="button secondary" disabled={busy}
+                  title="Focus the task session, restore its conversation, or safely start one if none exists"
+                  onClick={() => openForTask(editor.original!)}>
+                  {editor.original?.claimed_by || editor.original?.live?.with_me ? "Open Session" : "Start Session"}
+                </button>
+              )}
               <button className="icon-button" aria-label="Close editor" onClick={() => closeEditor()} disabled={busy}>×</button>
             </div>
 
