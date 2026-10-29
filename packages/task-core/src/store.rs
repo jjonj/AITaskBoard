@@ -888,7 +888,7 @@ impl FsTaskStore {
             apply_completion_state(&snapshot.config, &mut task);
         }
         review_link::close_question(&mut task,
-            actor == MutationActor::Human && previous.kind == TaskKind::ForUser);
+            previous.kind == TaskKind::ForUser);
         let becoming_blocked = !is_task_blocked(&previous) && is_task_blocked(&task);
         if actor == MutationActor::Agent && becoming_blocked {
             crate::block_gate::challenge_agent_block_unlocked(root, &task.id, action, task.blocked_reason.as_deref().unwrap_or(""), confirmation)?;
@@ -914,7 +914,7 @@ impl FsTaskStore {
         } else { render_task(&task, Some(&existing))? };
         write_text_atomic(&path, &text)?;
         task.revision = revision(&text);
-        if actor == MutationActor::Human && previous.completed.is_none() && task.completed.is_some() {
+        if previous.kind == TaskKind::ForUser && previous.completed.is_none() && task.completed.is_some() {
             review_link::reconcile(root, &snapshot, &task)?;
         }
         // Complete dependent release during the same board lock. The next load

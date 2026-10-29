@@ -1688,7 +1688,8 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId }: {
         },
       };
       const saved = await updateTask(nextTask, boardPath);
-      const after = snapshotWithTask(before, saved);
+      // A review verdict may atomically update its linked implementation task.
+      const after = await loadBoard(boardPath);
       const kind = classifyTaskChange(editor.original, saved);
       if (kind) flashTaskActivity([{ id: saved.id, kind }]);
       pushUndo({ kind: "board", label: "answer question", before, after });
