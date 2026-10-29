@@ -80,5 +80,14 @@ fn pending_inbox_is_not_todo_and_is_not_requeued_by_age() {
     let mut invalid = read.clone();
     invalid.column = "ai-ready".into();
     assert!(store.update(&root, invalid).is_err());
+    // Legacy / externally edited Markdown can still create this state.
+    // The next board load repairs it without discarding the Inbox request.
+    let yaml = fs::read_to_string(&read.path).unwrap();
+    let yaml = yaml.replacen("column: in-progress", "column: ai-ready", 1);
+    fs::write(&read.path, yaml).unwrap();
+    let repaired = store.load(&root).unwrap().tasks.into_iter()
+        .find(|t| t.id == task.id).unwrap();
+    assert_eq!(repaired.column, "in-progress");
+    assert_eq!(repaired.question.as_ref().unwrap().prompt, "Choose one?");
     fs::remove_dir_all(root).unwrap();
 }

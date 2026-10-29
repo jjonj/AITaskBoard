@@ -439,6 +439,24 @@ impl FsTaskStore {
         Ok(changed)
     }
 
+    /// Repair existing unanswered Inbox requests left in an AI Todo column.
+    fn maintain_inbox_placement(&self, snapshot: &BoardSnapshot) -> Result<bool, TaskStoreError> {
+        let mut changed = false;
+        for task in snapshot.tasks.iter().filter(|task| !task.archived
+            && pending_human_request(task) && is_todo(&snapshot.config, &task.column)) {
+            let path = PathBuf::from(&task.path);
+            let existing = fs::read_to_string(&path)?;
+            if revision(&existing) != task.revision { continue; }
+            let mut corrected = task.clone();
+            corrected.column = IN_PROGRESS_COLUMN_ID.into();
+            let rendered = update_activity(&render_task(&corrected, Some(&existing))?,
+                &existing, task, &corrected, &snapshot.config)?;
+            write_text_atomic(&path, &rendered)?;
+            changed = true;
+        }
+        Ok(changed)
+    }
+
     /// On each board read, recover genuinely idle In Progress tasks.
     /// Direct Markdown edits also count because they update the file timestamp.
     fn maintain_abandoned_tasks(&self, snapshot: &BoardSnapshot) -> Result<bool, TaskStoreError> {
@@ -651,6 +669,9 @@ impl FsTaskStore {
             snapshot = self.load_unlocked(root)?;
         }
         if self.maintain_completed_tasks(root, &snapshot)? {
+            snapshot = self.load_unlocked(root)?;
+        }
+        if self.maintain_inbox_placement(&snapshot)? {
             snapshot = self.load_unlocked(root)?;
         }
         if self.maintain_abandoned_tasks(&snapshot)? {
