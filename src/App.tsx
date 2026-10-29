@@ -1433,6 +1433,25 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId }: {
     }
   };
 
+  const showLinkedReviewOutcome = (before: BoardSnapshot, after: BoardSnapshot, reviewId: string) => {
+    const review = after.tasks.find((task) => task.id === reviewId);
+    const previous = before.tasks.find((task) => task.id === reviewId);
+    if (review?.kind !== "for_user" || previous?.completed || !review.completed ||
+        review.related_to.length !== 1) return;
+    const parent = after.tasks.find((task) => task.id === review.related_to[0]);
+    if (!parent) return;
+    const audit = parent.notes.split(`[review:${reviewId}]`).slice(-1)[0] ?? "";
+    const disposition = audit.trim().split(" ")[0];
+    if (disposition === "approved_parent_done") {
+      setReviewNotice(`Review approved — ${parent.id} moved to Done.`);
+    } else if (disposition === "needs_changes") {
+      setReviewNotice(`Review requested changes — ${parent.id} remains actionable.`);
+    } else if (disposition === "partial_or_blocked") {
+      setReviewNotice(`Review accepted its scope — ${parent.id} remains ${parent.column} with remaining work.`);
+    } else if (disposition === "ambiguous_feedback") {
+      setReviewNotice(`Review closed — ${parent.id} needs a clear disposition.`);
+    }
+  };
   const saveEditor = (markDone = false) =>
     run(async () => {
       if (!editor || !snapshot) return;
@@ -1520,6 +1539,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId }: {
         // Core metadata writes change the revision outside the ordinary Task draft API.
         after = await loadBoard(boardPath);
       }
+      if (savedTask) showLinkedReviewOutcome(before, after, savedTask.id);
       if (undoAction) pushUndo({ kind: "board", label: undoAction, before, after });
       const syncWarning = savedTask ? await syncQueueWarning(savedTask.id) : null;
       // The sync CAS may add a receipt, changing the revision: reload before
@@ -1575,6 +1595,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId }: {
       }
       const syncWarning = await syncQueueWarning(closed.id);
       const after = await loadBoard(boardPath);
+      showLinkedReviewOutcome(before, after, closed.id);
       applySnapshot(after);
       if (syncWarning) setError(syncWarning);
       flashTaskActivity([
@@ -1690,6 +1711,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId }: {
       const saved = await updateTask(nextTask, boardPath);
       // A review verdict may atomically update its linked implementation task.
       const after = await loadBoard(boardPath);
+      showLinkedReviewOutcome(before, after, saved.id);
       const kind = classifyTaskChange(editor.original, saved);
       if (kind) flashTaskActivity([{ id: saved.id, kind }]);
       pushUndo({ kind: "board", label: "answer question", before, after });
@@ -1721,6 +1743,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId }: {
       await updateTask(optimistic, boardPath);
       const syncWarning = await syncQueueWarning(id);
       const after = await loadBoard(boardPath);
+      showLinkedReviewOutcome(before, after, id);
       if (syncWarning) setError(syncWarning);
       const saved = after.tasks.find((item) => item.id === id);
       if (saved) {

@@ -85,6 +85,7 @@ enum ReviewCommand {
     Thumbnails(TaskTarget),
     Resolve(ReviewResolveArgs),
     Gc { #[arg(long)] dry_run: bool, #[arg(long)] all_boards: bool },
+    ReconcileLinked { #[arg(long)] apply: bool },
 }
 
 #[derive(Args)]
@@ -680,7 +681,10 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
                 }).map_err(map_store_error)?;
                 Ok(json!(review))
             }
-            ReviewCommand::Gc { dry_run, all_boards } => {
+            ReviewCommand::ReconcileLinked { apply } => {
+                let entries = store.reconcile_completed_reviews(root, *apply).map_err(map_store_error)?;
+                Ok(json!({"applied": apply, "count": entries.len(), "entries": entries}))
+            }            ReviewCommand::Gc { dry_run, all_boards } => {
                 let mut roots = vec![root.to_path_buf()];
                 if *all_boards {
                     roots.clear();

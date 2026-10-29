@@ -19,19 +19,19 @@ pub(super) fn close_question(task: &mut Task, was_for_user: bool) {
     task.attention.retain(|a| *a != TaskAttention::Question);
 }
 
-pub(super) fn reconcile(_root: &Path, snapshot: &BoardSnapshot, review: &Task) -> Result<(), TaskStoreError> {
+pub(super) fn reconcile(snapshot: &BoardSnapshot, review: &Task, dry_run: bool) -> Result<Option<String>, TaskStoreError> {
     if review.completed.is_none() || !is_implementation_review(review) ||
-       review.related_to.len() != 1 { return Ok(()); }
+       review.related_to.len() != 1 { return Ok(None); }
     let target = &review.related_to[0];
-    if target.contains('#') || target == &review.id { return Ok(()); }
+    if target.contains('#') || target == &review.id { return Ok(None); }
     let Some(existing) = snapshot.tasks.iter().find(|t| t.id == *target && t.kind == TaskKind::Task) else {
-        return Ok(());
+        return Ok(None);
     };
     let path = PathBuf::from(&existing.path);
     let original = fs::read_to_string(&path)?;
     let mut parent = parse_task(&path, existing.archived, &original)?;
     let marker = format!("[review:{}]", review.id);
-    if parent.notes.contains(&marker) { return Ok(()); }
+    if parent.notes.contains(&marker) { return Ok(None); }
     let answer = review.question.as_ref().and_then(|q| q.answer.as_deref()).unwrap_or("").to_lowercase();
     let negative = answer.trim() == "needs changes" || answer.trim() == "rejected";
     let positive = matches!(answer.trim(), "approved" | "approve" | "accepted");
@@ -66,6 +66,6 @@ pub(super) fn reconcile(_root: &Path, snapshot: &BoardSnapshot, review: &Task) -
         review.completed_at.as_deref().unwrap_or("unknown"),
         review.acceptance_criteria.join("; "), remaining.join("; ")));
     validate_task(snapshot, &parent)?;
-    write_text_atomic(&path, &render_task(&parent, Some(&original))?)?;
-    Ok(())
+    if !dry_run { write_text_atomic(&path, &render_task(&parent, Some(&original))?)?; }
+    Ok(Some(format!("{}: {} -> {} ({})", review.id, review.column, parent.id, disposition)))
 }

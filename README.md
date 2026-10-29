@@ -98,3 +98,14 @@ The desktop Review UI now has a TaskBoard-native visual implementation in source
 Review media uses manifest timestamps for stateless retention: losing variants (including superseded/rejected rounds) become eligible after 48 hours, while chosen/approved variants remain until the implementing task archives. At archive, GC creates a `receipt.webp` no larger than 200 KB and recycles the large winner media and `refs/`. Receipt and manifest expire after 90 days. Open rounds are never automatically pruned; TaskBoard flags open requests older than 30 days. Orphan local-only cache directories expire after 7 days. Reopening the implementing task clears pending archive expiry. These are **due times**: files are moved to the **Windows Recycle Bin** on the next sweep, never permanently deleted by TaskBoard. Each recycle/receipt action is logged in `Reviews/_gc.log`.
 
 Preview with `TaskBoard.exe --root "<board>/Tasks" --json task review gc --dry-run`. Run one board with `--json task review gc` or all registered boards with `--json task review gc --all-boards`. `--all-boards` reads `%APPDATA%\TaskBoard\projects.json`; boards that are not mounted are skipped. Desktop TaskBoard starts a low-priority sweep at startup and every six hours. The Windows scheduled task **TaskBoard Review GC** independently runs at login and 03:30 daily through an invisible WScript launcher (`scripts/TaskBoardReviewGc.vbs`) to avoid console flashes. Install/re-register with `scripts/Install-TaskBoardReviewGc.ps1`, remove with `scripts/Install-TaskBoardReviewGc.ps1 -Uninstall`. Both entrypoints take the TaskBoard per-board mutation lock. Sync data above 1 GB produces a warning, not a write refusal.
+
+### Reconcile previously completed implementation reviews
+
+Use `task review reconcile-linked` with the relevant `--root` to **preview**
+completed, explicitly linked implementation-review cards that have not yet been
+applied to their source tasks. This is read-only by default. After checking
+the report, run `task review reconcile-linked --apply` to reconcile only
+eligible reviews. Ambiguous answers do not approve source tasks; the source
+retains an audit entry rather than silently completing. Ordinary For User
+cards and reviews with ambiguous relationships are excluded. Do not run
+`--apply` against production boards without inspecting the preview first.

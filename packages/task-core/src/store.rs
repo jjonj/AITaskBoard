@@ -840,6 +840,27 @@ impl FsTaskStore {
         Ok(task)
     }
 
+    /// Preview completed linked implementation reviews, or replay them under the
+    /// board lock. Only explicit, unprocessed reviews are candidates.
+    pub fn reconcile_completed_reviews(&self, root: &Path, apply: bool) -> Result<Vec<String>, TaskStoreError> {
+        let _lock = acquire_lock(root)?;
+        let snapshot = self.load_unlocked(root)?;
+        let candidates: Vec<Task> = snapshot.tasks.iter()
+            .filter(|task| task.kind == TaskKind::ForUser
+                && task.completed.is_some()
+                && review_link::is_implementation_review(task))
+            .cloned().collect();
+        let mut report = Vec::new();
+        for review in candidates {
+            // Re-read after each applied review: multiple reviews of one parent
+            // must never overwrite another review's reconciliation.
+            let current = if apply { self.load_unlocked(root)? } else { snapshot.clone() };
+            if let Some(result) = review_link::reconcile(&current, &review, !apply)? {
+                report.push(result);
+            }
+        }
+        Ok(report)
+    }
     /// `update` with an explicit actor. Human edits can never author or change
     /// `blocked_reason`; agent edits must supply one when entering Blocked.
     pub fn update_as(&self, root: &Path, task: Task, actor: MutationActor) -> Result<Task, TaskStoreError> {
@@ -888,7 +909,7 @@ impl FsTaskStore {
             apply_completion_state(&snapshot.config, &mut task);
         }
         review_link::close_question(&mut task,
-            previous.kind == TaskKind::ForUser);
+            actor == MutationActor::Human && previous.kind == TaskKind::ForUser);
         let becoming_blocked = !is_task_blocked(&previous) && is_task_blocked(&task);
         if actor == MutationActor::Agent && becoming_blocked {
             crate::block_gate::challenge_agent_block_unlocked(root, &task.id, action, task.blocked_reason.as_deref().unwrap_or(""), confirmation)?;
@@ -914,8 +935,8 @@ impl FsTaskStore {
         } else { render_task(&task, Some(&existing))? };
         write_text_atomic(&path, &text)?;
         task.revision = revision(&text);
-        if previous.kind == TaskKind::ForUser && previous.completed.is_none() && task.completed.is_some() {
-            review_link::reconcile(root, &snapshot, &task)?;
+        if actor == MutationActor::Human && previous.kind == TaskKind::ForUser && previous.completed.is_none() && task.completed.is_some() {
+            let _ = review_link::reconcile(&snapshot, &task, false)?;
         }
         // Complete dependent release during the same board lock. The next load
         // also covers out-of-band edits and archived prerequisites.
