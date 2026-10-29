@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
 import { listProjects, loadBoard, updateTask, type ProjectTab } from "./api";
-import { reviewAsset, reviewResolve, reviewShow,
+import { reviewAsset, reviewReconsider, reviewResolve, reviewShow,
   type ReviewArtifact, type ReviewManifest, type ReviewPin } from "./reviewApi";
 import type { Task } from "./types";
 import { isUserQueueEligible } from "./userQueueEligibility";
@@ -386,6 +386,27 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
     advance(keyOf(reviewTask));
   };
 
+  const reconsider = async () => {
+    if (!reviewTask || !manifest || !round?.result || manifest.status !== "open" || saving) return;
+    setSaving(true);
+    setError("");
+    try {
+      const reopened = await reviewReconsider(reviewTask.task.id, reviewTask.task.revision,
+        manifest.revision, reviewTask.path);
+      setPins([]);
+      setNote("");
+      setChoice("");
+      setRanking([]);
+      setResponseOutcome("");
+      setMediaIndex(0);
+      await refresh(); // Refresh the task revision before allowing the new verdict.
+      setManifest(reopened);
+    } catch (cause) {
+      setError(`Unable to reconsider review: ${String(cause)}`);
+      await refresh();
+    } finally { setSaving(false); }
+  };
+
   const submit = async (verdict: string) => {
     // A rejected/more-variants round stays in an open conversation, but its
     // verdict is immutable. Only a NEW requested round can accept another send.
@@ -596,6 +617,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       primaryVerdict={primaryVerdict}
       primaryReady={primaryReady}
       submit={submit}
+      onReconsider={reconsider}
     />;
   }
 

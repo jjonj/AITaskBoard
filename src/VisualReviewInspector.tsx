@@ -44,6 +44,7 @@ type Props = {
   primaryVerdict: string;
   primaryReady: boolean;
   submit: (verdict: string) => Promise<void>;
+  onReconsider: () => Promise<void>;
 };
 
 const keyOf = (item: Item) => item.path + "|" + item.task.id;
@@ -60,7 +61,7 @@ export function VisualReviewInspector(props: Props) {
     choice, ranking, pins, setPins, pinning, onTogglePin, addPin, renderArtifact,
     posterOf, iframeWidth, onIframeWidth, note, setNote, saving,
     outcome, onOutcome, onSkip, onSnooze,
-    resolved, awaitingNextRound, error, primaryVerdict, primaryReady, submit,
+    resolved, awaitingNextRound, error, primaryVerdict, primaryReady, submit, onReconsider,
   } = props;
   const [queueExpanded, setQueueExpanded] = useState(false);
   const [feedbackExpanded, setFeedbackExpanded] = useState(true);
@@ -295,6 +296,13 @@ export function VisualReviewInspector(props: Props) {
               </button>;
             })}
           </nav>}
+          {!focus && awaitingNextRound && <div className="review-reconsider">
+            <span>This round was {round.result?.verdict}. The decision is saved, but you can open a new round to change it without erasing history. Missing or moved previews do not prevent your decision.</span>
+            <button type="button" className="button secondary" disabled={saving}
+              onClick={() => void onReconsider()}>Change decision</button>
+          </div>}
+          {!focus && playable.some((artifact) => artifact.pruned) && !awaitingNextRound &&
+            <div className="review-reconsider">Preview files were removed or moved. You can still submit an explicit outcome for this review.</div>}
           {!focus && <InboxResponseFooter
             mode="visual"
             outcome={outcome}

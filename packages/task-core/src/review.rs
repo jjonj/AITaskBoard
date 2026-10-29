@@ -125,6 +125,13 @@ pub struct ReviewRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewReconsider {
+    pub task_id: String,
+    pub expected_task_revision: String,
+    pub expected_manifest_revision: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewResolution {
     pub task_id: String,
     pub verdict: String,
@@ -385,6 +392,9 @@ impl FsTaskStore {
         if input.judge.trim().is_empty() {
             return Err(TaskStoreError::Invalid("review --judge is required".into()));
         }
+        if input.judge.trim().chars().count() > 300 {
+            return Err(TaskStoreError::Invalid("Inbox review question exceeds 300 characters. Make it shorter, human-readable and actionable; put background details in the task description.".into()));
+        }
         let count = input.artifacts.len();
         if (mode == "pick" && !(2..=4).contains(&count)) ||
             (mode == "markup" && count != 1) ||
@@ -442,6 +452,46 @@ impl FsTaskStore {
             prompt: manifest.rounds.last().unwrap().judge.clone(),
             options: Vec::new(), answer: None,
         });
+        save_manifest(&file, &manifest)?;
+        persist_task_review(root, &task)?;
+        parse_manifest(&file)
+    }
+
+    /// Start a new human decision round without rewriting the prior verdict or
+    /// requiring media that may have been pruned or moved since the first round.
+    pub fn review_reconsider(&self, root: &Path, input: ReviewReconsider) -> Result<ReviewManifest, TaskStoreError> {
+        let _lock = acquire_lock(root)?;
+        if !valid_id(&input.task_id) { return Err(TaskStoreError::Invalid("invalid review task ID".into())); }
+        let snapshot = self.load_unlocked(root)?;
+        let mut task = find_review_task(&snapshot, &input.task_id)?;
+        ensure_expected(&input.expected_task_revision, &task.revision, &task.id)?;
+        let file = manifest_file(root, &task.id);
+        let mut manifest = parse_manifest(&file)?;
+        ensure_expected(&input.expected_manifest_revision, &manifest.revision, "review manifest")?;
+        if manifest.status != "open" {
+            return Err(TaskStoreError::Invalid("only an open review can be reconsidered".into()));
+        }
+        let prior = manifest.rounds.last().ok_or_else(||
+            TaskStoreError::Invalid("review has no round".into()))?;
+        if !prior.result.as_ref().is_some_and(|result|
+            result.verdict == "rejected" || result.verdict == "more-variants") {
+            return Err(TaskStoreError::Invalid("only a rejected or more-variants round can be reconsidered".into()));
+        }
+        let mut next = prior.clone();
+        next.number = manifest.current_round + 1;
+        next.requested_at = now();
+        next.result = None;
+        next.loser_prune_at = None;
+        manifest.current_round = next.number;
+        task.review_round = Some(next.number);
+        task.review_status = Some("open".into());
+        if !task.attention.contains(&TaskAttention::Question) {
+            task.attention.push(TaskAttention::Question);
+        }
+        task.question = Some(TaskQuestion {
+            request_type: None, prompt: next.judge.clone(), options: Vec::new(), answer: None,
+        });
+        manifest.rounds.push(next);
         save_manifest(&file, &manifest)?;
         persist_task_review(root, &task)?;
         parse_manifest(&file)

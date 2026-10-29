@@ -3184,6 +3184,21 @@ body.card-dragging .project-tab-wrapper:not(.selected):hover {
 }
 
 
+.review-reconsider {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 15px;
+  background: #1b2a38;
+  border-top: 1px solid #44596a;
+  color: #d3e3ef;
+  font-size: 12px;
+  line-height: 1.4;
+  flex: none;
+}
+.review-reconsider .button { flex: none; white-space: nowrap; }
+
 /* One response contract for text tasks and visual rounds: Skip, Snooze,
    select an outcome, Submit & Next. Individual review verbs are not footer buttons. */
 .inbox-response-footer {

@@ -459,6 +459,17 @@ fn validate_agent_block_reason(reason: Option<&str>) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Inbox questions must be short enough to understand and act on at a glance.
+fn validate_inbox_question(question: &str) -> Result<(), CliError> {
+    let count = question.trim().chars().count();
+    if count > 300 {
+        return Err(CliError::new("question_too_long", format!(
+            "Inbox question is {count} characters (maximum 300). Shorten it to one human-readable, actionable question. Put background details in the task description, not the question."
+        )));
+    }
+    Ok(())
+}
+
 fn run_ask_user(store: &FsTaskStore, root: &Path, args: &TaskAskUserArgs) -> Result<Value, CliError> {
     let snapshot = load_checked(store, root)?;
     let mut task = resolve_task(&snapshot, &args.target, false)?.clone();
@@ -469,6 +480,7 @@ fn run_ask_user(store: &FsTaskStore, root: &Path, args: &TaskAskUserArgs) -> Res
     if args.question.trim().is_empty() {
         return Err(CliError::new("question_required", "Provide a concrete --question"));
     }
+    validate_inbox_question(&args.question)?;
     if task.review_status.as_deref() == Some("open") ||
         task.question.as_ref().is_some_and(|q| q.answer.is_none()) {
         return Err(CliError::new("request_already_open", "Resolve the existing request instead of duplicating it"));
@@ -521,6 +533,7 @@ fn run_finish(store: &FsTaskStore, root: &Path, args: &TaskFinishArgs) -> Result
             if instructions.is_empty() {
                 return Err(CliError::new("verification_instructions_required", "Provide --instructions with concrete verification steps and deployed evidence"));
             }
+            validate_inbox_question(instructions)?;
             task.question = Some(TaskQuestion { request_type: Some("verification".into()),
                 prompt: instructions.into(), options: vec!["Done".into(), "Needs changes".into()], answer: None });
             if !task.attention.contains(&TaskAttention::Question) { task.attention.push(TaskAttention::Question); }
@@ -618,6 +631,7 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
     match command {
         TaskCommand::Review { command } => match command {
             ReviewCommand::Request(args) => {
+                validate_inbox_question(&args.judge)?;
                 let snapshot = load_checked(store, root)?;
                 let task = resolve_task(&snapshot, &args.task, false)?;
                 let existing = store.review_show(root, &task.id).ok();
@@ -788,6 +802,7 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
             Ok(json!({ "tasks": tasks }))
         }
         TaskCommand::Create(args) => {
+            if let Some(question) = &args.question { validate_inbox_question(question)?; }
             let snapshot = load_checked(store, root)?;
             // A question about existing implementation belongs on that task,
             // not on a duplicate Review/Verify card with a new ID.
@@ -924,6 +939,7 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
                 task.question = None;
                 task.attention.retain(|flag| flag != &TaskAttention::Question);
             } else if let Some(prompt) = &args.question {
+                validate_inbox_question(prompt)?;
                 task.question = Some(TaskQuestion {
                     request_type: None,
                     prompt: prompt.trim().to_string(),

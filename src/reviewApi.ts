@@ -6,6 +6,7 @@ export type ReviewArtifact = {
   storage: "synced" | "local" | "url";
   path: string;
   poster?: string;
+  pruned?: boolean;
 };
 export type ReviewPin = {
   x: number; y: number;
@@ -39,6 +40,11 @@ export type ReviewResolution = {
 };
 export const reviewShow = (taskId: string, path: string) =>
   invoke<ReviewManifest>("review_show", { path, taskId });
+export const reviewReconsider = (taskId: string, expectedTaskRevision: string, expectedManifestRevision: string, path: string) =>
+  invoke<ReviewManifest>("review_reconsider", { path, request: {
+    task_id: taskId, expected_task_revision: expectedTaskRevision,
+    expected_manifest_revision: expectedManifestRevision,
+  } });
 export const reviewResolve = (resolution: ReviewResolution, path: string) =>
   invoke<ReviewManifest>("review_resolve", { path, resolution });
 export const reviewAsset = (assetPath: string, path: string) =>
