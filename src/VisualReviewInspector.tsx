@@ -12,6 +12,8 @@ type Props = {
   selectedKey: string;
   onSelectTask: (key: string) => void;
   onClose: () => void;
+  onOpenSession: () => void;
+  sessionOpening: boolean;
   allBoards: boolean;
   showResolved: boolean;
   onAllBoards: (value: boolean) => void;
@@ -56,7 +58,7 @@ const isWeb = (artifact: ReviewArtifact) => artifact.kind === "html" || artifact
  */
 export function VisualReviewInspector(props: Props) {
   const {
-    review, round, items, selectedKey, onSelectTask, onClose, allBoards, showResolved,
+    review, round, items, selectedKey, onSelectTask, onClose, onOpenSession, sessionOpening, allBoards, showResolved,
     onAllBoards, onShowResolved, playable, activeIndex, onFocusArtifact, onChooseArtifact,
     choice, ranking, pins, setPins, pinning, onTogglePin, addPin, renderArtifact,
     posterOf, iframeWidth, onIframeWidth, note, setNote, saving,
@@ -168,6 +170,13 @@ export function VisualReviewInspector(props: Props) {
           <strong title={review.task.title}>{review.task.title}</strong></div>
         <span className="review-visual-mode">{round.mode.toUpperCase()}</span>
         <div className="review-visual-header-actions">
+          {(review.task.claimed_by || review.task.live?.with_me) && (
+            <button type="button" className="button secondary"
+              aria-label={`Open session for ${review.task.id}`}
+              disabled={sessionOpening} onClick={onOpenSession}>
+              {sessionOpening ? "Opening…" : "Open Session"}
+            </button>
+          )}
           <button type="button" className={"button " + (feedbackExpanded ? "primary" : "secondary")}
             onClick={() => setFeedbackExpanded((value) => !value)} aria-pressed={feedbackExpanded}>
             ☷ Feedback</button>

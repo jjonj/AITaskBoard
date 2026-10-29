@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
-import { listProjects, loadBoard, updateTask, type ProjectTab } from "./api";
+import { listProjects, loadBoard, openTaskSession, updateTask, type ProjectTab } from "./api";
 import { reviewAsset, reviewReconsider, reviewResolve, reviewShow,
   type ReviewArtifact, type ReviewManifest, type ReviewPin } from "./reviewApi";
 import type { Task } from "./types";
@@ -56,6 +56,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   const [slider, setSlider] = useState(50);
   const [mediaIndex, setMediaIndex] = useState(0);
   const [saving, setSaving] = useState(false);
+  const [openingTaskSession, setOpeningTaskSession] = useState(false);
   const [error, setError] = useState("");
   const [userNote, setUserNote] = useState("");
   const [userCriteria, setUserCriteria] = useState("");
@@ -66,6 +67,17 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   const videoRef = useRef<HTMLVideoElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const reviewTask = items.find((item) => keyOf(item) === selectedKey);
+  const openReviewTaskSession = async (item: QueueItem) => {
+    if (openingTaskSession) return;
+    setOpeningTaskSession(true);
+    try {
+      await openTaskSession(item.task.id, item.path);
+    } catch (cause) {
+      setError("Could not open the linked T3 session: " + String(cause));
+    } finally {
+      setOpeningTaskSession(false);
+    }
+  };
   const isVisualReview = reviewTask?.task.review_status === "open" ||
     ((showResolved || reviewTask?.task.id === initialTaskId) &&
       (reviewTask?.task.review_status === "resolved" ||
@@ -584,6 +596,8 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       selectedKey={selectedKey}
       onSelectTask={setSelectedKey}
       onClose={onClose}
+      onOpenSession={() => void openReviewTaskSession(reviewTask)}
+      sessionOpening={openingTaskSession}
       allBoards={allBoards}
       showResolved={showResolved}
       onAllBoards={setAllBoards}
@@ -687,7 +701,17 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
                 <h2>{reviewTask.task.title}</h2>
                 <p>{reviewTask.task.description || "Provide your instructions for this task."}</p>
               </div>
-              <span className="review-mode-label">{reviewTask.task.question?.request_type?.replace('-', ' ').toUpperCase() || "RESPONSE"}</span>
+              <div className="flex items-center gap-2">
+                {(reviewTask.task.claimed_by || reviewTask.task.live?.with_me) && (
+                  <button type="button" className="button secondary"
+                    aria-label={`Open session for ${reviewTask.task.id}`}
+                    disabled={openingTaskSession}
+                    onClick={() => void openReviewTaskSession(reviewTask)}>
+                    {openingTaskSession ? "Opening…" : "Open Session"}
+                  </button>
+                )}
+                <span className="review-mode-label">{reviewTask.task.question?.request_type?.replace('-', ' ').toUpperCase() || "RESPONSE"}</span>
+              </div>
             </header>
             <div className="review-workspace">
               <div className="review-stage-column">
