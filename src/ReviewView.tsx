@@ -67,16 +67,16 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   const stageRef = useRef<HTMLDivElement>(null);
   const reviewTask = items.find((item) => keyOf(item) === selectedKey);
   const isVisualReview = reviewTask?.task.review_status === "open" ||
-    (showResolved && reviewTask?.task.review_status === "resolved");
+    ((showResolved || reviewTask?.task.id === initialTaskId) &&
+      (reviewTask?.task.review_status === "resolved" ||
+       reviewTask?.task.review_status === "awaiting_revision"));
   const round = manifest?.rounds[manifest.rounds.length - 1];
-  const queueKey = items.filter((item) => item.task.review_status === "open" ||
-    item.task.review_status === "resolved")
+  const queueKey = items.filter((item) => !!item.task.review_status)
     .map((item) => keyOf(item) + ":" + item.task.revision).join("|");
 
   useEffect(() => {
     let cancelled = false;
-    void Promise.all(items.filter((item) => item.task.review_status === "open" ||
-      item.task.review_status === "resolved").slice(0, 60).map(async (item) => {
+    void Promise.all(items.filter((item) => !!item.task.review_status).slice(0, 60).map(async (item) => {
       try {
         const manifest = await reviewShow(item.task.id, item.path);
         const latest = manifest.rounds[manifest.rounds.length - 1];
@@ -105,7 +105,8 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       })));
       const pending = snapshots.flatMap(({ project: board, snapshot }) =>
         snapshot.tasks.filter((task) => !task.archived &&
-          (task.review_status === "open" || (showResolved && task.review_status === "resolved") ||
+          (task.review_status === "open" ||
+            (showResolved && (task.review_status === "resolved" || task.review_status === "awaiting_revision")) ||
             (task.id === initialTaskId && board.path === project.path) ||
             (isUserQueueEligible(task, snapshot, {}) && (allBoards || board.id !== project.id ||
               userTasks.some((candidate) => candidate.id === task.id)))))
@@ -155,8 +156,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       !!reviewTask?.task.attention.includes("needs-user"));
     setUserAnswer(reviewTask?.task.question?.answer ?? "");
     setResponseOutcome("");
-    if (!reviewTask || reviewTask.task.review_status !== "open" &&
-        reviewTask.task.review_status !== "resolved") return;
+    if (!reviewTask || !reviewTask.task.review_status) return;
     let cancelled = false;
     void reviewShow(reviewTask.task.id, reviewTask.path).then((value) => {
       if (cancelled) return;
@@ -637,7 +637,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
           </label>
           <label className="review-all-boards">
             <input type="checkbox" checked={showResolved} onChange={(event) => setShowResolved(event.target.checked)} />
-            Include resolved
+            Include past decisions
           </label>
         </div>
         <nav className="review-queue-list" aria-label="Unified human feedback queue">
@@ -646,8 +646,8 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
             aria-current={keyOf(item) === selectedKey ? "true" : undefined}
             className={["review-queue-item", queueThumbnails[keyOf(item)] && "has-preview",
               keyOf(item) === selectedKey && "selected",
-              item.task.review_status === "resolved" && "resolved",
-              item.task.review_status !== "open" && item.task.review_status !== "resolved" && "review-user-item"
+              item.task.review_status !== "open" && !!item.task.review_status && "resolved",
+              !item.task.review_status && "review-user-item"
             ].filter(Boolean).join(" ")}
             onClick={() => setSelectedKey(keyOf(item))}>
             {queueThumbnails[keyOf(item)] && (
@@ -663,7 +663,8 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
                   (item.task.review_status ? "review" : "user")}`}>
                   {queueModes[keyOf(item)] || (item.task.review_status ? "review" : "response")}
                 </em>
-                {item.task.review_status === "resolved" ? "Resolved" :
+                {item.task.review_status === "awaiting_revision" ? "Rejected · awaiting AI revision" :
+                  item.task.review_status === "resolved" ? "Resolved" :
                   item.task.review_round ? `Round ${item.task.review_round}` : "Awaiting response"}
                 {(queueCounts[keyOf(item)] ?? 0) > 1 && ` · ${queueCounts[keyOf(item)]} candidates`}
               </span>

@@ -32,6 +32,11 @@ export const isUserQueueEligible = (
   // of ownership. It may remain open even when implementation is Done.
   const pendingQuestion = task.kind === "task" && task.attention.includes("question") &&
     !!task.question?.prompt && !task.question.answer;
+  // Visual reviews have their own queue. A rejected verdict is finished human
+  // work even while the agent is preparing a new round, and an approved
+  // review must not reappear simply because the card is still For user.
+  if (task.review_status === "open" || task.review_status === "awaiting_revision" ||
+      (task.review_status === "resolved" && !pendingQuestion)) return false;
   const userOwned = task.kind === "for_user" ||
     (task.kind === "task" && task.attention.includes("needs-user"));
   const terminal = !!task.completed || board.config.columns.some((column) =>

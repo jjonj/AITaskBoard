@@ -51,6 +51,12 @@ async fn user_queue_project_ids(paths: Vec<String>) -> Vec<UserQueueProjectIds> 
                 let terminal: std::collections::HashSet<_> = board.config.columns.iter()
                     .filter(|column| column.terminal).map(|column| column.id.as_str()).collect();
                 let ids = board.tasks.iter().filter(|task| {
+                    let review = task.review_status.as_deref();
+                    if matches!(review, Some("open" | "awaiting_revision")) { return false; }
+                    let independent_question = task.question.as_ref()
+                        .is_some_and(|q| !q.prompt.trim().is_empty() && q.answer.is_none()) &&
+                        task.attention.contains(&task_core::TaskAttention::Question);
+                    if review == Some("resolved") && !independent_question { return false; }
                     ((task.kind == TaskKind::Task &&
                       task.attention.contains(&task_core::TaskAttention::Question) &&
                       task.question.as_ref().is_some_and(|q| !q.prompt.trim().is_empty() && q.answer.is_none())) ||

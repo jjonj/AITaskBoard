@@ -63,7 +63,7 @@ export type Task = {
   question: TaskQuestion | null;
   /** AI-authored, read-only in the desktop app; cleared when unblocked. */
   blocked_reason?: string | null;
-  review_status?: "open" | "resolved" | null;
+  review_status?: "open" | "awaiting_revision" | "resolved" | null;
   review_round?: number | null;
   created: string;
   completed: string | null;

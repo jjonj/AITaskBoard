@@ -151,6 +151,15 @@ fn now() -> String { Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true) }
 fn manifest_file(root: &Path, id: &str) -> PathBuf {
     root.join("Reviews").join(id).join("manifest.json")
 }
+
+/// Detect old tasks whose completed rejection still claims to need human input.
+pub(super) fn awaiting_revised_round(root: &Path, id: &str) -> bool {
+    parse_manifest(&manifest_file(root, id)).is_ok_and(|manifest| {
+        manifest.status == "open" && manifest.rounds.last()
+            .and_then(|round| round.result.as_ref())
+            .is_some_and(|result| matches!(result.verdict.as_str(), "rejected" | "more-variants"))
+    })
+}
 fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
 }
@@ -543,7 +552,12 @@ impl FsTaskStore {
         } else {
             "resolved"
         }.into();
-        task.review_status = Some(manifest.status.clone());
+        // A rejected round is finished human work. The manifest remains open
+        // for the agent's next revision, but the Inbox must not show it again
+        // until a fresh round is requested.
+        task.review_status = Some(if manifest.status == "open" {
+            "awaiting_revision".into()
+        } else { "resolved".into() });
         // Human rejection makes the original implementation actionable again.
         // The review conversation remains open for the next artifact revision.
         if task.kind == TaskKind::Task &&
@@ -561,12 +575,8 @@ impl FsTaskStore {
                 task.attention.push(TaskAttention::UserNote);
             }
         }
-        if manifest.status == "resolved" {
-            task.attention.retain(|flag| *flag != TaskAttention::Question);
-            task.question = None;
-        } else if !task.attention.contains(&TaskAttention::Question) {
-            task.attention.push(TaskAttention::Question);
-        }
+        task.attention.retain(|flag| *flag != TaskAttention::Question);
+        task.question = None;
         let summary = format!("Review round {}: {}. Choice: [{}]. Ranking: [{}]. Pins: {}. Note: {}",
             round.number, input.verdict, input.choices.join(", "),
             input.ranking.join(", "), serde_json::to_string(&input.pins).unwrap_or_default(), input.note);

@@ -372,6 +372,28 @@ impl FsTaskStore {
         Ok(changed)
     }
 
+    // One-time reconciliation for reviews rejected before the Inbox distinguished
+    // a completed human verdict from an agent's pending next submission.
+    fn maintain_review_verdicts(&self, root: &Path, snapshot: &BoardSnapshot) -> Result<bool, TaskStoreError> {
+        let mut changed = false;
+        for task in snapshot.tasks.iter().filter(|task| !task.archived &&
+            task.review_status.as_deref() == Some("open") &&
+            review::awaiting_revised_round(root, &task.id)) {
+            let path = PathBuf::from(&task.path);
+            let existing = fs::read_to_string(&path)?;
+            if revision(&existing) != task.revision {
+                return Err(TaskStoreError::Conflict(format!("{} changed during review reconciliation", task.id)));
+            }
+            let mut updated = task.clone();
+            updated.review_status = Some("awaiting_revision".into());
+            updated.attention.retain(|flag| *flag != TaskAttention::Question);
+            updated.question = None;
+            write_text_atomic(&path, &render_task(&updated, Some(&existing))?)?;
+            changed = true;
+        }
+        Ok(changed)
+    }
+
     // Move dependency-blocked work back to an executable ready column once
     // every prerequisite is complete. Never release an explicitly Blocked task,
     // a human-only card, or a card without prerequisites: those may have other
@@ -587,6 +609,9 @@ impl FsTaskStore {
         let _lock = acquire_lock(root)?;
         let mut snapshot = self.load_unlocked(root)?;
         if self.maintain_snoozed_columns(root, &snapshot.config)? {
+            snapshot = self.load_unlocked(root)?;
+        }
+        if self.maintain_review_verdicts(root, &snapshot)? {
             snapshot = self.load_unlocked(root)?;
         }
         if self.maintain_completed_tasks(root, &snapshot)? {
