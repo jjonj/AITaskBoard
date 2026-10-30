@@ -70,6 +70,9 @@ export function ProjectTabs({ Board }: Props) {
   const [epicPrefix, setEpicPrefix] = useState("WTE");
   const [prefixEdited, setPrefixEdited] = useState(false);
   const [editingBoardConfig, setEditingBoardConfig] = useState<BoardConfig | null>(null);
+  const recentProjects = useRef<string[]>([]);
+  const [switchHint, setSwitchHint] = useState<string | null>(null);
+  const switchHintTimer = useRef<number | null>(null);
   const draggedTab = useRef<string | null>(null);
   const [dropTab, setDropTab] = useState<string | null>(null);
   const [changedProjects, setChangedProjects] = useState<Record<string, boolean>>({});
@@ -281,6 +284,34 @@ export function ProjectTabs({ Board }: Props) {
     };
   }, [catalog]);
 
+  // Keep an MRU order, like Windows task switching. Windows reserves Alt+Tab
+  // globally, so Ctrl+Tab is the reliable in-app equivalent.
+  useEffect(() => {
+    if (!catalog) return;
+    recentProjects.current = [catalog.activeId,
+      ...recentProjects.current.filter((id) => id !== catalog.activeId && catalog.projects.some((p) => p.id === id)),
+      ...catalog.projects.map((p) => p.id).filter((id) => id !== catalog.activeId && !recentProjects.current.includes(id))];
+  }, [catalog?.activeId, catalog?.projects]);
+
+  useEffect(() => {
+    const onSwitch = (event: KeyboardEvent) => {
+      if (event.key !== "Tab" || !(event.ctrlKey !== event.altKey) || event.metaKey ||
+          working || locked || dialogMode || !catalog || catalog.projects.length < 2) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const order = recentProjects.current.filter((id) => catalog.projects.some((p) => p.id === id));
+      const nextId = event.shiftKey ? order[order.length - 1] : order.find((id) => id !== catalog.activeId);
+      if (!nextId) return;
+      const next = catalog.projects.find((p) => p.id === nextId);
+      if (!next) return;
+      setSwitchHint(next.name);
+      if (switchHintTimer.current !== null) window.clearTimeout(switchHintTimer.current);
+      switchHintTimer.current = window.setTimeout(() => setSwitchHint(null), 1050);
+      void switchTo(nextId);
+    };
+    window.addEventListener("keydown", onSwitch, true);
+    return () => window.removeEventListener("keydown", onSwitch, true);
+  }, [catalog, working, locked, dialogMode]);
   // F1..F12 switch tabs, except F5 which is reserved for Refresh all.
   // Only intercept keys that actually map to a project.
   useEffect(() => {
@@ -516,6 +547,7 @@ export function ProjectTabs({ Board }: Props) {
   const active = catalog?.projects.find((project) => project.id === catalog.activeId);
   return (
     <div className="project-shell">
+      {switchHint && <div className="project-switch-hint" role="status">Switching to {switchHint} · Ctrl+Tab</div>}
       <div className="project-tabs" role="tablist" aria-label="Project task boards">
         {catalog?.projects.map((project) => (
           <div className={`project-tab-wrapper ${project.id === catalog.activeId ? "selected" : ""} ${changedProjects[project.id] ? "changed" : ""} ${dropTab === project.id ? "project-tab-drop-target" : ""}`}
