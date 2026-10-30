@@ -147,8 +147,8 @@ export const openInObsidian = (file: string) =>
 export const openClaimedT3Session = (claimedBy: string) =>
   invoke<{ sessionId: string; reopened: boolean }>("open_claimed_t3_session", { claimedBy });
 /** Open the board-qualified task's current T3 session, or request one safely. */
-export const openTaskSession = (id: string, path?: string) =>
-  invoke<Record<string, unknown>>("open_task_session", { path, id });
+export const openTaskSession = (id: string, path?: string, implement = false) =>
+  invoke<Record<string, unknown>>("open_task_session", { path, id, implement });
 
 export const showMainWindow = () =>
   invoke<void>("show_main_window");

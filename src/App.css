@@ -1492,6 +1492,7 @@ body.column-dragging * {
 .task-icon.design, .icon-choice.design svg { color: #e9b7ef; }
 .task-icon.visual-work, .icon-choice.visual-work svg { color: #7ce2df; }
 .task-icon.visual-implementation, .icon-choice.visual-implementation svg { color: #65d899; }
+.task-icon.hard, .icon-choice.hard svg { color: #f2a16e; }
 
 /* Recent activity is shown by a blue card border, not a second icon.
    The activity is UI-local and expires automatically after ten minutes. */

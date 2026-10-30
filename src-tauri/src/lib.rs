@@ -432,7 +432,7 @@ fn open_claimed_t3_session(claimed_by: String) -> Result<serde_json::Value, Stri
 /// create one. The new-session path requires T3-0142; never synthesize a
 /// duplicate session or silently treat a transport error as a failed start.
 #[tauri::command]
-fn open_task_session(path: Option<String>, id: String) -> Result<serde_json::Value, String> {
+fn open_task_session(path: Option<String>, id: String, implement: Option<bool>) -> Result<serde_json::Value, String> {
     let path = root(path);
     let task = FsTaskStore::default().load(&path).map_err(|e| e.to_string())?
         .tasks.into_iter().find(|task| task.id == id && !task.archived)
@@ -451,9 +451,14 @@ fn open_task_session(path: Option<String>, id: String) -> Result<serde_json::Val
     if !std::path::Path::new(script).is_file() {
         return Err("T3 open-task CLI is unavailable".into());
     }
+    if implement.unwrap_or(false) && !claimant.is_empty() {
+        return Err("Task is already claimed; open or reconcile its existing session instead.".into());
+    }
     let request = serde_json::json!({
         "action": "open-task",
-        "taskRef": format!("{}#{}", path.display(), id),
+        "taskRef": { "board": path.display().to_string(), "id": id },
+        "intent": if implement.unwrap_or(false) { "implement" } else { "conversation" },
+        "kind": if implement.unwrap_or(false) { Some("chatgpt") } else { None },
     });
     let mut process = Command::new("node").arg(script)
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
@@ -468,9 +473,11 @@ fn open_task_session(path: Option<String>, id: String) -> Result<serde_json::Val
     }
     let receipt: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|e| format!("T3 open-task receipt ambiguous; reconcile before retry: {e}"))?;
-    if receipt.get("action").and_then(|v| v.as_str()) != Some("open-task")
-        || receipt.get("acknowledged").and_then(|v| v.as_bool()) != Some(true) {
-        return Err("T3 did not confirm open-task; reconcile before retrying".into());
+    match receipt.get("status").and_then(|v| v.as_str()) {
+        Some("opened" | "created" | "prompt_unknown") => {},
+        Some("in_progress" | "unknown") => return Err(
+            "T3 spawn is pending or uncertain. Reconcile the task session before retrying.".into()),
+        _ => return Err("T3 did not confirm open-task; reconcile before retrying".into()),
     }
     Ok(receipt)
 }

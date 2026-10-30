@@ -2174,7 +2174,7 @@ fn validate_epic_fields(kind: TaskKind, icon: Option<&str>, attention: &[TaskAtt
 
 fn validate_icon(icon: Option<&str>) -> Result<(), TaskStoreError> {
     if let Some(icon) = icon {
-        if !matches!(icon, "bug" | "feature" | "refactor" | "content" | "validation" | "design" | "visual-work" | "visual-implementation") {
+        if !matches!(icon, "bug" | "feature" | "refactor" | "content" | "validation" | "design" | "visual-work" | "visual-implementation" | "hard") {
             return Err(TaskStoreError::Invalid(format!("unknown task icon {icon}")));
         }
     }

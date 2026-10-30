@@ -23,7 +23,7 @@ export type BoardConfig = {
 };
 
 export type TaskAttention = "question" | "needs-user" | "user-note" | "blocked" | "priority";
-export type TaskIcon = "bug" | "feature" | "refactor" | "content" | "validation" | "design" | "visual-work" | "visual-implementation";
+export type TaskIcon = "bug" | "feature" | "refactor" | "content" | "validation" | "design" | "visual-work" | "visual-implementation" | "hard";
 
 export type TaskQuestion = {
   request_type?: "decision" | "verification" | "action" | null;

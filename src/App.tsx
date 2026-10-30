@@ -1344,13 +1344,13 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId }: {
     }
   };
 
-  // Single task-qualified navigation path. Starting an unclaimed task first
-  // records the With me intent; T3 is the sole authority for session deduplication.
+  // T3 owns the task-bound spawn journal and deduplicates concurrent clicks.
+  const hasTaskSession = (task?: Task) => /^(t3-browser:|t3:|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$)/i.test(task?.claimed_by ?? "");
+  const canSpawnTask = (task?: Task) => !!task && !task.claimed_by && !task.archived &&
+    task.kind !== "epic" && task.kind !== "for_user" && !task.completed &&
+    !snapshot?.config.columns.some((column) => column.id === task.column && column.terminal);
   const openForTask = (task: Task) => void run(async () => {
-    if (!task.claimed_by && task.live?.with_me !== true) {
-      await taskLiveWithMe(task.id, task.revision, true, boardPath);
-    }
-    await openTaskSession(task.id, boardPath);
+    await openTaskSession(task.id, boardPath, !hasTaskSession(task));
     const after = await loadBoard(boardPath);
     applySnapshot(after);
   });
@@ -3090,11 +3090,11 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId }: {
             Edit task
           </button>
           {contextTask.kind !== "epic" && (
-            <button disabled={busy} onClick={() => {
+            <button disabled={busy || (!hasTaskSession(contextTask) && !canSpawnTask(contextTask))} onClick={() => {
               setContextMenu(null);
               openForTask(contextTask);
-            }} title="Open the task-qualified T3 session; create one only when no linked session exists">
-              {contextTask.claimed_by || contextTask.live?.with_me ? "Open session" : "Start session with me"}
+            }} title={hasTaskSession(contextTask) ? "Open the linked T3 session" : "Spawn a T3 implementation worker for this task"}>
+              {hasTaskSession(contextTask) ? "Open Session" : "Spawn"}
             </button>
           )}
           {contextTask.kind === "epic" && <button
@@ -3367,10 +3367,10 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId }: {
                 </button>}
               </div>}
               {editor.mode === "edit" && editor.original?.kind !== "epic" && (
-                <button type="button" className="button secondary" disabled={busy}
-                  title="Focus the task session, restore its conversation, or safely start one if none exists"
+                <button type="button" className="button secondary" disabled={busy || (!hasTaskSession(editor.original) && !canSpawnTask(editor.original))}
+                  title={hasTaskSession(editor.original) ? "Open the linked T3 session" : "Spawn a T3 implementation worker for this task"}
                   onClick={() => openForTask(editor.original!)}>
-                  {editor.original?.claimed_by || editor.original?.live?.with_me ? "Open Session" : "Start Session"}
+                  {hasTaskSession(editor.original) ? "Open Session" : "Spawn"}
                 </button>
               )}
               <button className="icon-button" aria-label="Close editor" onClick={() => closeEditor()} disabled={busy}>×</button>
