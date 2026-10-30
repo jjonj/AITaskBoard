@@ -192,11 +192,13 @@ export function ProjectTabs({ Board }: Props) {
     const timer = window.setInterval(() => void update(), 12000);
     window.addEventListener("focus", update);
     window.addEventListener("taskboard:refresh-board", update);
+    window.addEventListener("taskboard:queue-changed", update);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
       window.removeEventListener("focus", update);
       window.removeEventListener("taskboard:refresh-board", update);
+      window.removeEventListener("taskboard:queue-changed", update);
     };
   }, [catalog?.projects]);
 

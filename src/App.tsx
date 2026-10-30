@@ -2942,6 +2942,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId }: {
             userTasks={userQueueTasks}
             onUserTaskUpdated={(notice) => {
               if (notice) setReviewNotice(notice);
+               window.dispatchEvent(new Event("taskboard:queue-changed"));
               void loadBoard(boardPath).then(applySnapshot).catch((cause) => setError(String(cause)));
             }}
             onSnoozeUserTask={(task, path, until) => {
