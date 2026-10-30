@@ -401,6 +401,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId }: {
   const editorModalRef = useRef<HTMLElement | null>(null);
   const [fileDropActive, setFileDropActive] = useState(false);
   const [doneMenuOpen, setDoneMenuOpen] = useState(false);
+  const [copiedTaskId, setCopiedTaskId] = useState<string | null>(null);
   const [executionChoice, setExecutionChoice] = useState<ExecutionMode | "start_now">("backlog");
   const [withMeSelected, setWithMeSelected] = useState(false);
   const [executionLoading, setExecutionLoading] = useState(false);
@@ -2336,6 +2337,8 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId }: {
       }
       if (!copied) throw new Error("Clipboard access was denied");
       setError("");
+      setCopiedTaskId(value);
+      window.setTimeout(() => setCopiedTaskId((current) => current === value ? null : current), 1600);
     } catch (err) {
       setError(`Could not copy to clipboard: ${errorText(err)}`);
     }
@@ -3330,8 +3333,10 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId }: {
             {fileDropActive && <div className="editor-file-drop-hint">Drop to add file paths to Description</div>}
             <div className="modal-header">
               <div className="eyebrow">
-                {editor.mode === "edit" ? editor.original?.id : reservedTaskId ? (
-                  <button type="button" className="reserved-id-copy" title="Click to copy this task ID" onClick={() => void copyTaskText(reservedTaskId.id)} onContextMenu={(event) => { event.preventDefault(); void copyTaskText(reservedTaskId.id); }}>{reservedTaskId.id} ⧉</button>
+                {editor.mode === "edit" && editor.original ? (
+                  <button type="button" className={`reserved-id-copy${copiedTaskId === editor.original.id ? " copied" : ""}`} title="Copy task ID" aria-label={`Copy task ID ${editor.original.id}`} onClick={() => void copyTaskText(editor.original!.id)}>{editor.original.id} <span aria-hidden="true">{copiedTaskId === editor.original.id ? "✓ Copied" : "⧉"}</span></button>
+                ) : reservedTaskId ? (
+                  <button type="button" className={`reserved-id-copy${copiedTaskId === reservedTaskId.id ? " copied" : ""}`} title="Copy task ID" onClick={() => void copyTaskText(reservedTaskId.id)} onContextMenu={(event) => { event.preventDefault(); void copyTaskText(reservedTaskId.id); }}>{reservedTaskId.id} <span aria-hidden="true">{copiedTaskId === reservedTaskId.id ? "✓ Copied" : "⧉"}</span></button>
                 ) : "RESERVING ID…"}
                 {userQueueReview && editor.original?.id === userQueueReview.ids[userQueueReview.index] && (
                   <span className="user-queue-progress">

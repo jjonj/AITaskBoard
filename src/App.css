@@ -1201,6 +1201,10 @@ body.card-dragging * {
 /* Clipboard images live in Tasks/Attachments/<task-id>, synced with the board. */
 .reserved-id-copy{border:0;background:none;color:#d8e7ff;cursor:copy;font:inherit;font-weight:inherit;letter-spacing:inherit;padding:0 3px;border-radius:3px;}
 .reserved-id-copy:hover{background:#314259;color:#fff;}
+.reserved-id-copy{border:1px solid transparent;padding:3px 7px;transition:background .12s,border-color .12s,transform .12s;}
+.reserved-id-copy:active{transform:translateY(1px);background:#213a4d;border-color:#79a4ba;}
+.reserved-id-copy:focus-visible{outline:2px solid #e4a65b;outline-offset:2px;}
+.reserved-id-copy.copied{background:#24483f;color:#b9f2d6;border-color:#4b9379;}
 .task-images-hint{font-size:11px;color:#8e9ba8;margin:-1px 0 11px;}
 .task-image-gallery{margin:0 0 12px;padding:9px 11px;border:1px solid #39434f;border-radius:8px;background:#1a2027;}
 .task-image-gallery>strong{display:block;margin-bottom:8px;font-size:11px;color:#c3cbd5;}
