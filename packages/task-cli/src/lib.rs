@@ -1550,7 +1550,7 @@ fn with_work_advisory(mut result: Value, task: &Task) -> Value {
     let advisory = match task.icon.as_deref() {
         Some("visual-work") => Some((
             "visual_work_claude_opus_only",
-            "VISUAL WORK: Only Claude Opus may work on this task. If you are not Claude Opus, do not claim or implement it; leave it for a Claude Opus agent. This is advisory metadata, not an enforced restriction.",
+            "HARD VISUAL WORK: Only Claude Opus may work on this task. If you are not Claude Opus, do not claim or implement it; leave it for a Claude Opus agent. This is advisory metadata, not an enforced restriction.",
         )),
         Some("visual-implementation") => Some((
             "visual_implementation_approved",

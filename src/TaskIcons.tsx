@@ -7,7 +7,7 @@ export const TASK_ICON_OPTIONS: { value: TaskIcon; label: string }[] = [
   { value: "content", label: "Content" },
   { value: "validation", label: "Validation" },
   { value: "design", label: "Design" },
-  { value: "visual-work", label: "Visual Work (Claude Opus)" },
+  { value: "visual-work", label: "HARD Visual Work (Claude Opus)" },
   { value: "visual-implementation", label: "Visual Implementation (approved mockup)" },
   { value: "hard", label: "Hard (complex code / integration / networking / deep refactoring)" },
 ];
