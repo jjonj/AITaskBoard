@@ -518,6 +518,25 @@ fn startup_review() -> Option<serde_json::Value> {
     Some(value)
 }
 
+/// Accept only a board directory containing a TaskBoard manifest and a short
+/// opaque task identifier. The UI additionally matches the board to its
+/// registered project catalog before navigating.
+#[tauri::command]
+fn startup_task() -> Option<serde_json::Value> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() != 4 || args[1] != "--open-task" {
+        return None;
+    }
+    let path = &args[2];
+    let id = &args[3];
+    if !PathBuf::from(path).join("_board.md").is_file()
+        || id.is_empty() || id.len() > 90 || id.contains(['/', '\\'])
+    {
+        return None;
+    }
+    Some(serde_json::json!({ "path": path, "taskId": id }))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -532,6 +551,15 @@ pub fn run() {
             if args.len() == 4 && args[1] == "--open-review" {
                 use tauri::Emitter;
                 let _ = app.emit("taskboard-open-review", serde_json::json!({ "path": args[2], "taskId": args[3] }));
+            }
+            if args.len() == 4 && args[1] == "--open-task"
+                && PathBuf::from(&args[2]).join("_board.md").is_file()
+                && !args[3].is_empty() && args[3].len() <= 90
+                && !args[3].contains(['/', '\\'])
+            {
+                use tauri::Emitter;
+                let _ = app.emit("taskboard-open-task",
+                    serde_json::json!({ "path": args[2], "taskId": args[3] }));
             }
         }))
         .plugin(tauri_plugin_opener::init())
@@ -550,6 +578,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             startup_review,
+            startup_task,
             projects::list_projects,
             projects::add_project,
             projects::set_project_folders,

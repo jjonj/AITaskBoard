@@ -259,10 +259,11 @@ const randomColumnColor = (used: string[]) => {
   return pool[Math.floor(Math.random() * pool.length)];
 };
 
-function ProjectBoard({ project, onInteractionChange, requestedReviewId }: {
+function ProjectBoard({ project, onInteractionChange, requestedReviewId, requestedTask }: {
   project: ProjectTab;
   onInteractionChange: (locked: boolean) => void;
   requestedReviewId?: string;
+  requestedTask?: { id: string; requestKey: number };
 }) {
   const boardPath = project.path;
   // Preserve existing Wartribes UI settings while isolating all other boards.
@@ -1192,6 +1193,15 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId }: {
       draft: taskToDraft(task),
     });
   };
+
+  const handledDeepLink = useRef<number | null>(null);
+  useEffect(() => {
+    if (!requestedTask || !snapshot || handledDeepLink.current === requestedTask.requestKey) return;
+    const task = snapshot.tasks.find((candidate) => candidate.id === requestedTask.id);
+    if (!task) { setError(`Deep-linked task ${requestedTask.id} is not on this board.`); return; }
+    handledDeepLink.current = requestedTask.requestKey;
+    openEdit(task);
+  }, [requestedTask?.id, requestedTask?.requestKey, snapshot]);
 
   const startUserQueue = () => {
     if (busy || !userQueueTasks.length) return;

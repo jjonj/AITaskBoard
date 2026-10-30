@@ -7,7 +7,7 @@ import type { ProjectCatalog, ProjectTab } from "./api";
 import type { BoardConfig } from "./types";
 
 type Props = {
-  Board: (props: { project: ProjectTab; onInteractionChange: (locked: boolean) => void; requestedReviewId?: string }) => React.ReactNode;
+  Board: (props: { project: ProjectTab; onInteractionChange: (locked: boolean) => void; requestedReviewId?: string; requestedTask?: {id: string; requestKey: number} }) => React.ReactNode;
 };
 type DialogMode = "create" | "folders" | null;
 const OBSIDIAN_ROOT = "B:\\GDrive\\SharedWithPhone\\Obsidian\\jjj";
@@ -31,6 +31,22 @@ const suggestedName = (path: string) => {
 export function ProjectTabs({ Board }: Props) {
   const [catalog, setCatalog] = useState<ProjectCatalog | null>(null);
   const [startupReview, setStartupReview] = useState<{ path: string; taskId: string } | null>(null);
+  const [startupTask, setStartupTask] = useState<{ path: string; taskId: string; requestKey: number } | null>(null);
+  useEffect(() => {
+    void invoke<{ path: string; taskId: string } | null>("startup_task")
+      .then((request) => { if (request) setStartupTask({ ...request, requestKey: Date.now() }); })
+      .catch(() => undefined);
+  }, []);
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<{path: string; taskId: string}>("taskboard-open-task", (event) => {
+      if (event.payload?.path && event.payload?.taskId)
+        setStartupTask({ ...event.payload, requestKey: Date.now() });
+    }).then((remove) => { if (disposed) remove(); else unlisten = remove; })
+      .catch(() => undefined);
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
   const appliedStartupReview = useRef(false);
   useEffect(() => { void invoke<{ path: string; taskId: string } | null>("startup_review").then(setStartupReview).catch(() => undefined); }, []);
   useEffect(() => {
@@ -51,6 +67,13 @@ export function ProjectTabs({ Board }: Props) {
     appliedStartupReview.current = true;
     if (project.id !== catalog.activeId) setCatalog((current) => current ? { ...current, activeId: project.id } : current);
   }, [startupReview, catalog?.activeId, catalog?.projects]);
+  useEffect(() => {
+    if (!startupTask || !catalog) return;
+    const same = (path: string) => path.replace(/\\/g, "/").replace(/\/+$/u, "").toLowerCase();
+    const project = catalog.projects.find((item) => same(item.path) === same(startupTask.path));
+    if (project && project.id !== catalog.activeId)
+      setCatalog((current) => current ? { ...current, activeId: project.id } : current);
+  }, [startupTask, catalog?.activeId, catalog?.projects]);
   const [locked, setLocked] = useState(false);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
@@ -616,7 +639,9 @@ export function ProjectTabs({ Board }: Props) {
       {active && <div className="project-workspace" id="project-board" role="tabpanel">
         <Board key={active.id} project={active} onInteractionChange={setLocked}
             {...(startupReview && startupReview.path.replace(/\\/g, "/").toLowerCase() === active.path.replace(/\\/g, "/").toLowerCase()
-              ? { requestedReviewId: startupReview.taskId } : {})} />
+              ? { requestedReviewId: startupReview.taskId } : {})}
+            {...(startupTask && startupTask.path.replace(/\\/g, "/").toLowerCase() === active.path.replace(/\\/g, "/").toLowerCase()
+              ? { requestedTask: { id: startupTask.taskId, requestKey: startupTask.requestKey } } : {})} />
       </div>}
       {!active && <div className="project-loading">Loading TaskBoard project tabs…</div>}
       {dialogMode && (
