@@ -2113,6 +2113,8 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       stopAutoScroll?.();
       window.removeEventListener("mousemove", handleMove);
       window.removeEventListener("mouseup", handleUp);
+      window.removeEventListener("pointerup", handlePointerUp, true);
+      window.removeEventListener("blur", cleanup);
       setDragId(null);
       setCardDragPreview(null);
       setCardDropTargetId(null);
@@ -2168,7 +2170,10 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       }
     };
 
-    const handleUp = (upEvent: MouseEvent) => {
+    let finished = false;
+    const handleUp = (upEvent: MouseEvent | PointerEvent) => {
+      if (finished) return;
+      finished = true;
       const droppedProjectId = dragging
         ? document.elementFromPoint(upEvent.clientX, upEvent.clientY)
             ?.closest<HTMLElement>("[data-project-tab-id]")?.dataset.projectTabId
@@ -2209,6 +2214,13 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       }
     };
 
+    // Pointer release in capture phase also reaches us when a draggable tab
+    // or nested control consumes the normal mouseup during cross-board drops.
+    const handlePointerUp = (event: PointerEvent) => {
+      if (event.pointerType === "mouse") handleUp(event);
+    };
+    window.addEventListener("pointerup", handlePointerUp, true);
+    window.addEventListener("blur", cleanup);
     window.addEventListener("mousemove", handleMove, { passive: false });
     window.addEventListener("mouseup", handleUp, { once: true });
   };
