@@ -336,6 +336,8 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     return () => { alive = false; window.clearInterval(poll); };
   }, [boardPath]);
   const [queueRecoveryWarning, setQueueRecoveryWarning] = useState("");
+  const [queueSyncStatuses, setQueueSyncStatuses] = useState<Record<string, { status: string; reason: string | null }>>({});
+  const [queueReconciliationOffline, setQueueReconciliationOffline] = useState(false);
   useEffect(() => {
     let active = true;
     let busy = false;
@@ -349,6 +351,9 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       busy = true;
       void taskQueueReconcile(boardPath).then(result => {
         if (!active) return;
+        setQueueReconciliationOffline(false);
+        setQueueSyncStatuses(Object.fromEntries(result.items.map(item =>
+          [item.id, { status: item.status, reason: item.reason ?? null }])));
         const unresolved = result.items.filter(item =>
           !["registered", "terminal", "canceled", "not_queued"].includes(item.status));
         setQueueRecoveryWarning([
@@ -358,8 +363,10 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
           ...(result.truncated ? ["More queued tasks remain; reopen/focus this board to reconcile the next batch"] : []),
         ].join(" · "));
       }).catch(reason => {
-        if (active) setQueueRecoveryWarning(
-          `OpenRig Queue reconciliation unavailable: ${String(reason)}`);
+        if (active) {
+          setQueueReconciliationOffline(true);
+          setQueueRecoveryWarning(`OpenRig Queue reconciliation unavailable: ${String(reason)}`);
+        }
       }).finally(() => { busy = false; });
     };
     reconcile();
@@ -3080,7 +3087,11 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
                         )}
                         {queueEligible(task) && <button type="button"
                           className={`queue-intent-toggle card-queue-toggle${executionModes[task.id]?.mode === "queue" ? " queued" : ""}`}
-                          title={executionModes[task.id]?.mode === "queue" ? "Queued · click to return to Backlog" : "Backlog · click to Queue"}
+                          title={executionModes[task.id]?.mode === "queue"
+                            ? `Queued · ${queueReconciliationOffline ? "OpenRig unavailable, pending sync" :
+                                queueSyncStatuses[task.id] ? `${queueSyncStatuses[task.id].status}: ${queueSyncStatuses[task.id].reason ?? "exact receipt tracked"}` :
+                                  "durable intent, awaiting reconciliation"} · click to return to Backlog`
+                            : "Backlog · click to Queue"}
                           aria-label={`${executionModes[task.id]?.mode === "queue" ? "Unqueue" : "Queue"} ${task.id}`}
                           aria-pressed={executionModes[task.id]?.mode === "queue"}
                           disabled={busy || !executionModes[task.id]}
