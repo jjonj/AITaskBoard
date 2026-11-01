@@ -488,12 +488,27 @@ impl FsTaskStore {
     /// On each board read, recover genuinely idle In Progress tasks.
     /// Direct Markdown edits also count because they update the file timestamp.
     fn maintain_abandoned_tasks(&self, snapshot: &BoardSnapshot) -> Result<bool, TaskStoreError> {
-        let cutoff = Utc::now() - ChronoDuration::hours(ABANDON_AFTER_HOURS);
+        // An inactive T3 browser session is not a dead worker. A suspended, errored,
+        // throttled or offline T3 session must retain its claim until a separate
+        // authoritative permanently-gone receipt has completed its recovery grace.
+        // External agent claims use a configurable inactivity lease instead.
+        let hours = std::env::var("TASKBOARD_EXTERNAL_CLAIM_EXPIRY_HOURS")
+            .ok().and_then(|v| v.parse::<i64>().ok())
+            .filter(|hours| (1..=24 * 90).contains(hours))
+            .unwrap_or(ABANDON_AFTER_HOURS);
+        let cutoff = Utc::now() - ChronoDuration::hours(hours);
         let mut changed = false;
         for task in snapshot.tasks.iter().filter(|task| !task.archived
             && matches!(task.kind, TaskKind::Task | TaskKind::Recurring)
             && task.column == IN_PROGRESS_COLUMN_ID
             && task.completed.is_none() && !pending_human_request(task)) {
+            // Never infer permanent T3 disappearance from a clock or a failed
+            // inventory query. The separate session-recovery process may restore it.
+            if task.claimed_by.as_deref().is_some_and(|owner| {
+                let raw = owner.strip_prefix("t3-browser:").unwrap_or(owner);
+                raw.len() == 36 && raw.bytes().enumerate().all(|(i, b)|
+                    if [8, 13, 18, 23].contains(&i) { b == b'-' } else { b.is_ascii_hexdigit() })
+            }) { continue; }
             let path = PathBuf::from(&task.path);
             let existing = fs::read_to_string(&path)?;
             if revision(&existing) != task.revision { continue; }
@@ -513,7 +528,7 @@ impl FsTaskStore {
             abandoned.column = return_column(&snapshot.config, origin.as_deref());
             abandoned.claimed_by = None;
             abandoned.description = append_description_update(&abandoned.description, "abandonment",
-                &format!("Abandonment detected after 24 hours without task updates (previous owner: {previous_owner}). Moved out of In Progress. Please finish."));
+                &format!("External claim expired after {hours} hours without task updates (previous owner: {previous_owner}). Moved out of In Progress. Please finish."));
             let rendered = stamp_activity(&render_with_claim_token(&abandoned, &existing, None)?, None, true)?;
             write_text_atomic(&path, &rendered)?;
             changed = true;
@@ -1063,6 +1078,12 @@ impl FsTaskStore {
         if !task.archived && pending_human_request(&task) && is_todo(&snapshot.config, &task.column)
             && (!pending_human_request(&previous) || is_todo(&snapshot.config, &previous.column)) {
             task.column = IN_PROGRESS_COLUMN_ID.into();
+        }
+        // A human moving a task out of the working column is also revoking
+        // the old worker's authority. Preserve normal Inbox answers but never
+        // leave an orphan claimant on a nonworking task.
+        if actor == MutationActor::Human && task.column != IN_PROGRESS_COLUMN_ID {
+            task.claimed_by = None;
         }
         if !task.archived {
             apply_completion_state(&snapshot.config, &mut task);
