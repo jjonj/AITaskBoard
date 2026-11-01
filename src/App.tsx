@@ -424,16 +424,6 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     finally { setStaleAckBusy(false); }
   };
   const [claimHealth, setClaimHealth] = useState<Record<string, ClaimHealth>>({});
-  useEffect(() => {
-    let live = true;
-    const refresh = () => void taskClaimHealth(boardPath).then(data => {
-      if (live) setClaimHealth(data);
-    }).catch(() => { if (live) setClaimHealth({}); });
-    refresh();
-    const timer = window.setInterval(refresh, 30_000);
-    window.addEventListener("focus", refresh);
-    return () => { live = false; window.clearInterval(timer); window.removeEventListener("focus", refresh); };
-  }, [boardPath]);
   const claimTooltip = (task: Task): string => {
     const h = claimHealth[task.id];
     if (!h) return `Claimed by ${task.claimed_by} · session/task telemetry not verified`;
@@ -447,16 +437,27 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     return `Claimed: ${h.owner} · ${h.agentState} · task update ${age(h.taskActivityAt)} · T3 last working ${age(h.agentActivityAt)} · T3 observed ${age(h.verifiedAt)}`;
   };
   const [editor, setEditor] = useState<EditorState | null>(null);
-  // Reconcile persisted notices on board open, restart and periodically.
-  // This is not a separate scheduler and never spawns a replacement worker.
+  // One throttled refresh per board: backend shares a 30s T3 inventory
+  // between claim telemetry and durable notification reconciliation.
   useEffect(() => {
     let active = true;
-    const reconcile = () => void taskReconcileAgentNotices(boardPath)
-      .catch(err => { if (active) setError(`Agent notices remain pending: ${String(err)}`); });
-    reconcile();
-    const timer = window.setInterval(reconcile, 30_000);
-    window.addEventListener("focus", reconcile);
-    return () => { active = false; window.clearInterval(timer); window.removeEventListener("focus", reconcile); };
+    let inFlight = false;
+    let lastStarted = 0;
+    const refresh = () => {
+      if (inFlight || Date.now() - lastStarted < 30_000) return;
+      lastStarted = Date.now();
+      inFlight = true;
+      void taskReconcileAgentNotices(boardPath)
+        .catch(err => { if (active) setError(`Agent notices remain pending: ${String(err)}`); })
+        .then(() => taskClaimHealth(boardPath))
+        .then(data => { if (active) setClaimHealth(data); })
+        .catch(() => { if (active) setClaimHealth({}); })
+        .finally(() => { inFlight = false; });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 30_000);
+    window.addEventListener("focus", refresh);
+    return () => { active = false; window.clearInterval(timer); window.removeEventListener("focus", refresh); };
   }, [boardPath]);
   const [notifyAgentOverride, setNotifyAgentOverride] = useState<boolean | null>(null);
   const substantiveClaimedEdit = editor?.mode === "edit" && !!editor.original?.claimed_by &&

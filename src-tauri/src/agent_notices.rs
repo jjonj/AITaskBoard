@@ -33,6 +33,19 @@ fn write_notice(root:&Path, notice:&AgentNotice)->Result<(),String>{
     fs::rename(&temp,&path).map_err(|e|format!("Cannot persist agent notice: {e}"))
 }
 fn t3_script()->&'static str {r"D:\SSDProjects\Tools\t3code\scripts\chatgpt-sessions.mjs"}
+// Share one short-lived session inventory across claim telemetry and notice reconciliation.
+// A mutex prevents simultaneous UI refreshes from spawning duplicate Node processes.
+pub(crate) fn shared_t3_inventory()->Option<Value>{
+    use std::time::{Duration,Instant};
+    static CACHE:OnceLock<Mutex<Option<(Instant,Option<Value>)>>>=OnceLock::new();
+    let mut cache=CACHE.get_or_init(||Mutex::new(None)).lock().ok()?;
+    if let Some((at,value))=cache.as_ref(){
+        if at.elapsed()<Duration::from_secs(30){return value.clone();}
+    }
+    let value=t3_control(json!({"action":"list","which":"all","includeHidden":true})).ok();
+    *cache=Some((Instant::now(),value.clone()));
+    value
+}
 fn t3_control(payload:Value)->Result<Value,String>{
     if !Path::new(t3_script()).is_file() {return Err("T3 CLI unavailable".into());}
     let mut child=Command::new("node").arg(t3_script())
@@ -144,7 +157,7 @@ pub(crate) async fn task_reconcile_agent_notices(path:String)->Result<Vec<AgentN
           .tasks.iter().any(|task|task.claimed_by.as_deref().and_then(uuid_owner).is_some());
         let t3=if has_t3_claims || notices.iter().any(|n|uuid_owner(&n.owner).is_some() &&
              ["pending","unknown","attempting"].contains(&n.state.as_str())) {
-            t3_control(json!({"action":"list","which":"all","includeHidden":true})).ok()
+            shared_t3_inventory()
         }else{None};
         // Stable claims stay put unless there is explicit permanent-gone proof
         // AND the configured grace elapsed. Unknown states never cause release.

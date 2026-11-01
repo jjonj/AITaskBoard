@@ -1,7 +1,6 @@
 //! Claim telemetry is observational: a failed T3 lookup never means a claim died.
-use std::{collections::HashMap,fs,path::PathBuf,process::{Command,Stdio},io::Write};
+use std::{collections::HashMap,fs,path::PathBuf};
 use serde::Serialize;
-#[cfg(windows)] use std::os::windows::process::CommandExt;
 use task_core::{FsTaskStore,TaskStore};
 
 #[derive(Serialize)]
@@ -26,17 +25,7 @@ pub(crate) async fn task_claim_health(path:Option<String>)->Result<HashMap<Strin
         let root=PathBuf::from(path.ok_or("Board path required")?);
         let board=FsTaskStore::default().load(&root).map_err(|e|e.to_string())?;
         let t3_ids=board.tasks.iter().filter_map(|t| t.claimed_by.as_deref().and_then(exact_t3)).collect::<Vec<_>>();
-        let script=r"D:\SSDProjects\Tools\t3code\scripts\chatgpt-sessions.mjs";
-        let t3=if !t3_ids.is_empty() && std::path::Path::new(script).is_file() {
-            let result=(|| {
-                let mut child=Command::new("node").arg(script).stdin(Stdio::piped())
-                    .stdout(Stdio::piped()).stderr(Stdio::null())
-                    .creation_flags(0x08000000).spawn().ok()?;
-                child.stdin.take()?.write_all(br#"{"action":"list","which":"all","includeHidden":true}"#).ok()?;
-                let output=child.wait_with_output().ok()?;
-                output.status.success().then(||serde_json::from_slice::<serde_json::Value>(&output.stdout).ok()).flatten()
-            })();result
-        } else {None};
+        let t3=if !t3_ids.is_empty() {crate::agent_notices::shared_t3_inventory()} else {None};
         let states=t3.as_ref().and_then(|v|v.get("sessions")).and_then(|v|v.as_array());
         let mut health=HashMap::new();
         for task in board.tasks.into_iter().filter(|t|t.claimed_by.is_some() && !t.archived) {
