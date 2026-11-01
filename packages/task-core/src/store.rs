@@ -487,13 +487,14 @@ impl FsTaskStore {
 
     /// On each board read, recover genuinely idle In Progress tasks.
     /// Direct Markdown edits also count because they update the file timestamp.
-    fn maintain_abandoned_tasks(&self, snapshot: &BoardSnapshot) -> Result<bool, TaskStoreError> {
+    fn maintain_abandoned_tasks(&self, root: &Path, snapshot: &BoardSnapshot) -> Result<bool, TaskStoreError> {
         // An inactive T3 browser session is not a dead worker. A suspended, errored,
         // throttled or offline T3 session must retain its claim until a separate
         // authoritative permanently-gone receipt has completed its recovery grace.
         // External agent claims use a configurable inactivity lease instead.
-        let hours = std::env::var("TASKBOARD_EXTERNAL_CLAIM_EXPIRY_HOURS")
-            .ok().and_then(|v| v.parse::<i64>().ok())
+        let hours = fs::read(root.join(".agent-resume-policy.json")).ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|value| value.get("externalLeaseHours").and_then(|hours| hours.as_i64()))
             .filter(|hours| (1..=24 * 90).contains(hours))
             .unwrap_or(ABANDON_AFTER_HOURS);
         let cutoff = Utc::now() - ChronoDuration::hours(hours);
@@ -744,7 +745,7 @@ impl FsTaskStore {
         if self.maintain_inbox_placement(&snapshot)? {
             snapshot = self.load_unlocked(root)?;
         }
-        if self.maintain_abandoned_tasks(&snapshot)? {
+        if self.maintain_abandoned_tasks(root, &snapshot)? {
             snapshot = self.load_unlocked(root)?;
         }
         if self.maintain_dependency_unblocks(&snapshot)? {
@@ -1268,6 +1269,22 @@ fn render_with_claim_token(task: &Task, existing: &str, token: Option<&str>) -> 
     let (yaml, body) = split_frontmatter(&rendered)?;
     let mut mapping: serde_yaml::Mapping = serde_yaml::from_str(&yaml)
         .map_err(|e| TaskStoreError::Parse(e.to_string()))?;
+    // Keep lineage independent of the live claimant; this survives reassignments.
+    let lineage_key = serde_yaml::Value::String("originating_t3_sessions".into());
+    let mut lineage: Vec<String> = mapping.get(&lineage_key)
+        .and_then(serde_yaml::Value::as_sequence)
+        .map(|items| items.iter().filter_map(serde_yaml::Value::as_str)
+            .map(str::to_owned).collect()).unwrap_or_default();
+    for owner in [claim_metadata(existing, "claimed_by")?, task.claimed_by.clone()].into_iter().flatten() {
+        let id = owner.strip_prefix("t3-browser:").unwrap_or(&owner);
+        let valid = id.len() == 36 && id.bytes().enumerate().all(|(i, c)|
+            if [8, 13, 18, 23].contains(&i) { c == b'-' } else { c.is_ascii_hexdigit() });
+        if valid && !lineage.iter().any(|entry| entry == id) { lineage.push(id.to_string()); }
+    }
+    if !lineage.is_empty() {
+        mapping.insert(lineage_key, serde_yaml::to_value(lineage)
+            .map_err(|err| TaskStoreError::Parse(err.to_string()))?);
+    }
     mapping.remove(serde_yaml::Value::String("claim_token".into()));
     if let Some(token) = token {
         mapping.insert(serde_yaml::Value::String("claim_token".into()),
@@ -1448,6 +1465,10 @@ impl TaskStore for FsTaskStore {
                     claimed_by: owner.to_string(),
                 });
             }
+            let origin = claim_metadata(&existing, "in_progress_origin")?;
+            let renewed = stamp_activity(&render_with_claim_token(&task, &existing, None)?,origin.as_deref(),true)?;
+            write_text_atomic(&path,&renewed)?;
+            task.revision=revision(&renewed);
             return Ok(task);
         }
 
@@ -1459,7 +1480,7 @@ impl TaskStore for FsTaskStore {
         };
         task.column = IN_PROGRESS_COLUMN_ID.into();
         task.claimed_by = Some(agent.to_string());
-        let text = stamp_activity(&render_task(&task, Some(&existing))?, Some(&origin), true)?;
+        let text = stamp_activity(&render_with_claim_token(&task, &existing, None)?, Some(&origin), true)?;
         write_text_atomic(&path, &text)?;
         task.revision = revision(&text);
         Ok(task)

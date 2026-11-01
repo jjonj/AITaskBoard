@@ -21,6 +21,7 @@ import { ReleaseCenter } from "./ReleaseCenter";
 import { QueueOverviewPanel } from "./QueueOverviewPanel";
 import { TaskTracePanel } from "./TaskTracePanel";
 import { StaleBlockerPanel } from "./StaleBlockerPanel";
+import { AgentRecoverySettings } from "./AgentRecoverySettings";
 import { mergeTaskEdits } from "./taskMerge";
 import type { ProjectTab, TaskIdReservation, ExecutionMode, QueueOverview, QueueCapacity, ClaimHealth, StaleBlocker } from "./api";
 import {
@@ -49,6 +50,8 @@ import {
   taskQueueOverview,
   taskQueueCapacity,
   taskClaimHealth,
+  taskOpenOriginSession,
+  taskHandoffBundle,
   taskEnqueueAgentNotice,
   taskReconcileAgentNotices,
   taskStaleBlockers,
@@ -401,6 +404,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   }, [hideWaitingKey, hideWaitingTasks]);
   const [staleBlockers, setStaleBlockers] = useState<StaleBlocker[]>([]);
   const [staleDrawerOpen, setStaleDrawerOpen] = useState(false);
+  const [agentSettingsOpen, setAgentSettingsOpen] = useState(false);
   const [staleAckBusy, setStaleAckBusy] = useState(false);
   useEffect(() => {
     let live = true;
@@ -2821,6 +2825,8 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
         if (columnContextMenu) setColumnContextMenu(null);
       }}
     >
+      {agentSettingsOpen && <AgentRecoverySettings boardPath={boardPath}
+        onClose={() => setAgentSettingsOpen(false)} />}
       {staleDrawerOpen && <StaleBlockerPanel items={staleBlockers} busy={staleAckBusy}
         onClose={() => setStaleDrawerOpen(false)}
         onAcknowledge={(item) => void acknowledgeBlocker(item)}
@@ -2904,6 +2910,9 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
           <details className="toolbar-more">
             <summary className="button secondary" title="More TaskBoard actions">More ▾</summary>
             <div className="toolbar-more-menu">
+              <button type="button" className="button secondary"
+                title="Configure resume window, idle wake, missing-session grace and external leases"
+                onClick={() => setAgentSettingsOpen(true)}>Agent recovery settings</button>
               <button type="button" className="button secondary"
                 title="Show genuine stale technical blockers, excluding dependency waiting. No workers are spawned."
                 onClick={() => setStaleDrawerOpen(true)}>
@@ -3448,6 +3457,21 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
               {hasTaskSession(contextTask) ? "Open Session" : "Spawn"}
             </button>
           )}
+          {contextTask.kind !== "epic" && <button type="button"
+            title="Navigate to a previously linked T3 browser session, even if hidden or unloaded"
+            onClick={() => {
+              setContextMenu(null);
+              void taskOpenOriginSession(boardPath, contextTask.id).catch(error =>
+                setError(`Could not open previous session: ${String(error)}`));
+            }}>Open previous session</button>}
+          {contextTask.kind !== "epic" && <button type="button"
+            title="Copy verified task provenance, user decisions, artifacts and possible uncommitted work to clipboard"
+            onClick={() => {
+              setContextMenu(null);
+              void taskHandoffBundle(boardPath,contextTask.id)
+                .then(packet => navigator.clipboard.writeText(JSON.stringify(packet,null,2)))
+                .catch(error=>setError(`Handoff unavailable: ${String(error)}`));
+            }}>Copy worker handoff</button>}
           {contextTask.kind === "epic" && <button
             onClick={() => {
               setContextMenu(null);

@@ -84,15 +84,14 @@ fn resolve_notice(root:&Path,notice:&mut AgentNotice, t3:&Option<Value>)->Result
     };
     let activity=session.get("activity").and_then(|v|v.as_str()).unwrap_or("");
     let status=session.get("status").and_then(|v|v.as_str()).unwrap_or("");
-    let working=activity=="working" && status!="unavailable" && status!="hidden";
+    let working=activity=="working" && matches!(status,"generating" | "working" | "streaming");
     let idle=status=="done_or_idle" && activity=="idle";
     if !working && !idle {
         notice.reason=Some("T3 state unknown/recovering/errored: no dispatch or release".into());return Ok(());
     }
-    let policy_hours=std::env::var("TASKBOARD_AGENT_RESUME_HOURS")
-      .ok().and_then(|v|v.parse::<i64>().ok()).filter(|v|(1..=168).contains(v)).unwrap_or(2);
-    let wake_idle=std::env::var("TASKBOARD_WAKE_RECENT_IDLE")
-      .map(|v|v!="0" && !v.eq_ignore_ascii_case("false")).unwrap_or(true);
+    let policy=crate::agent_policy::read(root)?.values;
+    let policy_hours=policy.resume_window_hours;
+    let wake_idle=policy.wake_recent_idle;
     let last_work=session.get("lastWorkingAt").and_then(|v|v.as_i64()).filter(|v|*v>0);
     let recent=last_work.is_some_and(|time|now_ms()-time<policy_hours*3_600_000);
     if idle && (!recent || !wake_idle) {
@@ -133,14 +132,22 @@ pub(crate) async fn task_reconcile_agent_notices(path:String)->Result<Vec<AgentN
         let _guard=reconciler_lock().lock().map_err(|e|e.to_string())?;
         let root=PathBuf::from(&path);
         let directory=notice_dir(&root);
-        if !directory.is_dir(){return Ok(vec![]);}
-        let mut notices=fs::read_dir(&directory).map_err(|e|e.to_string())?
-          .filter_map(|entry|entry.ok()).filter(|entry|entry.path().extension().is_some_and(|x|x=="json"))
-          .filter_map(|entry|fs::read(entry.path()).ok())
-          .filter_map(|data|serde_json::from_slice::<AgentNotice>(&data).ok()).collect::<Vec<_>>();
+        let mut notices=if directory.is_dir() {
+            fs::read_dir(&directory).map_err(|e|e.to_string())?
+              .filter_map(|entry|entry.ok()).filter(|entry|entry.path().extension().is_some_and(|x|x=="json"))
+              .filter_map(|entry|fs::read(entry.path()).ok())
+              .filter_map(|data|serde_json::from_slice::<AgentNotice>(&data).ok()).collect::<Vec<_>>()
+        }else{Vec::new()};
         notices.sort_by_key(|n|n.created_at_ms);
-        let t3=if notices.iter().any(|n|n.state=="pending" && uuid_owner(&n.owner).is_some())
-            {t3_control(json!({"action":"list","which":"all","includeHidden":true})).ok()}else{None};
+        let has_t3_claims=FsTaskStore::default().load(&root).map_err(|e|e.to_string())?
+          .tasks.iter().any(|task|task.claimed_by.as_deref().and_then(uuid_owner).is_some());
+        let t3=if has_t3_claims || notices.iter().any(|n|uuid_owner(&n.owner).is_some() &&
+             ["pending","unknown","attempting"].contains(&n.state.as_str())) {
+            t3_control(json!({"action":"list","which":"all","includeHidden":true})).ok()
+        }else{None};
+        // Stable claims stay put unless there is explicit permanent-gone proof
+        // AND the configured grace elapsed. Unknown states never cause release.
+        crate::orphan_recovery::reconcile(&root,t3.as_ref())?;
         // An uncertain send can only be reconciled by the *same* message ID;
         // never blindly submit the instruction a second time.
         if t3.is_some() {

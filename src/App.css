@@ -3481,3 +3481,16 @@ body.card-dragging .project-tab-wrapper:not(.selected):hover {
 .stale-blocker-subtitle { color:#9fb2c3; margin-top:7px; font-size:12px; }
 .stale-blocker-list p { overflow-wrap:anywhere; white-space:pre-wrap; font-size:13px; }
 .stale-blocker-actions { display:flex; flex-wrap:wrap; gap:8px; }
+
+.agent-recovery-overlay { position:fixed; inset:0; z-index:3200; background:rgba(0,0,0,.68); display:flex; align-items:center; justify-content:center; }
+.agent-recovery-dialog { width:min(540px,96vw); max-height:90vh; overflow-y:auto; padding:22px; border:1px solid #506071; border-radius:12px; background:#222e38; box-shadow:0 16px 60px rgba(0,0,0,.45); }
+.agent-recovery-dialog h2 { margin:0 0 8px; font-size:20px; }
+.agent-recovery-dialog>p { color:#b4c1cd; font-size:13px; line-height:1.5; }
+.agent-recovery-fields { display:grid; gap:15px; margin:18px 0; }
+.agent-recovery-field { display:grid; grid-template-columns:1fr 100px; gap:5px 14px; align-items:center; }
+.agent-recovery-field>span { font-size:13px; }
+.agent-recovery-field input { background:#172129; color:#e5edf4; padding:7px; border:1px solid #536477; border-radius:5px; max-width:100%; }
+.agent-recovery-field small { grid-column:1 / -1; font-size:11px; color:#9baaba; line-height:1.4; }
+.agent-recovery-check { display:flex; align-items:center; gap:8px; font-size:13px; }
+.agent-recovery-dialog footer { display:flex; justify-content:flex-end; gap:10px; margin-top:20px; }
+.agent-recovery-error { color:#ffac93 !important; }

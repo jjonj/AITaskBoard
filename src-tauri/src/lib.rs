@@ -3,6 +3,8 @@ mod board_watch;
 mod claim_health;
 mod agent_notices;
 mod stale_blockers;
+mod agent_policy;
+mod orphan_recovery;
 mod queue_bridge;
 
 use std::{fs, path::PathBuf, process::{Command, Stdio}, io::Write};
@@ -477,6 +479,31 @@ fn open_claimed_t3_session(claimed_by: String) -> Result<serde_json::Value, Stri
 }
 
 
+/// Open the latest known originating T3 browser session without creating a worker.
+/// Session lineage survives release/reclaim in the task Markdown, even if T3 is
+/// currently hidden or unloaded. Unknown availability does not block new claims.
+#[tauri::command]
+fn task_open_origin_session(path:String,id:String)->Result<serde_json::Value,String>{
+    let root=PathBuf::from(&path);
+    let board=FsTaskStore::default().load(&root).map_err(|e|e.to_string())?;
+    let task=board.tasks.into_iter().find(|t|t.id==id && !t.archived)
+      .ok_or("Task no longer exists")?;
+    let handoff=task_core::handoff_bundle(&task);
+    let candidate=handoff.origin_sessions.last().or_else(||
+       task.claimed_by.as_ref().filter(|owner|owner.len()==36));
+    let Some(id)=candidate else{return Err("No originating T3 session is linked to this task".into())};
+    open_claimed_t3_session(id.clone())
+}
+
+#[tauri::command]
+fn task_handoff_bundle(path:String,id:String)->Result<task_core::HandoffPacket,String>{
+    let root=PathBuf::from(&path);
+    let board=FsTaskStore::default().load(&root).map_err(|e|e.to_string())?;
+    let task=board.tasks.into_iter().find(|t|t.id==id && !t.archived)
+      .ok_or("Task no longer exists")?;
+    Ok(task_core::handoff_bundle(&task))
+}
+
 /// Open the canonical task's existing session, or ask T3's open-task action to
 /// create one. The new-session path requires T3-0142; never synthesize a
 /// duplicate session or silently treat a transport error as a failed start.
@@ -643,6 +670,8 @@ pub fn run() {
             agent_notices::task_reconcile_agent_notices,
             stale_blockers::task_stale_blockers,
             stale_blockers::task_acknowledge_stale_blocker,
+            agent_policy::task_read_agent_policy,
+            agent_policy::task_save_agent_policy,
             board_watch::board_change_tokens,
             user_queue_project_ids,
             create_task,
@@ -686,6 +715,8 @@ pub fn run() {
             highlight_in_fomni,
             open_in_obsidian,
             open_claimed_t3_session,
+            task_open_origin_session,
+            task_handoff_bundle,
             open_task_session,
             show_main_window
         ])

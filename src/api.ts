@@ -33,6 +33,14 @@ export const taskEnqueueAgentNotice = (path: string, id: string, owner: string, 
   invoke<AgentNotice>("task_enqueue_agent_notice", {path, id, owner, revision, event});
 export type StaleBlocker = { id: string; title: string; reason: string;
   lastActivityAt: string; ageDays: number; signature: string; };
+export type AgentPolicy = { resumeWindowHours: number; wakeRecentIdle: boolean;
+  t3OrphanGraceHours: number; externalLeaseHours: number; technicalRecheckDays: number; };
+export type AgentPolicyResponse = { values: AgentPolicy; revision: string; };
+export const taskReadAgentPolicy = (path: string) =>
+  invoke<AgentPolicyResponse>("task_read_agent_policy", {path});
+export const taskSaveAgentPolicy = (path: string, values: AgentPolicy, expectedRevision: string) =>
+  invoke<AgentPolicyResponse>("task_save_agent_policy", {path, values, expectedRevision});
+
 export const taskStaleBlockers = (path: string) =>
   invoke<StaleBlocker[]>("task_stale_blockers", {path});
 export const taskAcknowledgeStaleBlocker = (path: string, id: string, signature: string) =>
@@ -40,6 +48,15 @@ export const taskAcknowledgeStaleBlocker = (path: string, id: string, signature:
 
 export const taskReconcileAgentNotices = (path: string) =>
   invoke<AgentNotice[]>("task_reconcile_agent_notices", {path});
+
+export type HandoffPacket = {origin_sessions:string[];latest_claim:string|null;
+  user_decisions:string[];progress:string[];artifact_references:string[];
+  commit_references:string[];uncommitted_references:string[];
+  latest_rejection:string|null;instructions:string;};
+export const taskOpenOriginSession = (path:string,id:string) =>
+  invoke<Record<string,unknown>>("task_open_origin_session", {path,id});
+export const taskHandoffBundle = (path:string,id:string) =>
+  invoke<HandoffPacket>("task_handoff_bundle", {path,id});
 
 export const taskClaimHealth = (path?: string) =>
   invoke<Record<string, ClaimHealth>>("task_claim_health", {path});

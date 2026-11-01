@@ -791,7 +791,7 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
                 Some(json!({"completed":done,"total":descendants.len(),"remaining":descendants.len()-done}))
             } else { None };
             let (blocked_reason, blocked_reason_source) = effective_blocked_reason(task);
-            Ok(with_work_advisory(json!({ "task": task, "children": children, "waiting_for": blockers, "blocks": blocked_by, "readiness": readiness(&snapshot, task), "blocked_reason": blocked_reason, "blocked_reason_source": blocked_reason_source, "epic_progress": epic_status, "advisories": board_advisories(&snapshot) }), task))
+            Ok(with_work_advisory(json!({ "task": task, "children": children, "waiting_for": blockers, "blocks": blocked_by, "readiness": readiness(&snapshot, task), "blocked_reason": blocked_reason, "blocked_reason_source": blocked_reason_source, "epic_progress": epic_status, "handoff":task_core::handoff_bundle(task), "advisories": board_advisories(&snapshot) }), task))
         }
         TaskCommand::Search(args) => {
             let snapshot = load_checked(store, root)?;

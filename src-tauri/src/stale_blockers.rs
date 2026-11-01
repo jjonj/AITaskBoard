@@ -57,8 +57,7 @@ fn candidate(task:&Task,all:&[Task],root:&Path,minimum_days:i64)->Option<StaleBl
 }
 fn eligible(root:&Path)->Result<Vec<StaleBlocker>,String>{
     let snapshot=FsTaskStore::default().load(root).map_err(|e|e.to_string())?;
-    let days=std::env::var("TASKBOARD_TECHNICAL_RECHECK_DAYS")
-      .ok().and_then(|v|v.parse::<i64>().ok()).filter(|v|(1..=365).contains(v)).unwrap_or(7);
+    let days=crate::agent_policy::read(root)?.values.technical_recheck_days;
     Ok(snapshot.tasks.iter().filter_map(|task|candidate(task,&snapshot.tasks,root,days)).collect())
 }
 #[tauri::command]
