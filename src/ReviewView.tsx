@@ -434,7 +434,12 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       const answer = reopen ? "Needs changes" : aiQuestion && markDone ? "Done"
         : userAnswer.trim() || (aiQuestion ? userNote.trim() : "");
       if (aiQuestion && !answer) throw new Error("Choose a response or enter feedback before submitting.");
+      // A decision or action response resolves its associated blocker; unrelated feedback does not.
+      const resolvesBlock = aiQuestion && !markDone && !!answer &&
+        (old.column === "blocked" || old.attention.includes("blocked")) &&
+        (old.question?.request_type === "decision" || old.question?.request_type === "action");
       const needsChanges = reopen || (aiQuestion && !markDone && answer.toLowerCase() === "needs changes");
+      const reopenForWork = needsChanges || resolvesBlock;
       // An Inbox Done response closes an AI request; it does not turn the
       // implementation task into Done. For user tasks remain directly completable.
       const attention = (aiQuestion ? old.attention.filter((flag) => flag !== "question" && flag !== "needs-user")
@@ -453,12 +458,12 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       const imageLinks = await attachInboxImages(old.id, reviewTask.path);
       const updated: Task = {
         ...old,
-        ...(needsChanges ? { column: "ai-ready", claimed_by: null, blocked_reason: null } :
+        ...(reopenForWork ? { column: "ai-ready", claimed_by: null, blocked_reason: null } :
           doneColumn ? { column: doneColumn, claimed_by: null } : {}),
         user_notes: [userNote, ...imageLinks].filter(Boolean).join("\n\n"),
         acceptance_criteria: userCriteria.split(/\r?\n/).filter(Boolean),
         kind: needsChanges ? "task" : aiQuestion ? old.kind : markDone ? "task" : keepForUser ? (old.kind === "epic" ? "epic" : "for_user") : "task",
-        attention: needsChanges ? attention.filter(flag => flag !== "blocked" && flag !== "needs-user") : attention,
+        attention: reopenForWork ? attention.filter(flag => flag !== "blocked" && flag !== "needs-user") : attention,
         question: old.question ? { ...old.question, answer: answer || null } : null,
       };
       const saved = await updateTask(updated, reviewTask.path);

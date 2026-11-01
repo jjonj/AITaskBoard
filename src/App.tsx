@@ -11,7 +11,7 @@ import { MarkdownText, MarkdownPreviewToggle } from "./MarkdownText";
 import { TaskImageGallery, type PendingClipboardImage } from "./TaskImageGallery";
 import { ReviewView } from "./ReviewView";
 import { isUserQueueEligible } from "./userQueueEligibility";
-import { appendDescriptionUpdates, AUTHORIZE_UNBLOCK_TEXT, parseDescriptionTimeline, prepareTaskDraftForSave, updateInitialDescription } from "./descriptionTimeline";
+import { parseDescriptionTimeline, prepareTaskDraftForSave, updateInitialDescription } from "./descriptionTimeline";
 import { applyCardPlacements, orderCardsByDependencies } from "./dependencyLayout";
 import { withEpicProxyRows } from "./epicProxyRows";
 import { eligibleForAgeArchive } from "./archiveAge";
@@ -1803,9 +1803,9 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       openEdit(followup);
     });
 
-  // Human authorization: return a blocked task to AI Ready through the normal
+  // Reopen a blocked task to AI Ready through the normal
   // update path. The core clears blocked_reason once the task is unblocked.
-  const authorizeUnblock = () =>
+  const reopenBlockedTask = () =>
     run(async () => {
       if (!editor?.original || editor.mode !== "edit" || editor.draft.kind === "epic" || !snapshot) return;
       if (!editor.draft.title.trim()) return;
@@ -1824,12 +1824,11 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
         blocked_reason: null,
         position_after: null,
         positioned_at: null,
-        description: appendDescriptionUpdates(prepared.description,
-          [{ kind: "user-note", text: AUTHORIZE_UNBLOCK_TEXT }]),
+        description: prepared.description,
       }, boardPath);
       const after = snapshotWithTask(before, saved);
       flashTaskActivity([{ id: saved.id, kind: "moved" }]);
-      pushUndo({ kind: "board", label: "authorize unblock", before, after });
+      pushUndo({ kind: "board", label: "reopen blocked task", before, after });
       applySnapshot(after);
       if (userQueueReview && original.id === userQueueReview.ids[userQueueReview.index]) {
         advanceUserQueue(after);
@@ -4099,9 +4098,9 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
                     || "No blocked reason recorded (blocked before reasons were required)."}</span>
                 </div>
                 <button type="button" className="button blocked-authorize-button"
-                  title={`Move to AI Ready and add: "${AUTHORIZE_UNBLOCK_TEXT}"`}
-                  onClick={authorizeUnblock} disabled={busy}>
-                  Authorize Unblock
+                  title="Clear the block and move this task to AI Ready"
+                  onClick={reopenBlockedTask} disabled={busy}>
+                  Reopen
                 </button>
               </div>
             )}
