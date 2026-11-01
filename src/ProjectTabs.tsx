@@ -33,6 +33,14 @@ export function ProjectTabs({ Board }: Props) {
   const [startupReview, setStartupReview] = useState<{ path: string; taskId: string } | null>(null);
   const [startupTask, setStartupTask] = useState<{ path: string; taskId: string; requestKey: number } | null>(null);
   useEffect(() => {
+    const onSearchResult = (event: Event) => {
+      const detail = (event as CustomEvent<{ path: string; taskId: string }>).detail;
+      if (detail?.path && detail.taskId) setStartupTask({ ...detail, requestKey: Date.now() });
+    };
+    window.addEventListener("taskboard:open-search-result", onSearchResult);
+    return () => window.removeEventListener("taskboard:open-search-result", onSearchResult);
+  }, []);
+  useEffect(() => {
     void invoke<{ path: string; taskId: string } | null>("startup_task")
       .then((request) => { if (request) setStartupTask({ ...request, requestKey: Date.now() }); })
       .catch(() => undefined);

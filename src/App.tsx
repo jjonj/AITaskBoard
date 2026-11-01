@@ -276,6 +276,30 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const blockedInboxFilterKey = storageKey("hideBlockedInboxTasks");
   const [snapshot, setSnapshot] = useState<BoardSnapshot | null>(null);
   const [query, setQuery] = useState("");
+  const [remoteSearchMatches, setRemoteSearchMatches] = useState<Array<{ id: string; title: string; project: string; path: string }>>([]);
+  useEffect(() => {
+    const needle = query.trim().toLowerCase();
+    if (needle.length < 3) { setRemoteSearchMatches([]); return; }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const catalog = await listProjects();
+          const otherBoards = await Promise.all(catalog.projects.filter((item) => item.path !== boardPath)
+            .map(async (project) => {
+              try {
+                const board = await loadBoard(project.path);
+                return board.tasks.filter((task) => !task.archived &&
+                  `${task.id} ${task.title}`.toLowerCase().includes(needle))
+                  .map((task) => ({ id: task.id, title: task.title, project: project.name, path: project.path }));
+              } catch { return []; }
+            }));
+          if (!cancelled) setRemoteSearchMatches(otherBoards.flat().slice(0, 20));
+        } catch { if (!cancelled) setRemoteSearchMatches([]); }
+      })();
+    }, 250);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [query, boardPath]);
   // MISC-0019: a search filter is temporary, not a persistent board state.
   // Restart the idle countdown with each keystroke so active editing is unaffected.
   useEffect(() => {
@@ -400,6 +424,8 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const [pendingClipboardImages, setPendingClipboardImages] = useState<PendingClipboardImage[]>([]);
   const imageDialogGeneration = useRef(0);
   const editorModalRef = useRef<HTMLElement | null>(null);
+  const autosavingDraft = useRef(false);
+  const epicSingleClickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [fileDropActive, setFileDropActive] = useState(false);
   const [doneMenuOpen, setDoneMenuOpen] = useState(false);
   const [copiedTaskId, setCopiedTaskId] = useState<string | null>(null);
@@ -1160,7 +1186,34 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     }, 90);
   };
 
-  const closeEditor = (board = snapshot) => {
+  const closeEditor = (board = snapshot, persisted = false) => {
+    // A dismissed creation with meaningful contents becomes a short-lived
+    // human draft, rather than vanishing without a Save click.
+    if (!persisted && editor?.mode === "create" && !autosavingDraft.current &&
+        (editor.draft.title.trim() || editor.draft.description.trim() ||
+         editor.draft.user_notes.trim() || editor.draft.notes.trim() ||
+         editor.draft.acceptance_criteria.some((item) => item.trim()))) {
+      if (!reservedTaskId) { setError("Cannot save draft yet: task ID reservation is not ready."); return; }
+      autosavingDraft.current = true;
+      setBusy(true);
+      const stamp = new Date().toISOString();
+      const draft = {
+        ...editor.draft,
+        title: editor.draft.title.trim() || "Untitled draft",
+        column: "draft",
+        notes: [editor.draft.notes, `<!-- taskboard:auto-draft:${stamp} -->`].filter(Boolean).join("\n"),
+        reserved_id: reservedTaskId.id,
+        reservation_token: reservedTaskId.token,
+      };
+      void createTask(draft, boardPath).then(async () => {
+        const latest = await loadBoard(boardPath);
+        applySnapshot(latest);
+        closeEditor(latest, true);
+      }).catch((error) => setError(`Could not auto-save draft: ${errorText(error)}`))
+        .finally(() => { autosavingDraft.current = false; setBusy(false); });
+      return;
+    }
+    if (autosavingDraft.current && !persisted) return;
     imageDialogGeneration.current += 1;
     setPendingClipboardImages([]);
     // A follow-up created during queue review is edited outside the queue.
@@ -1462,6 +1515,42 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       setReviewNotice(`Review closed — ${parent.id} needs a clear disposition.`);
     }
   };
+  /** Merge independent on-disk changes instead of discarding the user's draft.
+   * Overlapping edits remain explicit conflicts rather than silently taking a side. */
+  const updateWithDiskMerge = async (original: Task, edited: Task): Promise<Task> => {
+    try { return await updateTask(edited, boardPath); }
+    catch (error) {
+      if (!errorText(error).includes("changed on disk")) throw error;
+      const current = (await loadBoard(boardPath)).tasks.find((task) => task.id === original.id);
+      if (!current) throw new Error(`${original.id} no longer exists on disk.`);
+      const fields: (keyof Task)[] = [
+        "title", "column", "parent", "category", "kind", "deployable",
+        "repeat_every_days", "next_due", "blocked_reason", "depends_on", "related_to",
+        "icon", "attention", "question", "description", "acceptance_criteria",
+        "ai_notes", "user_notes", "notes",
+      ];
+      const merged = { ...current };
+      const conflicts: string[] = [];
+      for (const field of fields) {
+        const baseValue = original[field];
+        const editValue = edited[field];
+        const diskValue = current[field];
+        if (JSON.stringify(baseValue) === JSON.stringify(editValue)) continue;
+        if (JSON.stringify(baseValue) !== JSON.stringify(diskValue) &&
+            JSON.stringify(editValue) !== JSON.stringify(diskValue)) {
+          conflicts.push(field);
+        } else {
+          // TaskDraft fields are a subset of Task fields and all types agree.
+          Object.assign(merged, { [field]: editValue });
+        }
+      }
+      if (conflicts.length) {
+        throw new Error(`Concurrent changes to ${conflicts.join(", ")}. Latest task loaded from disk; review before saving.`);
+      }
+      return await updateTask(merged, boardPath);
+    }
+  };
+
   const saveEditor = (markDone = false) =>
     run(async () => {
       if (!editor || !snapshot) return;
@@ -1519,7 +1608,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
         flashTaskActivity([{ id: saved.id, kind: "created" }]);
         undoAction = "create task";
       } else if (editor.original) {
-        const saved = await updateTask({ ...editor.original, ...draft }, boardPath);
+        const saved = await updateWithDiskMerge(editor.original, { ...editor.original, ...draft });
         savedTask = saved;
         // Completing a prerequisite can release other tasks from Blocked in
         // the shared core. Reload those automatic changes as part of this save.
@@ -1559,7 +1648,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       if (userQueueReview && editor.original?.id === userQueueReview.ids[userQueueReview.index]) {
         advanceUserQueue(after);
       } else {
-        closeEditor(after);
+        closeEditor(after, true);
       }
       if (syncWarning) setError(syncWarning);
     });
@@ -1599,7 +1688,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
         const after = await loadBoard(boardPath);
         applySnapshot(after);
         if (userQueueReview) advanceUserQueue(after);
-        else closeEditor(after);
+        else closeEditor(after, true);
         flashTaskActivity([{ id: original.id, kind: "moved" }]);
         throw new Error(`${original.id} was saved and moved to Done, but the follow-up could not be created: ${errorText(error)}`);
       }
@@ -1648,7 +1737,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       if (userQueueReview && original.id === userQueueReview.ids[userQueueReview.index]) {
         advanceUserQueue(after);
       } else {
-        closeEditor(after);
+        closeEditor(after, true);
       }
     });
 
@@ -1827,10 +1916,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     task: Task,
   ) => {
     if (event.button !== 0) return;
-    if (task.kind === "epic") {
-      openEdit(task); // Epics can be inspected, but never dragged/moved.
-      return;
-    }
+    if (task.kind === "epic") return; // Click inspects; double-click toggles children.
     event.preventDefault();
 
     const startX = event.clientX;
@@ -2252,7 +2338,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       setContextMenu(null);
       if (editor?.original?.id === task.id) {
         if (userQueueReview) advanceUserQueue(after);
-        else closeEditor(after);
+        else closeEditor(after, true);
       }
     });
 
@@ -2606,6 +2692,24 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
             />
             {query && <button type="button" className="search-clear" aria-label="Clear task search"
               title="Clear filter (Esc)" onClick={() => setQuery("")}>×</button>}
+            {query.trim().length >= 3 && (visibleTasks.length > 0 || remoteSearchMatches.length > 0) &&
+              <div className="search-results" role="group" aria-label="Search results">
+                {visibleTasks.slice(0, 5).map((task) => <button type="button" key={task.id}
+                  onClick={() => { setQuery(""); openEdit(task); }}>
+                  <strong>{task.id}</strong> {task.title}
+                </button>)}
+                {remoteSearchMatches.length > 0 && <small>Other project boards</small>}
+                {remoteSearchMatches.map((task) => <button type="button" className="remote-search-result"
+                  key={`${task.path}#${task.id}`}
+                  onClick={() => {
+                    setQuery("");
+                    window.dispatchEvent(new CustomEvent("taskboard:open-search-result", {
+                      detail: { path: task.path, taskId: task.id },
+                    }));
+                  }}>
+                  <strong>{task.id}</strong> {task.title} <em>{task.project}</em>
+                </button>)}
+              </div>}
           </div>
           <details className="toolbar-more">
             <summary className="button secondary" title="More TaskBoard actions">More ▾</summary>
@@ -2837,11 +2941,23 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
                       } ${recentTaskActivity[task.id] ? "recently-changed" : ""}`}
                       key={task.id}
                       data-task-id={task.id}
-                      title={recentTaskActivity[task.id]
-                        ? `Recently ${recentTaskActivity[task.id].kind} at ${new Date(recentTaskActivity[task.id].at).toLocaleTimeString()} (highlighted for 10 minutes)`
-                        : undefined}
                       style={{ marginLeft: Math.min(depth, 4) * 12 }}
                       onMouseDown={(event) => { setKeyboardSelectedTaskId(task.id); beginCardDrag(event, task); }}
+                      onClick={() => {
+                        if (task.kind !== "epic") return;
+                        if (epicSingleClickTimer.current) clearTimeout(epicSingleClickTimer.current);
+                        epicSingleClickTimer.current = setTimeout(() => {
+                          epicSingleClickTimer.current = null;
+                          openEdit(task);
+                        }, 230);
+                      }}
+                      onDoubleClick={(event) => {
+                        if (task.kind !== "epic") return;
+                        event.preventDefault();
+                        if (epicSingleClickTimer.current) clearTimeout(epicSingleClickTimer.current);
+                        epicSingleClickTimer.current = null;
+                        toggleTaskCollapsed(task.id);
+                      }}
                       onContextMenu={(event) => {
                         event.preventDefault();
                         event.stopPropagation();
@@ -3751,6 +3867,10 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
             <DescriptionTimeline
               key={editor.original?.id ?? "new-task"}
               description={editor.draft.description}
+              readOnlyDescription={editor.mode === "edit" && !!editor.original && (
+                editor.original.column === "in-progress" || editor.original.column === "blocked" ||
+                columns.some((column) => column.id === editor.original!.column && column.terminal)
+              )}
               legacyAiNotes={editor.draft.ai_notes}
               descriptionMinRows={editor.mode === "create" ? 7 : 3}
               descriptionMaxHeight={editor.mode === "create" ? 480 : 360}

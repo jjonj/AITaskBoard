@@ -493,6 +493,33 @@ impl FsTaskStore {
         Ok(changed)
     }
 
+    /// Uncommitted creation dialogs are saved as user drafts with a marker.
+    /// Expire only untouched, unreferenced drafts after 24 hours; manual saves
+    /// remove the marker and ordinary user-created drafts are never pruned.
+    fn maintain_auto_drafts(&self, snapshot: &BoardSnapshot) -> Result<bool, TaskStoreError> {
+        let cutoff = Utc::now() - ChronoDuration::hours(24);
+        let mut changed = false;
+        for task in snapshot.tasks.iter().filter(|task| !task.archived && task.column == DRAFT_COLUMN_ID) {
+            let Some(raw_stamp) = task.notes.split("<!-- taskboard:auto-draft:").nth(1)
+                .and_then(|value| value.split(" -->").next()) else { continue; };
+            let Ok(created) = DateTime::parse_from_rfc3339(raw_stamp) else { continue; };
+            if created.with_timezone(&Utc) > cutoff { continue; }
+            if snapshot.tasks.iter().any(|other| other.id != task.id &&
+                (other.parent.as_deref() == Some(&task.id) ||
+                 other.depends_on.contains(&task.id) || other.related_to.contains(&task.id))) { continue; }
+            let path = PathBuf::from(&task.path);
+            let metadata = fs::metadata(&path)?;
+            if metadata.modified().ok().map(DateTime::<Utc>::from)
+                .is_none_or(|modified| modified > cutoff) { continue; }
+            let current = fs::read_to_string(&path)?;
+            if revision(&current) == task.revision {
+                fs::remove_file(&path)?;
+                changed = true;
+            }
+        }
+        Ok(changed)
+    }
+
     // Expiration is reconciled by the shared core on every load, including CLI
     // loads. A snoozed column therefore wakes even if the app was closed.
     fn maintain_snoozed_columns(
@@ -678,6 +705,9 @@ impl FsTaskStore {
             snapshot = self.load_unlocked(root)?;
         }
         if self.maintain_dependency_unblocks(&snapshot)? {
+            snapshot = self.load_unlocked(root)?;
+        }
+        if self.maintain_auto_drafts(&snapshot)? {
             snapshot = self.load_unlocked(root)?;
         }
         if self.maintain_epic_columns(&snapshot)? {
@@ -920,6 +950,7 @@ impl FsTaskStore {
             let _ = fs::remove_file(reservation_file);
         }
         task.revision = revision(&text);
+        mirror_local_related_links(root, &snapshot, &task.id, &[], &task.related_to)?;
         if !task.archived && task.completed.is_some() {
             let current = self.load_unlocked(root)?;
             crate::release::reconcile_unlocked(root, &current.config, &current.tasks, false)?;
@@ -971,6 +1002,12 @@ impl FsTaskStore {
         task.archived = path.starts_with(root.join(ARCHIVE_DIR));
         task.path = path.to_string_lossy().to_string();
         let previous = parse_task(&path, task.archived, &existing)?;
+        // A user opening and explicitly saving an auto-draft adopts it as a
+        // normal Draft. Never expire a draft the human intentionally retained.
+        if actor == MutationActor::Human && previous.notes.contains("<!-- taskboard:auto-draft:") {
+            task.notes = task.notes.lines().filter(|line|
+                !line.trim().starts_with("<!-- taskboard:auto-draft:")).collect::<Vec<_>>().join("\n");
+        }
         if actor == MutationActor::Human && previous.kind == TaskKind::ForUser &&
             review_link::is_implementation_review(&task) {
             let answer = task.question.as_ref().and_then(|q| q.answer.as_deref()).unwrap_or("").trim();
@@ -1027,6 +1064,9 @@ impl FsTaskStore {
         let text = update_activity(&rendered, &existing, &previous, &task, &snapshot.config)?;
         write_text_atomic(&path, &text)?;
         task.revision = revision(&text);
+        if previous.related_to != task.related_to {
+            mirror_local_related_links(root, &snapshot, &task.id, &previous.related_to, &task.related_to)?;
+        }
         if actor == MutationActor::Human && previous.kind == TaskKind::ForUser && previous.completed.is_none() && task.completed.is_some() {
             let _ = review_link::reconcile(&snapshot, &task, false)?;
         }
@@ -1042,6 +1082,46 @@ impl FsTaskStore {
     }
 }
 
+
+/// Mirror added/removed informational links in the destination task. The
+/// same path works for edits from the desktop and CLI. Cross-project links
+/// use the absolute source board plus '#task-id' as their inverse identity.
+fn mirror_local_related_links(
+    root: &Path, snapshot: &BoardSnapshot, source: &str,
+    previous: &[String], current: &[String],
+) -> Result<(), TaskStoreError> {
+    let old: HashSet<&str> = previous.iter().map(String::as_str).collect();
+    let new: HashSet<&str> = current.iter().map(String::as_str).collect();
+    for reference in old.symmetric_difference(&new) {
+        let external = reference.rsplit_once('#');
+        let (destination, id) = external.map(|(board, id)| (Path::new(board), id))
+            .unwrap_or((root, *reference));
+        // Remote board files must be protected against concurrent writes too.
+        // A contended remote board fails explicitly instead of overwriting it.
+        let _remote_lock = if external.is_some() && destination != root {
+            Some(acquire_lock(destination)?)
+        } else { None };
+        let path = if external.is_none() {
+            snapshot.tasks.iter().find(|task| task.id == id)
+                .map(|_| find_task_path(root, id)).transpose()?
+        } else { Some(find_task_path(destination, id)?) };
+        let Some(path) = path else { continue; };
+        let original = fs::read_to_string(&path)?;
+        let mut target = parse_task(&path, path.starts_with(destination.join(ARCHIVE_DIR)), &original)?;
+        let reverse = external.is_some().then(|| format!("{}#{source}", root.display()))
+            .unwrap_or_else(|| source.to_owned());
+        if new.contains(reference) {
+            if !target.related_to.iter().any(|link| link == &reverse) {
+                target.related_to.push(reverse);
+            }
+        } else {
+            target.related_to.retain(|link| link != &reverse);
+        }
+        let rendered = render_task(&target, Some(&original))?;
+        if rendered != original { write_text_atomic(&path, &rendered)?; }
+    }
+    Ok(())
+}
 
 const ABANDON_AFTER_HOURS: i64 = 24;
 

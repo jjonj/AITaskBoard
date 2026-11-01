@@ -32,6 +32,8 @@ type Props = {
   /** Task creation uses the space normally occupied by the Note to AI composer. */
   descriptionMinRows?: number;
   descriptionMaxHeight?: number;
+  /** Execution-stage descriptions are immutable; users can still add Note to AI updates. */
+  readOnlyDescription?: boolean;
 };
 
 const updateLabel = (kind: DescriptionUpdateKind) => ({
@@ -58,7 +60,7 @@ function relativeTime(iso: string) {
 
 export function DescriptionTimeline({
   description, onChange, noteToAi, onNoteToAiChange, legacyAiNotes,
-  descriptionMinRows = 3, descriptionMaxHeight = 360,
+  descriptionMinRows = 3, descriptionMaxHeight = 360, readOnlyDescription = false,
 }: Props) {
   const { initial, updates } = parseDescriptionTimeline(description);
   const [showAll, setShowAll] = useState(false);
@@ -73,13 +75,13 @@ export function DescriptionTimeline({
         {updates.length > 0 && (
           <span>{updates.length} update{updates.length === 1 ? "" : "s"}</span>
         )}
-        <button type="button" className="description-markdown-mode"
+        {!readOnlyDescription && <button type="button" className="description-markdown-mode"
           onClick={() => setPreviewDescription((current) => !current)}
           aria-pressed={previewDescription}>
           {previewDescription ? "Edit Markdown" : "Preview Markdown"}
-        </button>
+        </button>}
       </div>
-      {previewDescription
+      {previewDescription || readOnlyDescription
         ? <MarkdownText text={initial || "*No description yet.*"} className="markdown-field-preview description-markdown-preview" />
         : <AutoTextarea
             className="description-initial"

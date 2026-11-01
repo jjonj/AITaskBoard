@@ -2,8 +2,70 @@
 //! Only task Markdown, board config and review manifests participate; attachments
 //! and transient reservation files must not cause constant UI refreshes.
 use std::{collections::{HashMap, hash_map::DefaultHasher}, fs, hash::{Hash, Hasher},
-    path::Path, sync::{Mutex, OnceLock}, time::{Duration, Instant, UNIX_EPOCH}};
+    io::Write, path::Path, process::{Command, Stdio}, sync::{Mutex, OnceLock},
+    time::{Duration, Instant, UNIX_EPOCH}};
 use task_core::{FsTaskStore, TaskStore};
+
+#[derive(Clone)]
+struct WatchedTask {
+    revision: String,
+    claimant: Option<String>,
+    content: String,
+    column: String,
+}
+
+/// Detect externally written updates, including changes made through the CLI.
+/// Only deliver to an exact claimed T3 UUID, never infer a session from a title.
+fn notify_task_changes(root: &Path) {
+    static SEEN: OnceLock<Mutex<HashMap<String, HashMap<String, WatchedTask>>>> = OnceLock::new();
+    let Ok(board) = FsTaskStore::default().load(root) else { return; };
+    let current = board.tasks.into_iter().filter(|task| !task.archived).map(|task| {
+        let content = serde_json::json!({
+            // Only substantive instructions should interrupt the worker.
+            // Agent-written progress notes must not generate self-notification loops.
+            "title":task.title, "description":task.description,
+            "acceptance":task.acceptance_criteria, "user_notes":task.user_notes,
+        }).to_string();
+        (task.id, WatchedTask { revision:task.revision, claimant:task.claimed_by,
+            content, column:task.column })
+    }).collect::<HashMap<_,_>>();
+    let key = root.to_string_lossy().to_string();
+    let mut seen = SEEN.get_or_init(|| Mutex::new(HashMap::new())).lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if let Some(previous) = seen.get(&key) {
+        for (id, after) in &current {
+            let Some(before) = previous.get(id) else { continue; };
+            if after.revision == before.revision || after.content == before.content ||
+               after.column != "in-progress" { continue; }
+            let Some(raw) = after.claimant.as_deref() else { continue; };
+            let session = raw.strip_prefix("t3-browser:").unwrap_or(raw);
+            if !is_t3_uuid(session) { continue; }
+            dispatch_t3_task_update(key.clone(), id.clone(), session.to_string());
+        }
+    }
+    seen.insert(key, current);
+}
+
+fn is_t3_uuid(value: &str) -> bool {
+    value.len() == 36 && value.bytes().enumerate().all(|(i, c)|
+        if [8, 13, 18, 23].contains(&i) { c == b'-' } else { c.is_ascii_hexdigit() })
+}
+
+fn dispatch_t3_task_update(board: String, id: String, session: String) {
+    std::thread::spawn(move || {
+        let script = r"D:\SSDProjects\Tools\t3code\scripts\chatgpt-sessions.mjs";
+        if !Path::new(script).is_file() { return; }
+        let message = format!("TaskBoard update: {id} has changed. Re-read task {id} in {board} before continuing. Do not assume the previous task revision is current.");
+        let request = serde_json::json!({"action":"send", "sessionId":session, "message":message});
+        let Ok(mut child) = Command::new("node").arg(script)
+            .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() else { return; };
+        if let Some(mut input) = child.stdin.take() {
+            let _ = input.write_all(request.to_string().as_bytes());
+        }
+        let _ = child.wait();
+    });
+}
+
 
 /// Board reads reconcile stale work; limit them to once per five minutes per board.
 /// This hooks into the existing UI change polling, without another background agent.
@@ -82,7 +144,15 @@ fn scan_tokens(paths: Vec<String>) -> Vec<BoardChangeToken> {
         for folder in ["Active", "Archive", "Reviews"] {
             scan_files(&root.join(folder), &mut hasher, 0);
         }
-        BoardChangeToken { path, token: Some(format!("{:016x}", hasher.finish())) }
+        let token = format!("{:016x}", hasher.finish());
+        static LAST_TOKEN: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+        let changed = {
+            let mut cache = LAST_TOKEN.get_or_init(|| Mutex::new(HashMap::new())).lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            cache.insert(path.clone(), token.clone()).as_deref() != Some(token.as_str())
+        };
+        if changed { notify_task_changes(root); }
+        BoardChangeToken { path, token: Some(token) }
     }).collect()
 }
 
