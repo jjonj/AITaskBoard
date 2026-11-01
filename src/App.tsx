@@ -19,6 +19,7 @@ import { ProjectTabs } from "./ProjectTabs";
 import { ReleaseCenter } from "./ReleaseCenter";
 import { QueueOverviewPanel } from "./QueueOverviewPanel";
 import { TaskTracePanel } from "./TaskTracePanel";
+import { mergeTaskEdits } from "./taskMerge";
 import type { ProjectTab, TaskIdReservation, ExecutionMode, QueueOverview, QueueCapacity } from "./api";
 import {
   archiveTask,
@@ -1523,27 +1524,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       if (!errorText(error).includes("changed on disk")) throw error;
       const current = (await loadBoard(boardPath)).tasks.find((task) => task.id === original.id);
       if (!current) throw new Error(`${original.id} no longer exists on disk.`);
-      const fields: (keyof Task)[] = [
-        "title", "column", "parent", "category", "kind", "deployable",
-        "repeat_every_days", "next_due", "blocked_reason", "depends_on", "related_to",
-        "icon", "attention", "question", "description", "acceptance_criteria",
-        "ai_notes", "user_notes", "notes",
-      ];
-      const merged = { ...current };
-      const conflicts: string[] = [];
-      for (const field of fields) {
-        const baseValue = original[field];
-        const editValue = edited[field];
-        const diskValue = current[field];
-        if (JSON.stringify(baseValue) === JSON.stringify(editValue)) continue;
-        if (JSON.stringify(baseValue) !== JSON.stringify(diskValue) &&
-            JSON.stringify(editValue) !== JSON.stringify(diskValue)) {
-          conflicts.push(field);
-        } else {
-          // TaskDraft fields are a subset of Task fields and all types agree.
-          Object.assign(merged, { [field]: editValue });
-        }
-      }
+      const { merged, conflicts } = mergeTaskEdits(original, edited, current);
       if (conflicts.length) {
         throw new Error(`Concurrent changes to ${conflicts.join(", ")}. Latest task loaded from disk; review before saving.`);
       }
