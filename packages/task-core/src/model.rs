@@ -20,6 +20,9 @@ pub struct Column {
     /// Advisory columns contain temporary board-wide instructions, not tasks.
     #[serde(default, skip_serializing_if = "is_false")]
     pub advisory: bool,
+    /// Durable column-wide default for future executable tasks; never a scheduler.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub auto_queue: bool,
     #[serde(default)]
     pub color: String,
 }

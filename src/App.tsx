@@ -39,6 +39,7 @@ import {
   saveBoardConfig,
   showMainWindow,
   taskExecutionIntent,
+  taskExecutionModes,
   taskSetExecutionMode,
   taskRequestStartNow,
   taskSyncQueue,
@@ -92,6 +93,13 @@ type UserQueueReview = { ids: string[]; index: number };
 type UserQueueSnoozes = Record<string, number>;
 const isForUser = (task: Pick<Task, "kind" | "attention">) =>
   task.kind === "for_user" || (task.kind === "task" && task.attention.includes("needs-user"));
+
+const QueueArrows = () => <svg viewBox="0 0 24 24" width="17" height="17"
+  aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.9"
+  strokeLinecap="round" strokeLinejoin="round">
+  <path d="M4 10a8 8 0 0 1 13-5M17 2v4h-4" />
+  <path d="M20 14a8 8 0 0 1-13 5M7 22v-4h4" />
+</svg>;
 
 const USER_QUEUE_SNOOZES_KEY = "taskboard.userQueueSnoozes";
 const USER_QUEUE_SNOOZE_MS = 24 * 60 * 60 * 1000;
@@ -440,9 +448,20 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const [doneMenuOpen, setDoneMenuOpen] = useState(false);
   const [copiedTaskId, setCopiedTaskId] = useState<string | null>(null);
   const [executionChoice, setExecutionChoice] = useState<ExecutionMode | "start_now">("backlog");
+  const [executionTouched, setExecutionTouched] = useState(false);
+  const [executionModes, setExecutionModes] = useState<Record<string, import("./api").ExecutionIntent>>({});
+  useEffect(() => {
+    if (!snapshot) return;
+    let cancelled = false;
+    void taskExecutionModes(boardPath).then(modes => {
+      if (!cancelled) setExecutionModes(modes);
+    }).catch(err => { if (!cancelled) setError(`Queue state unavailable: ${errorText(err)}`); });
+    return () => { cancelled = true; };
+  }, [boardPath, snapshot]);
   const [withMeSelected, setWithMeSelected] = useState(false);
   const [executionLoading, setExecutionLoading] = useState(false);
   useEffect(() => {
+    setExecutionTouched(false);
     if (!editor || editor.mode === "create" || !editor.original) {
       setWithMeSelected(false);
       setExecutionChoice("backlog");
@@ -460,6 +479,12 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     }).finally(() => { if (!cancelled) setExecutionLoading(false); });
     return () => { cancelled = true; };
   }, [boardPath, editor?.mode, editor?.original?.id]);
+  const editorQueueChoice = !executionTouched && editor && (
+    (editor.mode === "create" && editor.draft.column === "ai-ready" &&
+      snapshot?.config.columns.some(col => col.id === "ai-ready" && col.auto_queue)) ||
+    (editor.draft.attention.includes("priority") &&
+      !editor.original?.attention.includes("priority"))
+  ) ? "queue" : executionChoice;
   const [releasesOpen, setReleasesOpen] = useState(false);
   const [userQueueReview, setUserQueueReview] = useState<UserQueueReview | null>(null);
   const [queueExpanded, setQueueExpanded] = useState(false);
@@ -1506,6 +1531,53 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     }
   };
 
+  const queueEligible = (task: Task) =>
+    task.column === "ai-ready" &&
+    (task.kind === "task" || task.kind === "recurring") &&
+    !task.archived && !task.completed && !task.claimed_by &&
+    readinessOf(task) === "ready" &&
+    task.review_status !== "open" &&
+    !(task.attention.includes("question") && task.question?.answer == null);
+
+  const toggleTaskQueue = (task: Task) => run(async () => {
+    if (!queueEligible(task)) throw new Error(`${task.id} is not currently eligible for Queue.`);
+    const current = await taskExecutionIntent(task.id, boardPath);
+    const next = current.mode === "queue" ? "backlog" : "queue";
+    await taskSetExecutionMode(task.id, current.revision, next, boardPath);
+    const after = await loadBoard(boardPath);
+    applySnapshot(after);
+    const warning = await syncQueueWarning(task.id);
+    if (warning) setError(warning);
+  });
+
+  const toggleColumnQueue = (columnId: string) => run(async () => {
+    if (columnId !== "ai-ready" || !snapshot) return;
+    const current = await loadBoard(boardPath);
+    const column = current.config.columns.find(item => item.id === columnId);
+    if (!column) throw new Error("AI Ready column is unavailable.");
+    const next = !column.auto_queue;
+    await saveBoardConfig({ ...current.config, columns: current.config.columns.map(item =>
+      item.id === columnId ? { ...item, auto_queue: next } : item) }, boardPath);
+    // Saving the column preference first makes newly created tasks inherit it,
+    // even if a later individual queue CAS encounters an uncertain receipt.
+    const afterPolicy = await loadBoard(boardPath);
+    const conflicts: string[] = [];
+    for (const task of afterPolicy.tasks.filter(queueEligible)) {
+      try {
+        const mode = await taskExecutionIntent(task.id, boardPath);
+        if (mode.mode !== (next ? "queue" : "backlog")) {
+          await taskSetExecutionMode(task.id, mode.revision, next ? "queue" : "backlog", boardPath);
+        }
+      } catch (err) { conflicts.push(`${task.id}: ${errorText(err)}`); }
+    }
+    applySnapshot(await loadBoard(boardPath));
+    if (conflicts.length) setError(`Column preference saved. ${conflicts.length} task(s) require Queue reconciliation: ${conflicts.slice(0, 3).join(" · ")}`);
+    else {
+      void taskQueueReconcile(boardPath).then(() => refresh(boardPath, true)).catch(err =>
+        setQueueRecoveryWarning(`OpenRig unavailable: ${errorText(err)}`));
+    }
+  });
+
   const showLinkedReviewOutcome = (before: BoardSnapshot, after: BoardSnapshot, reviewId: string) => {
     const review = after.tasks.find((task) => task.id === reviewId);
     const previous = before.tasks.find((task) => task.id === reviewId);
@@ -1622,7 +1694,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
           await openTaskSession(savedTask.id, boardPath);
         } else if (executionChoice === "start_now") {
           await taskRequestStartNow(savedTask.id, current.revision, boardPath);
-        } else if (executionChoice !== current.mode) {
+        } else if (executionTouched && executionChoice !== current.mode) {
           await taskSetExecutionMode(savedTask.id, current.revision, executionChoice, boardPath);
         }
         // Core metadata writes change the revision outside the ordinary Task draft API.
@@ -2789,6 +2861,9 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
           const allColumnTasks = visibleTasks.filter((task) => task.column === column.id);
           const inReviewCount = column.id === "blocked"
             ? allColumnTasks.filter(isInReviewInbox).length : 0;
+          const eligibleColumnQueue = activeTasks.filter(task => task.column === column.id && queueEligible(task));
+          const queuedColumnCount = eligibleColumnQueue.filter(task => executionModes[task.id]?.mode === "queue").length;
+          const columnQueueMixed = queuedColumnCount > 0 && queuedColumnCount < eligibleColumnQueue.length;
           const columnTasks = orderCardsByDependencies(applyCardPlacements(allColumnTasks
             .filter((task) => !(column.id === "blocked" && hideBlockedInboxTasks && isInReviewInbox(task)))
             .filter((task) => !hideWaitingTasks || isComplete(task.id) || task.column === "in-progress" || readinessOf(task) !== "waiting")
@@ -2872,6 +2947,13 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
                   onPointerDown={(event) => event.stopPropagation()}
                   onMouseDown={(event) => event.stopPropagation()}
                 >
+                  {column.id === "ai-ready" && <button type="button"
+                    className={`queue-intent-toggle column-queue-toggle${column.auto_queue ? " queued" : ""}${columnQueueMixed ? " mixed" : ""}`}
+                    title={`${column.auto_queue ? "Disable" : "Enable"} AI Ready auto-queue for current and future eligible tasks · ${queuedColumnCount}/${eligibleColumnQueue.length} queued`}
+                    aria-label={`${column.auto_queue ? "Disable" : "Enable"} AI Ready auto-queue`}
+                    aria-pressed={!!column.auto_queue}
+                    disabled={busy}
+                    onClick={() => void toggleColumnQueue(column.id)}><QueueArrows /></button>}
                   <button type="button" className="column-quick-add" title={`Add task to ${column.name}`}
                     aria-label={`Add task to ${column.name}`} onClick={() => openCreate(column.id)}>+</button>
                   {column.id !== "draft" && !column.terminal && (
@@ -2996,6 +3078,15 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
                             {collapsedTaskIds.has(task.id) ? "▸" : "▾"}
                           </button>
                         )}
+                        {queueEligible(task) && <button type="button"
+                          className={`queue-intent-toggle card-queue-toggle${executionModes[task.id]?.mode === "queue" ? " queued" : ""}`}
+                          title={executionModes[task.id]?.mode === "queue" ? "Queued · click to return to Backlog" : "Backlog · click to Queue"}
+                          aria-label={`${executionModes[task.id]?.mode === "queue" ? "Unqueue" : "Queue"} ${task.id}`}
+                          aria-pressed={executionModes[task.id]?.mode === "queue"}
+                          disabled={busy || !executionModes[task.id]}
+                          onPointerDown={event => event.stopPropagation()}
+                          onMouseDown={event => event.stopPropagation()}
+                          onClick={event => { event.stopPropagation(); void toggleTaskQueue(task); }}><QueueArrows /></button>}
                         {task.icon && (
                           <span className={`task-icon ${task.icon}`} title={TASK_ICON_OPTIONS.find((item) => item.value === task.icon)?.label}>
                             <TaskIconGlyph icon={task.icon} />
@@ -3495,11 +3586,11 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
                     {isForUser(editor.draft) ? "●" : "○"} For user
                 </button>}
               </div>}
-              {editor.mode === "edit" && editor.original?.kind !== "epic" && (
-                <button type="button" className="button secondary" disabled={busy || (!hasTaskSession(editor.original) && !canSpawnTask(editor.original))}
-                  title={hasTaskSession(editor.original) ? "Open the linked T3 session" : "Spawn a T3 implementation worker for this task"}
+              {editor.mode === "edit" && !!editor.original && hasTaskSession(editor.original) && (
+                <button type="button" className="button secondary" disabled={busy}
+                  title="Open the linked T3 session"
                   onClick={() => openForTask(editor.original!)}>
-                  {hasTaskSession(editor.original) ? "Open Session" : "Spawn"}
+                  Open Session
                 </button>
               )}
               <button className="icon-button" aria-label="Close editor" onClick={() => closeEditor()} disabled={busy}>×</button>
@@ -3964,13 +4055,17 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
             </>)}
 
             <div className="modal-actions">
-              {!isAdvisoryEditor && (editor.draft.kind === "task" || editor.draft.kind === "recurring") && <div className="execution-mode-picker" role="group" aria-label="Execution mode">
+              {!isAdvisoryEditor && editor.draft.column === "ai-ready" && !editor.original?.claimed_by && !editor.original?.completed &&
+                (editor.draft.kind === "task" || editor.draft.kind === "recurring") &&
+                !editor.draft.attention.some(flag => ["blocked", "needs-user", "question"].includes(flag)) &&
+                editor.draft.depends_on.every(id => isComplete(id)) &&
+                <div className="execution-mode-picker" role="group" aria-label="Execution mode">
                 {(["backlog", "queue", "start_now"] as const).map((mode) =>
                   <button type="button" key={mode} disabled={busy || executionLoading}
-                    aria-pressed={executionChoice === mode}
-                    className={`execution-mode-option${executionChoice === mode ? " active" : ""}`}
+                    aria-pressed={editorQueueChoice === mode}
+                    className={`execution-mode-option${editorQueueChoice === mode ? " active" : ""}`}
                     title={mode === "start_now" ? "Record a durable foreground start request; no duplicate dispatch on uncertain delivery" : mode === "queue" ? "Register this task for background scheduling when the scheduler is installed" : "Keep this task in the backlog"}
-                    onClick={() => setExecutionChoice(mode)}>
+                    onClick={() => { setExecutionChoice(mode); setExecutionTouched(true); }}>
                     {mode === "start_now" ? "Start now" : mode === "queue" ? "Queue" : "Backlog"}
                   </button>)}
               </div>}

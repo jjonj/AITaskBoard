@@ -351,7 +351,7 @@ fn saves_dynamic_columns() {
         hidden: false,
         snoozed_until: None,
         awake_until: None,
-        ai_ready: false, advisory: false,
+        ai_ready: false, advisory: false, auto_queue: false,
         color: "#777777".into(),
     });
     let config = store.save_config(&root, config).unwrap();

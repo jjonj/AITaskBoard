@@ -93,6 +93,7 @@ impl FsTaskStore {
         }
         // When returning to Backlog, preserve prior request/receipt for explicit
         // cancel reconciliation. This method never cancels running OpenRig work.
+        mapping.insert(key("queue_manual"), serde_yaml::Value::Bool(true));
         mapping.insert(key("execution_mode"), serde_yaml::to_value(mode).map_err(|e| TaskStoreError::Parse(e.to_string()))?);
         persist(&path, &mapping, &body)
     }
@@ -165,6 +166,16 @@ impl FsTaskStore {
         let path = find_task_path(root, id)?;
         let (text, mut mapping, body) = load(&path)?;
         if revision(&text) != expected { return Err(TaskStoreError::Conflict(format!("{id} changed on disk"))); }
+        let queue = intent(&mapping, &text)?;
+        if queue.mode == ExecutionMode::Queue {
+            if queue.queue_attempt.is_some() && queue.queue_retired_receipt.is_none() {
+                return Err(TaskStoreError::Conflict(format!("{id} still has an outstanding Queue request. Reconcile/cancel it before Start now to prevent duplicate workers")));
+            }
+            // An unregistered Queue request can be retired locally before the
+            // independent one-shot Start request is persisted.
+            mapping.insert(key("execution_mode"), key("backlog"));
+            mapping.insert(key("queue_manual"), serde_yaml::Value::Bool(true));
+        }
         if mapping.get(key("start_now_request")).is_some() && mapping.get(key("start_now_receipt")).is_none() {
             return Err(TaskStoreError::Conflict(format!("{id} has an unreceipted Start now request; reconcile first")));
         }

@@ -3407,3 +3407,16 @@ body.card-dragging .project-tab-wrapper:not(.selected):hover {
 
 .hide-waiting-filter { display:inline-flex; align-items:center; gap:6px; color:#bac5d0; font-size:12px; white-space:nowrap; cursor:pointer; }
 .hide-waiting-filter input { accent-color:#46ab9d; margin:0; cursor:pointer; }
+
+/* Queue is persistent intent; claim/worker health uses separate card borders. */
+.queue-intent-toggle {
+  display:inline-grid; place-items:center; flex:0 0 auto; width:24px; height:24px;
+  padding:1px; border:1px solid #3e4a52; border-radius:6px;
+  color:#84939c; background:transparent; cursor:pointer;
+}
+.queue-intent-toggle.queued { color:#48c9bc; border-color:#347a76; background:#143333; }
+.queue-intent-toggle.mixed { color:#8cbab6; border-style:dashed; }
+.queue-intent-toggle:hover:not(:disabled), .queue-intent-toggle:focus-visible { border-color:#77d5c7; background:#1d4546; }
+.queue-intent-toggle:disabled { opacity:.38; cursor:default; }
+.card-queue-toggle { margin-right:2px; }
+.column-queue-toggle { width:28px; height:27px; }

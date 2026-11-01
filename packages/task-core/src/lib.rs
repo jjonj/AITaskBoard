@@ -7,7 +7,7 @@ pub use block_gate::challenge_agent_block;
 
 pub use model::*;
 pub use store::review::*;
-pub use store::{default_board_config, default_column_ai_ready, recurring_due, is_task_blocked, ExecutionIntent, ExecutionMode, FsTaskStore, MutationActor, TaskIdReservation, TaskStore, TaskStoreError, BLOCKED_COLUMN_ID};
+pub use store::{default_board_config, default_column_ai_ready, recurring_due, is_task_blocked, queue_task_ready, ExecutionIntent, ExecutionMode, FsTaskStore, MutationActor, TaskIdReservation, TaskStore, TaskStoreError, BLOCKED_COLUMN_ID};
 
 pub const SCHEMA_VERSION: u32 = 1;
 pub const DRAFT_COLUMN_ID: &str = "draft";

@@ -8,6 +8,7 @@ export type Column = {
   awake_until?: string | null;
   ai_ready: boolean;
   advisory?: boolean;
+  auto_queue?: boolean;
   color: string;
 };
 

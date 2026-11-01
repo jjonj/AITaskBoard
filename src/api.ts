@@ -56,6 +56,8 @@ export type ExecutionIntent = {
 };
 export const taskExecutionIntent = (id: string, path?: string) =>
   invoke<ExecutionIntent>("task_execution_intent", { path, id });
+export const taskExecutionModes = (path?: string) =>
+  invoke<Record<string, ExecutionIntent>>("task_execution_modes", { path });
 export const taskSetExecutionMode = (id: string, expectedRevision: string, mode: ExecutionMode, path?: string) =>
   invoke<ExecutionIntent>("task_set_execution_mode", { path, id, expectedRevision, mode });
 export const taskRequestStartNow = (id: string, expectedRevision: string, path?: string) =>

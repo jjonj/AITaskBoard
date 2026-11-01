@@ -134,6 +134,20 @@ fn task_execution_intent(path: Option<String>, id: String) -> Result<ExecutionIn
     FsTaskStore::default().execution_intent(&root(path), &id).map_err(|e| e.to_string())
 }
 
+/// One native read for card-level Queue state; no per-card renderer RPC storm.
+#[tauri::command]
+fn task_execution_modes(path: Option<String>) -> Result<std::collections::BTreeMap<String, ExecutionIntent>, String> {
+    let root = root(path);
+    let store = FsTaskStore::default();
+    let board = store.load(&root).map_err(|e| e.to_string())?;
+    let mut modes = std::collections::BTreeMap::new();
+    for task in board.tasks.into_iter().filter(|t| !t.archived &&
+        matches!(t.kind, TaskKind::Task | TaskKind::Recurring) && t.column == task_core::AI_READY_COLUMN_ID) {
+        modes.insert(task.id.clone(), store.execution_intent(&root, &task.id).map_err(|e| e.to_string())?);
+    }
+    Ok(modes)
+}
+
 #[tauri::command]
 fn task_set_execution_mode(path: Option<String>, id: String, expected_revision: String, mode: ExecutionMode) -> Result<ExecutionIntent, String> {
     FsTaskStore::default().set_execution_mode(&root(path), &id, &expected_revision, mode).map_err(|e| e.to_string())
@@ -593,6 +607,7 @@ pub fn run() {
             user_queue_project_ids,
             create_task,
             task_execution_intent,
+            task_execution_modes,
             task_sync_queue,
             task_queue_overview,
             task_queue_capacity,

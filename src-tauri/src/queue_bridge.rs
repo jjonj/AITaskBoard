@@ -5,7 +5,7 @@ use std::{path::{Path, PathBuf}, time::Duration};
 use serde::Serialize;
 use serde_json::{json, Value};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use task_core::{FsTaskStore, TaskStore, ExecutionMode, TaskKind, Task};
+use task_core::{FsTaskStore, TaskStore, ExecutionMode, TaskKind, Task, queue_task_ready};
 use reqwest::{Client, StatusCode};
 
 const DAEMON: &str = "http://127.0.0.1:7433";
@@ -98,16 +98,17 @@ fn terminal_state(row: &Value) -> bool {
 pub(crate) async fn sync(path: PathBuf, id: String) -> Result<QueueSyncStatus, String> {
     let store = FsTaskStore::default();
     let snapshot = store.load(&path).map_err(|e| e.to_string())?;
-    let task = snapshot.tasks.into_iter().find(|task| task.id == id)
+    let task = snapshot.tasks.iter().find(|task| task.id == id).cloned()
         .ok_or_else(|| format!("{id} no longer exists in this board"))?;
     let execution = store.execution_intent(&path, &id).map_err(|e| e.to_string())?;
     // Archived tasks are no longer dispatchable even when archived directly
     // from a nonterminal column. A queued archived task must cancel its row.
     let finished = task.archived || task.completed.is_some() || snapshot.config.columns.iter().any(|col| col.terminal && col.id == task.column);
+    let dispatchable = queue_task_ready(&snapshot, &task);
     let reference = ref_json(&path, &id);
     let request = execution.queue_request.as_deref();
     let qid = request.map(|request| format!("qitem-taskboard-{request}"));
-    if !matches!(task.kind, TaskKind::Task|TaskKind::Recurring) || finished || execution.mode == ExecutionMode::Backlog {
+    if !matches!(task.kind, TaskKind::Task|TaskKind::Recurring) || finished || execution.mode == ExecutionMode::Backlog || (!dispatchable && execution.queue_attempt.is_some()) {
         if let (Some(qitem), Some(request), Some(attempt)) = (qid.as_deref(),request,execution.queue_attempt.as_deref()) {
             if attempt != request || execution.queue_receipt.as_deref().is_some_and(|receipt| receipt != qitem) {
                 return Ok(status("conflict",qid,Some("Queue attempt or receipt identity mismatch".into())));
@@ -151,6 +152,9 @@ pub(crate) async fn sync(path: PathBuf, id: String) -> Result<QueueSyncStatus, S
             return Ok(status("conflict",qid,Some("Queue receipt exists without its registration attempt".into())));
         }
         return Ok(status("not_queued",qid,None));
+    }
+    if !dispatchable {
+        return Ok(status("unavailable",qid,Some("Task not executable: dependencies, claim, blocker or column must be cleared before dispatch".into())));
     }
     let request = match request {
         Some(request) => request,

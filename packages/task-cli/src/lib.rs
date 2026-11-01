@@ -1160,6 +1160,7 @@ fn run_column(store: &FsTaskStore, root: &Path, command: &ColumnCommand) -> Resu
                 awake_until: None,
                 ai_ready: task_core::default_column_ai_ready(&args.id.clone().unwrap_or_else(|| slugify(&args.name)), &args.name, args.terminal),
                 advisory: false,
+                auto_queue: false,
                 color: column_color(order),
             });
             let saved = store.save_config(root, config).map_err(map_store_error)?;
@@ -1860,7 +1861,7 @@ mod tests {
             hidden: false,
             snoozed_until: None,
             awake_until: None,
-            ai_ready: true, advisory: false,
+            ai_ready: true, advisory: false, auto_queue: false,
             color: "#777777".into(),
         });
         store.save_config(&root, config).unwrap();

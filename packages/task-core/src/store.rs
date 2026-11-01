@@ -184,6 +184,7 @@ pub fn default_board_config(name: impl Into<String>) -> BoardConfig {
                 awake_until: None,
                 ai_ready: false,
                 advisory: false,
+                auto_queue: false,
                 color: "#8e7da8".into(),
             },
             Column {
@@ -196,6 +197,7 @@ pub fn default_board_config(name: impl Into<String>) -> BoardConfig {
                 awake_until: None,
                 ai_ready: true,
                 advisory: false,
+                auto_queue: false,
                 color: "#718f78".into(),
             },
             Column {
@@ -208,6 +210,7 @@ pub fn default_board_config(name: impl Into<String>) -> BoardConfig {
                 awake_until: None,
                 ai_ready: true,
                 advisory: false,
+                auto_queue: false,
                 color: "#7388a8".into(),
             },
             Column {
@@ -220,6 +223,7 @@ pub fn default_board_config(name: impl Into<String>) -> BoardConfig {
                 awake_until: None,
                 ai_ready: false,
                 advisory: false,
+                auto_queue: false,
                 color: "#a48669".into(),
             },
             Column {
@@ -232,6 +236,7 @@ pub fn default_board_config(name: impl Into<String>) -> BoardConfig {
                 awake_until: None,
                 ai_ready: false,
                 advisory: false,
+                auto_queue: false,
                 color: "#6f8679".into(),
             },
         ],
@@ -435,6 +440,29 @@ impl FsTaskStore {
             apply_completion_state(&snapshot.config, &mut released);
             write_text_atomic(&path, &render_task(&released, Some(&existing))?)?;
             changed = true;
+        }
+        Ok(changed)
+    }
+
+    /// Inherit a column Queue default only when prerequisites have become ready.
+    /// No polling or dispatch occurs here; repeated loads are no-ops after the
+    /// first durable mode/request transition.
+    fn maintain_auto_queue(&self, snapshot: &BoardSnapshot) -> Result<bool, TaskStoreError> {
+        let mut changed = false;
+        for task in snapshot.tasks.iter().filter(|task| {
+            !task.archived && task.completed.is_none() && task.claimed_by.is_none() &&
+            matches!(task.kind, TaskKind::Task | TaskKind::Recurring) &&
+            (task.attention.contains(&TaskAttention::Priority) ||
+                snapshot.config.columns.iter().any(|c| c.id == task.column && c.auto_queue))
+        }) {
+            let path = PathBuf::from(&task.path);
+            let before = fs::read_to_string(&path)?;
+            if revision(&before) != task.revision { continue; }
+            let after = queue_policy_text(&before, task, snapshot, Some(task))?;
+            if after != before {
+                write_text_atomic(&path, &after)?;
+                changed = true;
+            }
         }
         Ok(changed)
     }
@@ -707,6 +735,9 @@ impl FsTaskStore {
         if self.maintain_dependency_unblocks(&snapshot)? {
             snapshot = self.load_unlocked(root)?;
         }
+        if self.maintain_auto_queue(&snapshot)? {
+            snapshot = self.load_unlocked(root)?;
+        }
         if self.maintain_auto_drafts(&snapshot)? {
             snapshot = self.load_unlocked(root)?;
         }
@@ -943,7 +974,7 @@ impl FsTaskStore {
         apply_completion_state(&snapshot.config, &mut task);
         apply_blocked_state(None, &mut task, actor)?;
         validate_task(&snapshot, &task)?;
-        let text = render_task(&task, None)?;
+        let text = queue_policy_text(&render_task(&task, None)?, &task, &snapshot, None)?;
         write_new(&path, &text)?;
         if let Some((_, reservation_file)) = reserved {
             // Task creation is already durable; stale reservation cleanup is safe.
@@ -1061,6 +1092,7 @@ impl FsTaskStore {
         let rendered = if task.claimed_by != previous.claimed_by {
             render_with_claim_token(&task, &existing, None)?
         } else { render_task(&task, Some(&existing))? };
+        let rendered = queue_policy_text(&rendered, &task, &snapshot, Some(&previous))?;
         let text = update_activity(&rendered, &existing, &previous, &task, &snapshot.config)?;
         write_text_atomic(&path, &text)?;
         task.revision = revision(&text);
@@ -2494,6 +2526,62 @@ fn parse_task(path: &Path, archived: bool, text: &str) -> Result<Task, TaskStore
         path: path.to_string_lossy().to_string(),
         revision: revision(text),
     })
+}
+
+/// Single source of dispatch eligibility for the native OpenRig producer.
+pub fn queue_task_ready(snapshot: &BoardSnapshot, task: &Task) -> bool {
+    !task.archived && task.completed.is_none() && task.claimed_by.is_none() &&
+        matches!(task.kind, TaskKind::Task | TaskKind::Recurring) &&
+        task.column == AI_READY_COLUMN_ID &&
+        is_todo(&snapshot.config, &task.column) &&
+        !is_task_blocked(task) && !pending_human_request(task) &&
+        ensure_dependencies_complete_for(&snapshot.tasks, &task.depends_on).is_ok()
+}
+
+/// Apply only durable policy-derived Queue intent. This is a metadata write,
+/// never a worker start; the existing OpenRig bridge owns dispatch/reconciliation.
+fn queue_policy_text(
+    text: &str, task: &Task, snapshot: &BoardSnapshot, previous: Option<&Task>,
+) -> Result<String, TaskStoreError> {
+    let Some(column) = snapshot.config.columns.iter().find(|c| c.id == task.column) else {
+        return Ok(text.to_owned());
+    };
+    if task.archived || task.completed.is_some() || task.claimed_by.is_some() ||
+        !matches!(task.kind, TaskKind::Task | TaskKind::Recurring) ||
+        task.column != AI_READY_COLUMN_ID || !is_todo(&snapshot.config, &task.column) ||
+        task.attention.iter().any(|a| matches!(a, TaskAttention::Blocked | TaskAttention::NeedsUser | TaskAttention::Question)) ||
+        task.question.as_ref().is_some_and(|q| q.answer.is_none()) ||
+        task.review_status.as_deref() == Some("open") {
+        return Ok(text.to_owned());
+    }
+    let newly_prioritized = task.attention.contains(&TaskAttention::Priority) &&
+        previous.is_none_or(|before| !before.attention.contains(&TaskAttention::Priority) ||
+            before.column != task.column);
+    if !column.auto_queue && !task.attention.contains(&TaskAttention::Priority) {
+        return Ok(text.to_owned());
+    }
+    let (yaml, body) = split_frontmatter(text)?;
+    let mut map: serde_yaml::Mapping = serde_yaml::from_str(&yaml)
+        .map_err(|e| TaskStoreError::Parse(e.to_string()))?;
+    let key = |s: &str| serde_yaml::Value::String(s.into());
+    let mut changed = false;
+    if newly_prioritized && map.get(key("queue_inherit")) != Some(&serde_yaml::Value::Bool(true)) {
+        map.insert(key("queue_inherit"), serde_yaml::Value::Bool(true));
+        changed = true;
+    }
+    let inherited = map.get(key("queue_inherit")).and_then(|v| v.as_bool()) == Some(true);
+    let manual = map.get(key("queue_manual")).and_then(|v| v.as_bool()) == Some(true);
+    let queued = map.get(key("execution_mode")).and_then(|v| v.as_str()) == Some("queue");
+    if (column.auto_queue || inherited) && !manual && !queued &&
+        map.get(key("queue_registration_attempt")).is_none() &&
+        ensure_dependencies_complete_for(&snapshot.tasks, &task.depends_on).is_ok() {
+        map.insert(key("execution_mode"), key("queue"));
+        map.insert(key("queue_request"), key(&uuid::Uuid::new_v4().to_string()));
+        changed = true;
+    }
+    if !changed { return Ok(text.to_owned()); }
+    Ok(format!("---\n{}---\n{}", serde_yaml::to_string(&map)
+        .map_err(|e| TaskStoreError::Parse(e.to_string()))?, body))
 }
 
 fn render_task(task: &Task, existing: Option<&str>) -> Result<String, TaskStoreError> {
