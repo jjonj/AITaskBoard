@@ -8,6 +8,7 @@ type Item = { path: string; project: string; task: Task };
 type Props = {
   review: Item;
   round: ReviewRound;
+  history: ReviewRound[];
   items: Item[];
   selectedKey: string;
   onSelectTask: (key: string) => void;
@@ -46,6 +47,9 @@ type Props = {
   primaryVerdict: string;
   primaryReady: boolean;
   submit: (verdict: string) => Promise<void>;
+  onNoteOnly: () => Promise<void>;
+  onMoveToDraft: () => Promise<void>;
+  onArchive: () => Promise<void>;
   onReconsider: () => Promise<void>;
 };
 
@@ -58,12 +62,13 @@ const isWeb = (artifact: ReviewArtifact) => artifact.kind === "html" || artifact
  */
 export function VisualReviewInspector(props: Props) {
   const {
-    review, round, items, selectedKey, onSelectTask, onClose, onOpenSession, sessionOpening, allBoards, showResolved,
+    review, round, history, items, selectedKey, onSelectTask, onClose, onOpenSession, sessionOpening, allBoards, showResolved,
     onAllBoards, onShowResolved, playable, activeIndex, onFocusArtifact, onChooseArtifact,
     choice, ranking, pins, setPins, pinning, onTogglePin, addPin, renderArtifact,
     posterOf, iframeWidth, onIframeWidth, note, setNote, saving,
     outcome, onOutcome, onSkip, onSnooze,
-    resolved, awaitingNextRound, error, primaryVerdict, primaryReady, submit, onReconsider,
+    resolved, awaitingNextRound, error, primaryVerdict, primaryReady, submit, onNoteOnly,
+    onMoveToDraft, onArchive, onReconsider,
   } = props;
   const [queueExpanded, setQueueExpanded] = useState(false);
   const [feedbackExpanded, setFeedbackExpanded] = useState(true);
@@ -72,6 +77,7 @@ export function VisualReviewInspector(props: Props) {
   const [opacity, setOpacity] = useState(50);
   const [zoom, setZoom] = useState(1);
   const [openError, setOpenError] = useState("");
+  const [moreOpen, setMoreOpen] = useState(false);
   const stripRef = useRef<HTMLDivElement>(null);
   const active = playable[Math.min(activeIndex, playable.length - 1)];
   const canCompare = active?.kind === "image" && round.previous?.kind === "image";
@@ -168,6 +174,7 @@ export function VisualReviewInspector(props: Props) {
           title="Back to Inbox/board (Esc)">← Inbox <span className="review-visual-count">{items.length}</span></button>
         <div className="review-visual-title"><small>{review.project} · {review.task.id} · Round {round.number}</small>
           <strong title={review.task.title}>{review.task.title}</strong></div>
+        <span className={`inbox-task-column-chip column-${review.task.column}`}>{review.task.column}</span>
         <span className="review-visual-mode">{round.mode.toUpperCase()}</span>
         <div className="review-visual-header-actions">
           {(review.task.claimed_by || review.task.live?.with_me) && (
@@ -177,6 +184,14 @@ export function VisualReviewInspector(props: Props) {
               {sessionOpening ? "Opening…" : "Open Session"}
             </button>
           )}
+          <div className="inbox-more-wrap">
+            <button type="button" className="button secondary" aria-label="More Inbox actions"
+              aria-expanded={moreOpen} onClick={() => setMoreOpen(open => !open)}>⋯</button>
+            {moreOpen && <div className="inbox-more-menu">
+              <button disabled={saving} type="button" onClick={() => { setMoreOpen(false); void onMoveToDraft(); }}>Move to Draft</button>
+              <button disabled={saving} type="button" onClick={() => { setMoreOpen(false); void onArchive(); }}>Archive</button>
+            </div>}
+          </div>
           <button type="button" className={"button " + (feedbackExpanded ? "primary" : "secondary")}
             onClick={() => setFeedbackExpanded((value) => !value)} aria-pressed={feedbackExpanded}>
             ☷ Feedback</button>
@@ -319,7 +334,10 @@ export function VisualReviewInspector(props: Props) {
             onOutcome={onOutcome}
             onSkip={onSkip}
             onSnooze={onSnooze}
-            onSubmit={() => void submit(outcome)}
+            onSubmit={(verdict) => void submit(verdict ?? primaryVerdict)}
+            primaryLabel={round.mode === "approve" && review.task.column === "done" ? "Done" : undefined}
+            notePresent={!!note.trim()}
+            onNoteOnly={() => void onNoteOnly()}
             busy={saving}
             disabled={resolved}
             submitDisabled={primaryIncomplete}
@@ -336,16 +354,15 @@ export function VisualReviewInspector(props: Props) {
               aria-label="Hide feedback">×</button></header>
           <div className="review-visual-feedback-content">
             <p className="review-visual-judge">{round.judge}</p>
-            <label className="review-visual-response-choice">Your response
-              <select aria-label="Review decision" value={outcome}
-                disabled={saving || resolved} onChange={(event) => onOutcome(event.target.value)}>
-                <option value="">Select outcome…</option>
-                {outcomeOptions.map((option) => <option key={option.value}
-                  value={option.value}>{option.label}</option>)}
-              </select>
-            </label>
+
             <label className="review-note">Overall note
               <textarea rows={6} value={note} disabled={resolved}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey && note.trim()) {
+                    event.preventDefault();
+                    void onNoteOnly();
+                  }
+                }}
                 onChange={(event) => setNote(event.target.value)}
                 placeholder="Tell the agent what to keep or change." />
             </label>
@@ -366,6 +383,10 @@ export function VisualReviewInspector(props: Props) {
                   onClick={() => setPins(pins.filter((_, i) => i !== index))}>×</button>}
               </li>)}
             </ol>}
+            {history.length > 0 && <details className="review-visual-references">
+              <summary>Prior rounds · {history.length}</summary>
+              {history.map(past => <p key={past.number}>Round {past.number} · {past.mode} · {past.result?.verdict ?? "No verdict"} — {past.judge}</p>)}
+            </details>}
             <details className="review-visual-references">
               <summary>References · {round.references.length + (round.previous ? 1 : 0)}</summary>
               {round.previous && <p>Previous: {round.previous.label}</p>}

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
-import { listProjects, loadBoard, openTaskSession, updateTask, type ProjectTab } from "./api";
+import { archiveTask, listProjects, loadBoard, openTaskSession, taskSyncQueue, updateTask, type ProjectTab } from "./api";
 import { reviewAsset, reviewReconsider, reviewResolve, reviewShow,
   type ReviewArtifact, type ReviewManifest, type ReviewPin } from "./reviewApi";
 import type { Task } from "./types";
@@ -64,6 +64,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   const [userAnswer, setUserAnswer] = useState("");
   const [snoozedLocally, setSnoozedLocally] = useState<Record<string, number>>(loadReviewSnoozes);
   const [responseOutcome, setResponseOutcome] = useState("");
+  const [moreOpen, setMoreOpen] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const reviewTask = items.find((item) => keyOf(item) === selectedKey);
@@ -328,7 +329,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
     });
   };
 
-  const submitUser = async (markDone = false) => {
+  const submitUser = async (markDone = false, reopen = false) => {
     if (!reviewTask || isVisualReview || saving) return;
     setSaving(true);
     setError("");
@@ -338,10 +339,10 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
         !!old.question && !old.question.answer;
       // The green Done action is an explicit acceptance/dismissal, even if
       // another option was selected before it was clicked.
-      const answer = aiQuestion && markDone ? "Done"
+      const answer = reopen ? "Needs changes" : aiQuestion && markDone ? "Done"
         : userAnswer.trim() || (aiQuestion ? userNote.trim() : "");
       if (aiQuestion && !answer) throw new Error("Choose a response or enter feedback before submitting.");
-      const needsChanges = aiQuestion && !markDone && answer.toLowerCase() === "needs changes";
+      const needsChanges = reopen || (aiQuestion && !markDone && answer.toLowerCase() === "needs changes");
       // An Inbox Done response closes an AI request; it does not turn the
       // implementation task into Done. For user tasks remain directly completable.
       const attention = (aiQuestion ? old.attention.filter((flag) => flag !== "question" && flag !== "needs-user")
@@ -351,7 +352,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
         .filter((flag) => flag !== "question" || !answer);
       if (aiQuestion && !attention.includes("user-note")) attention.push("user-note");
       let doneColumn: string | undefined;
-      if (markDone && !aiQuestion) {
+      if (markDone) {
         const board = await loadBoard(reviewTask.path);
         doneColumn = board.config.columns.find((col) => col.id === "done" && col.terminal)?.id
           ?? board.config.columns.find((col) => col.terminal)?.id;
@@ -359,11 +360,12 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       }
       const updated: Task = {
         ...old,
-        ...(needsChanges ? { column: "ai-ready", claimed_by: null } : doneColumn ? { column: doneColumn } : {}),
+        ...(needsChanges ? { column: "ai-ready", claimed_by: null, blocked_reason: null } :
+          doneColumn ? { column: doneColumn, claimed_by: null } : {}),
         user_notes: userNote,
         acceptance_criteria: userCriteria.split(/\r?\n/).filter(Boolean),
-        kind: aiQuestion ? old.kind : markDone ? "task" : keepForUser ? (old.kind === "epic" ? "epic" : "for_user") : "task",
-        attention,
+        kind: needsChanges ? "task" : aiQuestion ? old.kind : markDone ? "task" : keepForUser ? (old.kind === "epic" ? "epic" : "for_user") : "task",
+        attention: needsChanges ? attention.filter(flag => flag !== "blocked" && flag !== "needs-user") : attention,
         question: old.question ? { ...old.question, answer: answer || null } : null,
       };
       const saved = await updateTask(updated, reviewTask.path);
@@ -390,6 +392,46 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       setSaving(false);
     }
   };
+  const moveSelectedToDraft = async () => {
+    if (!reviewTask || saving || reviewTask.task.kind === "epic") return;
+    setSaving(true);
+    setMoreOpen(false);
+    setError("");
+    try {
+      const board = await loadBoard(reviewTask.path);
+      const current = board.tasks.find(t => t.id === reviewTask.task.id);
+      if (!current) throw new Error("Task no longer exists");
+      await updateTask({
+        ...current, column: "draft", claimed_by: null,
+        blocked_reason: null, review_status: null,
+        attention: current.attention.filter(flag =>
+          !["question", "needs-user", "blocked"].includes(flag)),
+        question: current.question ? { ...current.question,
+          answer: current.question.answer || "Moved to Draft" } : null,
+      }, reviewTask.path);
+      await taskSyncQueue(current.id, reviewTask.path).catch(() => null);
+      advance(keyOf(reviewTask));
+      await refresh();
+    } catch (cause) {
+      setError(`Move to Draft failed: ${String(cause)}`);
+    } finally { setSaving(false); }
+  };
+  const archiveSelected = async () => {
+    if (!reviewTask || saving) return;
+    if (!window.confirm(`Archive ${reviewTask.task.id}? This retains its history but clears active ownership and Queue intent.`)) return;
+    setSaving(true);
+    setMoreOpen(false);
+    setError("");
+    try {
+      await archiveTask(reviewTask.task.id, reviewTask.path);
+      await taskSyncQueue(reviewTask.task.id, reviewTask.path).catch(() => null);
+      advance(keyOf(reviewTask));
+      await refresh();
+    } catch (cause) {
+      setError(`Archive failed: ${String(cause)}`);
+    } finally { setSaving(false); }
+  };
+
   const snoozeSelected = (milliseconds: number) => {
     if (!reviewTask || saving) return;
     const until = Date.now() + milliseconds;
@@ -454,6 +496,27 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       await refresh();
     } finally { setSaving(false); }
   };
+  const submitNoteOnly = async () => {
+    if (!reviewTask || !isVisualReview || !note.trim() || saving || resolved) return;
+    setSaving(true);
+    setError("");
+    try {
+      const board = await loadBoard(reviewTask.path);
+      const latest = board.tasks.find(task => task.id === reviewTask.task.id);
+      if (!latest || latest.archived) throw new Error("Original task is unavailable");
+      const old = latest.user_notes.trim();
+      const message = note.trim();
+      await updateTask({ ...latest,
+        user_notes: [old, message].filter(Boolean).join("\n\n"),
+        attention: [...new Set([...latest.attention, "user-note" as const])],
+      }, reviewTask.path);
+      setNote("");
+      await refresh(); // The review remains open; the next verdict uses the updated task revision.
+    } catch (cause) {
+      setError(`Unable to submit note: ${String(cause)}`);
+    } finally { setSaving(false); }
+  };
+
   const primaryVerdict = round?.mode === "pick" ? "picked"
     : round?.mode === "approve" ? "approved"
     : round?.mode === "rank" ? "ranked" : "marked";
@@ -592,6 +655,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
     return <VisualReviewInspector
       review={reviewTask}
       round={round}
+      history={manifest?.rounds.slice(0, -1) ?? []}
       items={items}
       selectedKey={selectedKey}
       onSelectTask={setSelectedKey}
@@ -631,6 +695,9 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       primaryVerdict={primaryVerdict}
       primaryReady={primaryReady}
       submit={submit}
+      onNoteOnly={submitNoteOnly}
+      onMoveToDraft={moveSelectedToDraft}
+      onArchive={archiveSelected}
       onReconsider={reconsider}
     />;
   }
@@ -710,7 +777,15 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
                     {openingTaskSession ? "Opening…" : "Open Session"}
                   </button>
                 )}
-                <span className="review-mode-label">{reviewTask.task.question?.request_type?.replace('-', ' ').toUpperCase() || "RESPONSE"}</span>
+                <span className={`inbox-task-column-chip column-${reviewTask.task.column}`}>{reviewTask.task.column}</span>
+                <div className="inbox-more-wrap">
+                  <button className="button secondary" type="button" aria-label="More Inbox actions"
+                    aria-expanded={moreOpen} onClick={() => setMoreOpen(value => !value)}>⋯</button>
+                  {moreOpen && <div className="inbox-more-menu">
+                    <button type="button" disabled={saving} onClick={() => void moveSelectedToDraft()}>Move to Draft</button>
+                    <button type="button" disabled={saving} onClick={() => void archiveSelected()}>Archive</button>
+                  </div>}
+                </div>
               </div>
             </header>
             <div className="review-workspace">
@@ -728,7 +803,12 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
                     </div>
                   )}
                   <label>Your response
-                    <textarea value={userNote} onChange={(event) => {
+                    <textarea onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
+                        event.preventDefault();
+                        void submitUser();
+                      }
+                    }} value={userNote} onChange={(event) => {
                       setUserNote(event.currentTarget.value);
                       setKeepForUser(false);
                     }}
@@ -768,6 +848,8 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
               onSnooze={snoozeSelected}
               onSubmit={() => void submitUser()}
               onComplete={() => void submitUser(true)}
+              onReopen={() => void submitUser(false, true)}
+              notePresent={!!userNote.trim() || !!userAnswer.trim()}
               busy={saving}
               summary={reviewTask.task.kind === "for_user"
                 ? "Respond or complete this human-owned task"

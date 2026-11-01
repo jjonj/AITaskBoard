@@ -1500,6 +1500,23 @@ impl TaskStore for FsTaskStore {
                 "archive already contains {id}"
             )));
         }
+        // Explicit human archival revokes ownership and future Queue intent,
+        // while retaining exact old queue request/receipt IDs for safe remote
+        // cancellation on the next reconciliation (never blindly retry).
+        let old_text = fs::read_to_string(&source)?;
+        let mut archived = parse_task(&source, false, &old_text)?;
+        archived.claimed_by = None;
+        archived.live = None;
+        let rendered = render_task(&archived, Some(&old_text))?;
+        let (yaml, body) = split_frontmatter(&rendered)?;
+        let mut metadata: serde_yaml::Mapping = serde_yaml::from_str(&yaml)
+            .map_err(|e| TaskStoreError::Parse(e.to_string()))?;
+        metadata.insert(serde_yaml::Value::String("execution_mode".into()),
+            serde_yaml::Value::String("backlog".into()));
+        metadata.insert(serde_yaml::Value::String("queue_manual".into()),
+            serde_yaml::Value::Bool(true));
+        write_text_atomic(&source, &format!("---\n{}---\n{}", serde_yaml::to_string(&metadata)
+            .map_err(|e| TaskStoreError::Parse(e.to_string()))?, body))?;
         fs::rename(&source, &destination)?;
         let text = fs::read_to_string(&destination)?;
         parse_task(&destination, true, &text)

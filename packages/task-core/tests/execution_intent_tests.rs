@@ -190,3 +190,21 @@ fn priority_set_in_draft_waits_until_explicitly_moved_to_ai_ready() {
     assert_eq!(updated.column, "ai-ready");
     assert_eq!(store.execution_intent(root, &updated.id).unwrap().mode, ExecutionMode::Queue);
 }
+
+#[test]
+fn archive_revokes_queue_intent_but_retains_exact_receipt_for_cancellation() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let store = FsTaskStore;
+    store.ensure_board(root, "Archive queue").unwrap();
+    let task = store.create(root, serde_json::from_value(serde_json::json!({
+        "title":"Archive me", "column":"ai-ready", "parent":null
+    })).unwrap()).unwrap();
+    let queued = store.set_execution_mode(root,&task.id,&task.revision,ExecutionMode::Queue).unwrap();
+    let archived = store.archive(root,&task.id).unwrap();
+    assert!(archived.archived);
+    assert!(archived.claimed_by.is_none());
+    let intent = store.execution_intent(root,&task.id).unwrap();
+    assert_eq!(intent.mode, ExecutionMode::Backlog);
+    assert_eq!(intent.queue_request, queued.queue_request);
+}

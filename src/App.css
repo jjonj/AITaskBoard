@@ -3420,3 +3420,23 @@ body.card-dragging .project-tab-wrapper:not(.selected):hover {
 .queue-intent-toggle:disabled { opacity:.38; cursor:default; }
 .card-queue-toggle { margin-right:2px; }
 .column-queue-toggle { width:28px; height:27px; }
+
+/* Inbox task origin is immediately visible, independent of its review verdict. */
+.inbox-task-column-chip { display:inline-flex; flex:0 0 auto; align-items:center;
+  padding:5px 11px; border:1px solid #4b7190; border-radius:7px;
+  color:#eaf5ff; background:#34526c; font-size:11px; font-weight:800;
+  text-transform:uppercase; letter-spacing:.035em; white-space:nowrap; }
+.inbox-task-column-chip.column-done { border-color:#459778; background:#256b55; }
+.inbox-task-column-chip.column-blocked { border-color:#ae7b4b; background:#744d31; }
+.inbox-task-column-chip.column-in-progress { border-color:#6889bf; background:#375479; }
+.inbox-task-column-chip.column-ai-ready { border-color:#459d9a; background:#256d6b; }
+.inbox-task-column-chip.column-draft { border-color:#8d769f; background:#665078; }
+
+.inbox-more-wrap { position:relative; display:inline-flex; flex:none; }
+.inbox-more-menu { position:absolute; z-index:350; top:calc(100% + 4px); right:0;
+  display:grid; min-width:165px; border:1px solid #515e6a; border-radius:8px;
+  padding:5px; background:#242d35; box-shadow:0 14px 28px #000a; }
+.inbox-more-menu button { padding:8px 10px; border:0; background:transparent;
+  color:#d9e1e8; border-radius:5px; font:inherit; text-align:left; cursor:pointer; }
+.inbox-more-menu button:hover:not(:disabled) { background:#3b4a56; }
+.inbox-more-menu button:disabled { opacity:.5; cursor:default; }

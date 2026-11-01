@@ -2,7 +2,6 @@ import { useState } from "react";
 import type { ReviewRound } from "./reviewApi";
 
 export type InboxOutcome = { value: string; label: string };
-
 export function reviewOutcomes(mode: ReviewRound["mode"]): InboxOutcome[] {
   const primary: Record<ReviewRound["mode"], InboxOutcome> = {
     approve: { value: "approved", label: "Approve" },
@@ -10,14 +9,10 @@ export function reviewOutcomes(mode: ReviewRound["mode"]): InboxOutcome[] {
     rank: { value: "ranked", label: "Submit ranking" },
     markup: { value: "marked", label: "Send annotated feedback" },
   };
-  return [
-    primary[mode],
-    { value: "rejected", label: "Request changes" },
-    ...(mode === "approve" || mode === "pick"
-      ? [{ value: "more-variants", label: "More variants" }] : []),
-  ];
+  return [primary[mode], { value: "rejected", label: "Request changes" },
+    ...(mode === "approve" || mode === "pick" ?
+      [{ value: "more-variants", label: "More variants" }] : [])];
 }
-
 export const SNOOZE_DURATIONS = [
   { label: "1 hour", ms: 60 * 60 * 1000 },
   { label: "24 hours", ms: 24 * 60 * 60 * 1000 },
@@ -31,8 +26,12 @@ type Props = {
   onOutcome: (value: string) => void;
   onSkip: () => void;
   onSnooze: (milliseconds: number) => void;
-  onSubmit: () => void;
+  onSubmit: (verdict?: string) => void;
   onComplete?: () => void;
+  onReopen?: () => void;
+  onNoteOnly?: () => void;
+  notePresent?: boolean;
+  primaryLabel?: string;
   busy: boolean;
   disabled?: boolean;
   submitDisabled?: boolean;
@@ -40,53 +39,48 @@ type Props = {
 };
 
 export function InboxResponseFooter({
-  mode, outcome, outcomes = [], onOutcome, onSkip, onSnooze, onSubmit, onComplete,
+  mode, outcomes = [], onOutcome, onSkip, onSnooze, onSubmit,
+  onComplete, onReopen, onNoteOnly, notePresent = false, primaryLabel,
   busy, disabled = false, submitDisabled = false, summary,
 }: Props) {
   const [snooze, setSnooze] = useState<number>(24 * 60 * 60 * 1000);
-  const canSend = !busy && !disabled && !submitDisabled &&
-    (mode === "reply" || outcomes.some((option) => option.value === outcome));
-  return (
-    <footer className="inbox-response-footer" aria-label="Inbox response actions">
-      <div className="inbox-response-left">
-        <button className="button secondary" type="button" disabled={busy} onClick={onSkip}>
-          Skip
-        </button>
-        <div className="inbox-response-snooze">
-          <button className="button secondary" type="button" disabled={busy}
-            onClick={() => onSnooze(snooze)} title="Hide this item for the chosen duration">
-            Snooze
-          </button>
-          <select aria-label="Snooze duration" value={snooze} disabled={busy}
-            onChange={(event) => setSnooze(Number(event.target.value))}>
-            {SNOOZE_DURATIONS.map((duration) =>
-              <option key={duration.ms} value={duration.ms}>{duration.label}</option>)}
-          </select>
-        </div>
+  return <footer className="inbox-response-footer" aria-label="Inbox response actions">
+    <div className="inbox-response-left">
+      <button className="button secondary" type="button" disabled={busy} onClick={onSkip}>Skip</button>
+      <div className="inbox-response-snooze">
+        <button className="button secondary" type="button" disabled={busy}
+          onClick={() => onSnooze(snooze)} title="Hide this item for the chosen duration">Snooze</button>
+        <select aria-label="Snooze duration" value={snooze} disabled={busy}
+          onChange={(event) => setSnooze(Number(event.target.value))}>
+          {SNOOZE_DURATIONS.map((span) =>
+            <option key={span.ms} value={span.ms}>{span.label}</option>)}
+        </select>
       </div>
-      {summary && <span className="inbox-response-summary">{summary}</span>}
-      <div className="inbox-response-right">
-        <label className="inbox-response-outcome">Outcome
-          {mode === "visual" ?
-            <select aria-label="Response outcome" value={outcome} disabled={busy || disabled}
-              onChange={(event) => onOutcome(event.target.value)}>
-              <option value="">Select outcome…</option>
-              {outcomes.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-            </select>
-            : <span>Respond</span>}
-        </label>
-        {mode === "reply" && onComplete && (
-          <button className="button secondary" type="button"
-            disabled={busy || disabled} onClick={onComplete}
-            title="Accept and close this request; for a human-owned task, also move it to Done">
-            ✅ Done
-          </button>
-        )}
-        <button className="button primary inbox-response-submit" type="button"
-          disabled={!canSend} onClick={onSubmit} title={mode === "visual" && !outcome ? "Choose an outcome before submitting" : undefined}>
-          {busy ? "Saving…" : "Submit & Next →"}
-        </button>
-      </div>
-    </footer>
-  );
+    </div>
+    {summary && <span className="inbox-response-summary">{summary}</span>}
+    <div className="inbox-response-right">
+      {mode === "visual" ? <>
+        {notePresent && onNoteOnly && <button className="button secondary" type="button"
+          disabled={busy || disabled} onClick={onNoteOnly}
+          title="Send your note without approving or rejecting the pending review">Submit ↵</button>}
+        {outcomes.map((option, index) => <button key={option.value}
+          className={index === 0 ? "button primary" : "button secondary"} type="button"
+          disabled={busy || disabled || (index === 0 && submitDisabled)}
+          onClick={() => { onOutcome(option.value); onSubmit(option.value); }}
+          title={index === 0 && submitDisabled ? "Select a candidate or finish ranking first" : undefined}>
+          {busy ? "Saving…" : index === 0 && primaryLabel ? primaryLabel : option.label}
+          {index === 0 && notePresent ? " + note" : ""}
+        </button>)}
+      </> : <>
+        {notePresent && <button className="button secondary" type="button"
+          disabled={busy || disabled} onClick={() => onSubmit()}>Submit ↵</button>}
+        {onReopen && <button className="button secondary" type="button"
+          disabled={busy || disabled} onClick={onReopen}>Needs changes / Reopen</button>}
+        {onComplete && <button className="button primary" type="button"
+          disabled={busy || disabled} onClick={onComplete}>Done</button>}
+        {!onComplete && <button className="button primary" type="button"
+          disabled={busy || disabled} onClick={() => onSubmit()}>Submit ↵</button>}
+      </>}
+    </div>
+  </footer>;
 }
