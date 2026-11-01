@@ -31,6 +31,13 @@ export type AgentNotice = { id: string; taskId: string; owner: string; revision:
   event: string; createdAtMs: number; state: string; reason?: string | null; };
 export const taskEnqueueAgentNotice = (path: string, id: string, owner: string, revision: string, event: string) =>
   invoke<AgentNotice>("task_enqueue_agent_notice", {path, id, owner, revision, event});
+export type StaleBlocker = { id: string; title: string; reason: string;
+  lastActivityAt: string; ageDays: number; signature: string; };
+export const taskStaleBlockers = (path: string) =>
+  invoke<StaleBlocker[]>("task_stale_blockers", {path});
+export const taskAcknowledgeStaleBlocker = (path: string, id: string, signature: string) =>
+  invoke<void>("task_acknowledge_stale_blocker", {path, id, signature});
+
 export const taskReconcileAgentNotices = (path: string) =>
   invoke<AgentNotice[]>("task_reconcile_agent_notices", {path});
 

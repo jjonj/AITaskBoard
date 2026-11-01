@@ -2,6 +2,7 @@ mod projects;
 mod board_watch;
 mod claim_health;
 mod agent_notices;
+mod stale_blockers;
 mod queue_bridge;
 
 use std::{fs, path::PathBuf, process::{Command, Stdio}, io::Write};
@@ -640,6 +641,8 @@ pub fn run() {
             claim_health::task_claim_health,
             agent_notices::task_enqueue_agent_notice,
             agent_notices::task_reconcile_agent_notices,
+            stale_blockers::task_stale_blockers,
+            stale_blockers::task_acknowledge_stale_blocker,
             board_watch::board_change_tokens,
             user_queue_project_ids,
             create_task,

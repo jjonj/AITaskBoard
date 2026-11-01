@@ -4051,10 +4051,12 @@ name = "taskboard"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "chrono",
  "reqwest",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
  "task-core",
  "taskboard-cli",
  "tauri",

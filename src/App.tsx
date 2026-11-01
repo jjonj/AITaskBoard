@@ -20,8 +20,9 @@ import { ProjectTabs } from "./ProjectTabs";
 import { ReleaseCenter } from "./ReleaseCenter";
 import { QueueOverviewPanel } from "./QueueOverviewPanel";
 import { TaskTracePanel } from "./TaskTracePanel";
+import { StaleBlockerPanel } from "./StaleBlockerPanel";
 import { mergeTaskEdits } from "./taskMerge";
-import type { ProjectTab, TaskIdReservation, ExecutionMode, QueueOverview, QueueCapacity, ClaimHealth } from "./api";
+import type { ProjectTab, TaskIdReservation, ExecutionMode, QueueOverview, QueueCapacity, ClaimHealth, StaleBlocker } from "./api";
 import {
   archiveTask,
   archiveColumn,
@@ -50,6 +51,8 @@ import {
   taskClaimHealth,
   taskEnqueueAgentNotice,
   taskReconcileAgentNotices,
+  taskStaleBlockers,
+  taskAcknowledgeStaleBlocker,
   taskQueueReconcile,
   updateTask,
 } from "./api";
@@ -396,6 +399,26 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     try { window.localStorage.setItem(hideWaitingKey, String(hideWaitingTasks)); }
     catch { /* The board filter remains functional without persistence. */ }
   }, [hideWaitingKey, hideWaitingTasks]);
+  const [staleBlockers, setStaleBlockers] = useState<StaleBlocker[]>([]);
+  const [staleDrawerOpen, setStaleDrawerOpen] = useState(false);
+  const [staleAckBusy, setStaleAckBusy] = useState(false);
+  useEffect(() => {
+    let live = true;
+    const refresh = () => void taskStaleBlockers(boardPath)
+      .then(items => { if (live) setStaleBlockers(items); })
+      .catch(() => { if (live) setStaleBlockers([]); });
+    refresh();
+    const timer = window.setInterval(refresh, 5 * 60_000);
+    return () => { live = false; window.clearInterval(timer); };
+  }, [boardPath]);
+  const acknowledgeBlocker = async (item: StaleBlocker) => {
+    setStaleAckBusy(true);
+    try {
+      await taskAcknowledgeStaleBlocker(boardPath, item.id, item.signature);
+      setStaleBlockers(items => items.filter(candidate => candidate.id !== item.id));
+    } catch (error) { setError(`Cannot acknowledge blocker: ${String(error)}`); }
+    finally { setStaleAckBusy(false); }
+  };
   const [claimHealth, setClaimHealth] = useState<Record<string, ClaimHealth>>({});
   useEffect(() => {
     let live = true;
@@ -2798,6 +2821,14 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
         if (columnContextMenu) setColumnContextMenu(null);
       }}
     >
+      {staleDrawerOpen && <StaleBlockerPanel items={staleBlockers} busy={staleAckBusy}
+        onClose={() => setStaleDrawerOpen(false)}
+        onAcknowledge={(item) => void acknowledgeBlocker(item)}
+        onOpenTask={id => {
+          setStaleDrawerOpen(false);
+          const task = taskMap.get(id);
+          if (task) openEdit(task);
+        }} />}
       {releasesOpen && <ReleaseCenter boardPath={boardPath} enabled={snapshot.config.releases_enabled ?? false} onClose={() => { setReleasesOpen(false); void refresh(boardPath, false); }} />}
       {queueDrawerOpen && <QueueOverviewPanel boardPath={boardPath} capacity={capacityTelemetry}
         onClose={() => setQueueDrawerOpen(false)}
@@ -2873,6 +2904,11 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
           <details className="toolbar-more">
             <summary className="button secondary" title="More TaskBoard actions">More ▾</summary>
             <div className="toolbar-more-menu">
+              <button type="button" className="button secondary"
+                title="Show genuine stale technical blockers, excluding dependency waiting. No workers are spawned."
+                onClick={() => setStaleDrawerOpen(true)}>
+                Recheck blockers · {staleBlockers.length}
+              </button>
               <button type="button" className="button secondary" onClick={startUserQueue}
                 disabled={busy || userQueueTasks.length === 0}
                 title="Direct For user quick-reply queue (Ctrl+Q)">
