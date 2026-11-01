@@ -2,6 +2,7 @@
 //! Entries live with the board, independent of temporary T3 browser identities.
 use std::{fs,io::Write,path::{Path,PathBuf},process::{Command,Stdio},sync::{Mutex,OnceLock},time::{SystemTime,UNIX_EPOCH}};
 use serde::{Deserialize,Serialize};
+#[cfg(windows)] use std::os::windows::process::CommandExt;
 use serde_json::{json,Value};
 use task_core::{FsTaskStore,TaskStore,MutationActor};
 
@@ -36,7 +37,7 @@ fn t3_control(payload:Value)->Result<Value,String>{
     if !Path::new(t3_script()).is_file() {return Err("T3 CLI unavailable".into());}
     let mut child=Command::new("node").arg(t3_script())
       .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-      .spawn().map_err(|e|format!("T3 unavailable: {e}"))?;
+      .creation_flags(0x08000000).spawn().map_err(|e|format!("T3 unavailable: {e}"))?;
     child.stdin.take().ok_or("T3 pipe unavailable")?
       .write_all(payload.to_string().as_bytes()).map_err(|e|e.to_string())?;
     let output=child.wait_with_output().map_err(|e|e.to_string())?;

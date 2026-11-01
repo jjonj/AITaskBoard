@@ -1,6 +1,7 @@
 //! Claim telemetry is observational: a failed T3 lookup never means a claim died.
 use std::{collections::HashMap,fs,path::PathBuf,process::{Command,Stdio},io::Write};
 use serde::Serialize;
+#[cfg(windows)] use std::os::windows::process::CommandExt;
 use task_core::{FsTaskStore,TaskStore};
 
 #[derive(Serialize)]
@@ -29,7 +30,8 @@ pub(crate) async fn task_claim_health(path:Option<String>)->Result<HashMap<Strin
         let t3=if !t3_ids.is_empty() && std::path::Path::new(script).is_file() {
             let result=(|| {
                 let mut child=Command::new("node").arg(script).stdin(Stdio::piped())
-                    .stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+                    .stdout(Stdio::piped()).stderr(Stdio::null())
+                    .creation_flags(0x08000000).spawn().ok()?;
                 child.stdin.take()?.write_all(br#"{"action":"list","which":"all","includeHidden":true}"#).ok()?;
                 let output=child.wait_with_output().ok()?;
                 output.status.success().then(||serde_json::from_slice::<serde_json::Value>(&output.stdout).ok()).flatten()

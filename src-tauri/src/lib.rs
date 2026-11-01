@@ -1,3 +1,4 @@
+#[cfg(windows)] use std::os::windows::process::CommandExt;
 mod projects;
 mod board_watch;
 mod claim_health;
@@ -460,7 +461,7 @@ fn open_claimed_t3_session(claimed_by: String) -> Result<serde_json::Value, Stri
     }
     let mut process = Command::new("node").arg(script)
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().map_err(|e| format!("Cannot connect to T3 CLI: {e}"))?;
+        .creation_flags(0x08000000).spawn().map_err(|e| format!("Cannot connect to T3 CLI: {e}"))?;
     if let Some(mut stdin) = process.stdin.take() {
         let request = serde_json::json!({ "action": "open", "sessionId": claimant });
         stdin.write_all(request.to_string().as_bytes()).map_err(|e| e.to_string())?;
@@ -538,7 +539,7 @@ fn open_task_session(path: Option<String>, id: String, implement: Option<bool>) 
     });
     let mut process = Command::new("node").arg(script)
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().map_err(|e| format!("Cannot launch T3 CLI: {e}"))?;
+        .creation_flags(0x08000000).spawn().map_err(|e| format!("Cannot launch T3 CLI: {e}"))?;
     if let Some(mut stdin) = process.stdin.take() {
         stdin.write_all(request.to_string().as_bytes()).map_err(|e| e.to_string())?;
     }
