@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type MouseEvent } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import { archiveTask, listProjects, loadBoard, openTaskSession, readLocalImage, saveTaskImage, taskSyncQueue, updateTask, type ProjectTab } from "./api";
+import { archiveTask, listProjects, loadBoard, openTaskSession, readLocalImage, saveTaskImage, taskSyncQueue, taskEnqueueAgentNotice, taskReconcileAgentNotices, updateTask, type ProjectTab } from "./api";
 import { reviewAsset, reviewReconsider, reviewResolve, reviewShow,
   type ReviewArtifact, type ReviewManifest, type ReviewPin } from "./reviewApi";
 import type { Task } from "./types";
@@ -458,7 +458,8 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       const imageLinks = await attachInboxImages(old.id, reviewTask.path);
       const updated: Task = {
         ...old,
-        ...(reopenForWork ? { column: "ai-ready", claimed_by: null, blocked_reason: null } :
+        ...(reopenForWork ? { column: resolvesBlock && old.claimed_by ? "in-progress" : "ai-ready",
+          claimed_by: resolvesBlock ? old.claimed_by : null, blocked_reason: null } :
           doneColumn ? { column: doneColumn, claimed_by: null } : {}),
         user_notes: [userNote, ...imageLinks].filter(Boolean).join("\n\n"),
         acceptance_criteria: userCriteria.split(/\r?\n/).filter(Boolean),
@@ -467,6 +468,13 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
         question: old.question ? { ...old.question, answer: answer || null } : null,
       };
       const saved = await updateTask(updated, reviewTask.path);
+      if (resolvesBlock && saved.claimed_by && saved.column === "in-progress") {
+        // A human answer restores work to the same owner when one exists.
+        // The durable outbox survives T3 outages; dispatch is not an interrupt.
+        await taskEnqueueAgentNotice(reviewTask.path, saved.id, saved.claimed_by,
+          saved.revision, "human-response");
+        void taskReconcileAgentNotices(reviewTask.path).catch(() => null);
+      }
       let notice: string | undefined;
       if (saved.completed && saved.category === "Implementation Review" && saved.related_to.length === 1) {
         const board = await loadBoard(reviewTask.path);

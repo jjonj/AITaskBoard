@@ -23,6 +23,20 @@ export const moveTaskBetweenProjects = (
 export const getDefaultBoardPath = () =>
   invoke<string>("default_board_path");
 
+export type ClaimHealth = {
+  owner: string; taskActivityAt: string | null; agentActivityAt: number | null;
+  agentState: string; verifiedAt: string | null;
+};
+export type AgentNotice = { id: string; taskId: string; owner: string; revision: string;
+  event: string; createdAtMs: number; state: string; reason?: string | null; };
+export const taskEnqueueAgentNotice = (path: string, id: string, owner: string, revision: string, event: string) =>
+  invoke<AgentNotice>("task_enqueue_agent_notice", {path, id, owner, revision, event});
+export const taskReconcileAgentNotices = (path: string) =>
+  invoke<AgentNotice[]>("task_reconcile_agent_notices", {path});
+
+export const taskClaimHealth = (path?: string) =>
+  invoke<Record<string, ClaimHealth>>("task_claim_health", {path});
+
 export const loadBoard = (path?: string) =>
   invoke<BoardSnapshot>("load_board", { path });
 

@@ -1,5 +1,7 @@
 mod projects;
 mod board_watch;
+mod claim_health;
+mod agent_notices;
 mod queue_bridge;
 
 use std::{fs, path::PathBuf, process::{Command, Stdio}, io::Write};
@@ -635,6 +637,9 @@ pub fn run() {
             projects::move_task_between_projects,
             default_board_path,
             load_board,
+            claim_health::task_claim_health,
+            agent_notices::task_enqueue_agent_notice,
+            agent_notices::task_reconcile_agent_notices,
             board_watch::board_change_tokens,
             user_queue_project_ids,
             create_task,

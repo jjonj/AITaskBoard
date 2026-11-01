@@ -21,7 +21,7 @@ import { ReleaseCenter } from "./ReleaseCenter";
 import { QueueOverviewPanel } from "./QueueOverviewPanel";
 import { TaskTracePanel } from "./TaskTracePanel";
 import { mergeTaskEdits } from "./taskMerge";
-import type { ProjectTab, TaskIdReservation, ExecutionMode, QueueOverview, QueueCapacity } from "./api";
+import type { ProjectTab, TaskIdReservation, ExecutionMode, QueueOverview, QueueCapacity, ClaimHealth } from "./api";
 import {
   archiveTask,
   archiveColumn,
@@ -47,6 +47,9 @@ import {
   taskSyncQueue,
   taskQueueOverview,
   taskQueueCapacity,
+  taskClaimHealth,
+  taskEnqueueAgentNotice,
+  taskReconcileAgentNotices,
   taskQueueReconcile,
   updateTask,
 } from "./api";
@@ -393,7 +396,50 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     try { window.localStorage.setItem(hideWaitingKey, String(hideWaitingTasks)); }
     catch { /* The board filter remains functional without persistence. */ }
   }, [hideWaitingKey, hideWaitingTasks]);
+  const [claimHealth, setClaimHealth] = useState<Record<string, ClaimHealth>>({});
+  useEffect(() => {
+    let live = true;
+    const refresh = () => void taskClaimHealth(boardPath).then(data => {
+      if (live) setClaimHealth(data);
+    }).catch(() => { if (live) setClaimHealth({}); });
+    refresh();
+    const timer = window.setInterval(refresh, 30_000);
+    window.addEventListener("focus", refresh);
+    return () => { live = false; window.clearInterval(timer); window.removeEventListener("focus", refresh); };
+  }, [boardPath]);
+  const claimTooltip = (task: Task): string => {
+    const h = claimHealth[task.id];
+    if (!h) return `Claimed by ${task.claimed_by} · session/task telemetry not verified`;
+    const age = (time: string | number | null) => {
+      if (!time) return "never verified";
+      const ms = typeof time === "number" ? time : Date.parse(time);
+      if (!Number.isFinite(ms)) return "invalid timestamp";
+      const minutes = Math.max(0, Math.floor((Date.now() - ms) / 60_000));
+      return minutes < 60 ? `${minutes}m ago` : `${Math.floor(minutes / 60)}h ${minutes % 60}m ago`;
+    };
+    return `Claimed: ${h.owner} · ${h.agentState} · task update ${age(h.taskActivityAt)} · T3 last working ${age(h.agentActivityAt)} · T3 observed ${age(h.verifiedAt)}`;
+  };
   const [editor, setEditor] = useState<EditorState | null>(null);
+  // Reconcile persisted notices on board open, restart and periodically.
+  // This is not a separate scheduler and never spawns a replacement worker.
+  useEffect(() => {
+    let active = true;
+    const reconcile = () => void taskReconcileAgentNotices(boardPath)
+      .catch(err => { if (active) setError(`Agent notices remain pending: ${String(err)}`); });
+    reconcile();
+    const timer = window.setInterval(reconcile, 30_000);
+    window.addEventListener("focus", reconcile);
+    return () => { active = false; window.clearInterval(timer); window.removeEventListener("focus", reconcile); };
+  }, [boardPath]);
+  const [notifyAgentOverride, setNotifyAgentOverride] = useState<boolean | null>(null);
+  const substantiveClaimedEdit = editor?.mode === "edit" && !!editor.original?.claimed_by &&
+    editor.original.column === "in-progress" && (
+      editor.draft.description !== editor.original.description ||
+      editor.draft.ai_notes !== editor.original.ai_notes ||
+      JSON.stringify(editor.draft.acceptance_criteria) !== JSON.stringify(editor.original.acceptance_criteria));
+  const notifyAgent = notifyAgentOverride ?? !!substantiveClaimedEdit;
+  const showNotifyAgent = editor?.mode === "edit" && !!editor.original?.claimed_by &&
+    editor.original.column === "in-progress" && editor.draft.column === "in-progress";
   const [remoteRelatedTasks, setRemoteRelatedTasks] = useState<Task[]>([]);
   useEffect(() => {
     if (!editor) { setRemoteRelatedTasks([]); return; }
@@ -1271,6 +1317,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   }, [editor?.original?.id]);
 
   const openEdit = (task: Task, fromQueue = false) => {
+    setNotifyAgentOverride(null);
     setQueueExpanded(false);
     imageDialogGeneration.current += 1;
     setPendingClipboardImages([]);
@@ -1696,6 +1743,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       let after = before;
       let savedTask: Task | null = null;
       let undoAction: string | null = null;
+      let notifyWarning: string | null = null;
 
       if (editor.mode === "create") {
         if (!reservedTaskId) throw new Error("Task ID reservation is not ready yet.");
@@ -1707,6 +1755,15 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       } else if (editor.original) {
         const saved = await updateWithDiskMerge(editor.original, { ...editor.original, ...draft });
         savedTask = saved;
+        if (showNotifyAgent && notifyAgent && saved.claimed_by && saved.column === "in-progress") {
+          try {
+            await taskEnqueueAgentNotice(boardPath, saved.id, saved.claimed_by, saved.revision, "requirements-change");
+            void taskReconcileAgentNotices(boardPath).catch(() => null);
+          } catch (error) {
+            // The task edit is already durable. Do not roll it back or pretend no change happened.
+            notifyWarning = `Task saved, but notification was not recorded: ${String(error)}`;
+          }
+        }
         // Completing a prerequisite can release other tasks from Blocked in
         // the shared core. Reload those automatic changes as part of this save.
         after = doneColumn && saved.column === doneColumn.id
@@ -1747,7 +1804,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       } else {
         closeEditor(after, true);
       }
-      if (syncWarning) setError(syncWarning);
+      if (notifyWarning || syncWarning) setError([notifyWarning, syncWarning].filter(Boolean).join(" · "));
     });
 
   // Closing a task preserves edited fields; the follow-up starts in the same
@@ -3051,7 +3108,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
                         taskActivity[task.id]
                           ? `activity-${taskActivity[task.id]}`
                           : ""
-                      } ${recentTaskActivity[task.id] ? "recently-changed" : ""}`}
+                      } ${recentTaskActivity[task.id] ? "recently-changed" : ""} ${task.claimed_by ? `claim-${(claimHealth[task.id]?.agentState ?? "unknown").toLowerCase().replace(/[^a-z]/g, "")}` : ""}`}
                       key={task.id}
                       data-task-id={task.id}
                       style={{ marginLeft: Math.min(depth, 4) * 12 }}
@@ -3089,6 +3146,8 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
                         {isForUser(task) && <span className="for-user-badge" title="Requires user input. Legacy NeedsUser flags are displayed here too.">FOR USER</span>}
                         {task.kind === "recurring" && <span className="recurring-badge"
                           title={task.next_due ? `Next run ${task.next_due}; ${task.run_count ?? 0} completed` : "Recurring: available after each recorded run"}>↻ {task.next_due || "RECURRING"}</span>}
+                        {task.claimed_by && <span className={`claim-indicator ${claimHealth[task.id]?.agentState === "Working" ? "working" : ""}`}
+                          title={claimTooltip(task)} aria-label={claimTooltip(task)} />}
                         <span className="task-card-id" title={task.kind === "epic" ? "Epic (non-executable)" : isForUser(task) ? "For user (human input)" : "Executable task"}>{task.id}</span>
                         {task.kind === "epic" && childCounts.has(task.id) && (
                           <button
@@ -3266,7 +3325,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
             <span>{columns.find((column) => column.id === hoverTask.task.column)?.name ?? hoverTask.task.column}</span>
             {hoverTask.task.category && <span>{hoverTask.task.category}</span>}
             {hoverTask.task.parent && <span>Subtask of {hoverTask.task.parent}</span>}
-            {hoverTask.task.claimed_by && <span>Claimed: {hoverTask.task.claimed_by}</span>}
+            {hoverTask.task.claimed_by && <span title={claimTooltip(hoverTask.task)}>{claimTooltip(hoverTask.task)}</span>}
             {hoverTask.task.kind === "epic" && <span>Coordination only  -  cannot be claimed or moved</span>}
             {hoverTask.task.kind === "task" && !isForUser(hoverTask.task) && <span>Readiness: {readinessOf(hoverTask.task)}</span>}
             {isForUser(hoverTask.task) && <span>FOR USER — awaiting user input.</span>}
@@ -3413,6 +3472,14 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
             </>
           )}
           <div className="context-separator" />
+          {contextTask.claimed_by && contextTask.column === "in-progress" && <button
+            title="Release the current claim and return the task to AI Ready"
+            disabled={busy} onClick={() => {
+              setContextMenu(null);
+              void persistTaskMutation(contextTask.id, "release claim", task => ({
+                ...task, column: "ai-ready", claimed_by: null,
+              }));
+            }}>Release claim</button>}
           <button onClick={() => void copyTaskText(contextTask.id)}>Copy task ID</button>
           <button onClick={() => void copyTaskText(`${contextTask.id} ${contextTask.title}`)}>Copy task ID + title</button>
           <button onClick={() => void copyTaskText(contextTask.path)}>Copy full file path</button>
@@ -4155,6 +4222,12 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
                   </>}
                 </div>}
               </div>}
+              {showNotifyAgent && <label className="agent-notify-toggle" title="Queue this task update for the claimed agent; delivery does not interrupt active work">
+                <input type="checkbox" checked={notifyAgent}
+                  onChange={(event) => setNotifyAgentOverride(event.currentTarget.checked)} />
+                <span className="agent-notify-switch" aria-hidden="true" />
+                Notify agent
+              </label>}
               <button className="button editor-cancel-button" onClick={() => closeEditor()} disabled={busy}>Cancel</button>
               <button
                 className={`button primary ${queueEdited ? "queue-save-release" : ""}`}
