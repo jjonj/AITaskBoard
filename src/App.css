@@ -3404,3 +3404,6 @@ body.card-dragging .project-tab-wrapper:not(.selected):hover {
 .search-results small { padding:7px 8px 2px; color:#aeb8c4; }
 .search-results .remote-search-result { font-size:11px; color:#b8c2ce; }
 .search-results em { display:block; font-size:10px; color:#87929f; font-style:normal; }
+
+.hide-waiting-filter { display:inline-flex; align-items:center; gap:6px; color:#bac5d0; font-size:12px; white-space:nowrap; cursor:pointer; }
+.hide-waiting-filter input { accent-color:#46ab9d; margin:0; cursor:pointer; }

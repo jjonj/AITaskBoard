@@ -275,6 +275,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const snoozesKey = storageKey("userQueueSnoozes");
   const collapsedKey = storageKey("collapsedTasks");
   const blockedInboxFilterKey = storageKey("hideBlockedInboxTasks");
+  const hideWaitingKey = storageKey("hideDependencyWaitingTasks");
   const [snapshot, setSnapshot] = useState<BoardSnapshot | null>(null);
   const [query, setQuery] = useState("");
   const [remoteSearchMatches, setRemoteSearchMatches] = useState<Array<{ id: string; title: string; project: string; path: string }>>([]);
@@ -367,6 +368,14 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     try { window.localStorage.setItem(blockedInboxFilterKey, String(hideBlockedInboxTasks)); }
     catch { /* This filter remains usable when local storage is unavailable. */ }
   }, [blockedInboxFilterKey, hideBlockedInboxTasks]);
+  const [hideWaitingTasks, setHideWaitingTasks] = useState(() => {
+    try { return window.localStorage.getItem(hideWaitingKey) !== "false"; }
+    catch { return true; }
+  });
+  useEffect(() => {
+    try { window.localStorage.setItem(hideWaitingKey, String(hideWaitingTasks)); }
+    catch { /* The board filter remains functional without persistence. */ }
+  }, [hideWaitingKey, hideWaitingTasks]);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [remoteRelatedTasks, setRemoteRelatedTasks] = useState<Task[]>([]);
   useEffect(() => {
@@ -2661,6 +2670,12 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
             OpenRig · {capacityTelemetry?.reason === null && capacityTelemetry.unknown === 0
               ? capacityTelemetry.working : "?"}/{capacityTelemetry?.limit ?? "?"} active
           </span>
+          {!reviewOpen && <label className="hide-waiting-filter"
+            title="Hide tasks that cannot start until prerequisites finish. Does not change their status.">
+            <input type="checkbox" checked={hideWaitingTasks}
+              onChange={(event) => setHideWaitingTasks(event.currentTarget.checked)} />
+            <span>Hide waiting</span>
+          </label>}
           <div className="search-wrap">
             <span>⌕</span>
             <input
@@ -2776,6 +2791,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
             ? allColumnTasks.filter(isInReviewInbox).length : 0;
           const columnTasks = orderCardsByDependencies(applyCardPlacements(allColumnTasks
             .filter((task) => !(column.id === "blocked" && hideBlockedInboxTasks && isInReviewInbox(task)))
+            .filter((task) => !hideWaitingTasks || isComplete(task.id) || task.column === "in-progress" || readinessOf(task) !== "waiting")
             .sort((a, b) => column.terminal
               ? completedSortTime(b) - completedSortTime(a) || b.id.localeCompare(a.id)
               : attentionRank(a) - attentionRank(b) ||
