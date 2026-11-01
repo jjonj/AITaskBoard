@@ -2043,13 +2043,14 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     }
   };
 
-  const moveTaskTo = async (id: string, column: string, afterTaskId: string | null = null) => {
+  const moveTaskTo = async (id: string, column: string, afterTaskId: string | null = null, detachFromEpic = false) => {
     const task = taskMap.get(id);
-    if (!task || task.kind === "epic" || (task.column === column && !afterTaskId)) return;
+    if (!task || task.kind === "epic" || (task.column === column && !afterTaskId && !(detachFromEpic && task.parent))) return;
     const terminal = columns.find((item) => item.id === column)?.terminal;
     await persistTaskMutation(id, afterTaskId ? "place task below another" : "move task", (current) => ({
       ...current,
       column,
+      ...(detachFromEpic ? { parent: null } : {}),
       position_after: afterTaskId,
       positioned_at: afterTaskId ? new Date().toISOString() : null,
       ...(terminal ? {
@@ -2183,6 +2184,10 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
         ? validDropTaskAt(upEvent.clientX, upEvent.clientY)
         : null;
       const taskTarget = taskTargetId ? taskMap.get(taskTargetId) : null;
+      const columnHeaderTarget = dragging
+        ? document.elementFromPoint(upEvent.clientX, upEvent.clientY)
+            ?.closest<HTMLElement>(".column-header")
+        : null;
       const columnTarget = dragging
         ? document
             .elementFromPoint(upEvent.clientX, upEvent.clientY)
@@ -2211,7 +2216,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       } else if (taskTarget) {
         void moveTaskTo(task.id, taskTarget.column, taskTarget.id);
       } else if (columnTarget) {
-        void moveTaskTo(task.id, columnTarget);
+        void moveTaskTo(task.id, columnTarget, null, !!columnHeaderTarget);
       }
     };
 
