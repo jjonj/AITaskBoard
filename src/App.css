@@ -3440,3 +3440,13 @@ body.card-dragging .project-tab-wrapper:not(.selected):hover {
   color:#d9e1e8; border-radius:5px; font:inherit; text-align:left; cursor:pointer; }
 .inbox-more-menu button:hover:not(:disabled) { background:#3b4a56; }
 .inbox-more-menu button:disabled { opacity:.5; cursor:default; }
+
+.editor-local-file-picker, .inbox-attach-button { align-self:flex-start; font-size:12px; margin:3px 0 7px; }
+.inbox-image-previews { display:flex; flex-wrap:wrap; gap:8px; max-height:150px; overflow-y:auto; }
+.inbox-image-previews figure { position:relative; margin:0; width:110px; padding:5px;
+  border:1px solid #526574; border-radius:8px; background:#19242d; }
+.inbox-image-previews img { display:block; width:100%; height:75px; object-fit:contain; }
+.inbox-image-previews figcaption { font-size:10px; color:#b1c1ce; white-space:nowrap;
+  overflow:hidden; text-overflow:ellipsis; padding-top:3px; }
+.inbox-image-previews figure button { position:absolute; right:3px; top:3px; border:1px solid #65717e;
+  border-radius:4px; background:#232d37; color:white; cursor:pointer; }

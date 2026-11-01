@@ -113,6 +113,10 @@ export const taskQueueReconcile = (path?: string) =>
 export const taskLiveWithMe = (id: string, expectedRevision: string, withMe: boolean, path?: string) =>
   invoke<Task>("task_live_with_me", { path, id, expectedRevision, withMe });
 
+export type LocalImagePreview = { dataUrl: string; mime: string; name: string };
+export const readLocalImage = (path: string) =>
+  invoke<LocalImagePreview>("read_local_image", { path });
+
 export const saveTaskImage = (taskId: string, data: string, mime: string, path?: string) =>
   invoke<string>("save_task_image", { path, taskId, data, mime });
 export const readTaskImage = (relativePath: string, path?: string) =>

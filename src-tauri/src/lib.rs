@@ -200,6 +200,38 @@ fn release_task_id(path: Option<String>, reservation: TaskIdReservation) -> Resu
     FsTaskStore::default().release_task_id(&root(path), &reservation).map_err(|e| e.to_string())
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalImagePreview {
+    data_url: String,
+    mime: String,
+    name: String,
+}
+
+/// Native Explorer drops carry paths, not web File objects. Read only bounded
+/// supported image formats, never copy non-image documents into TaskBoard.
+#[tauri::command]
+fn read_local_image(path: String) -> Result<LocalImagePreview, String> {
+    let file = PathBuf::from(&path);
+    if !file.is_file() { return Err("Image file is unavailable".into()); }
+    let ext = file.extension().and_then(|x| x.to_str()).unwrap_or("").to_ascii_lowercase();
+    let mime = match ext.as_str() {
+        "png" => "image/png", "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp", "gif" => "image/gif",
+        _ => return Err("Not a supported image file".into()),
+    };
+    if fs::metadata(&file).map_err(|e|e.to_string())?.len() > 20*1024*1024 {
+        return Err("Image exceeds 20 MB limit".into());
+    }
+    let bytes = fs::read(&file).map_err(|e|e.to_string())?;
+    if bytes.is_empty() { return Err("Image file is empty".into()); }
+    Ok(LocalImagePreview {
+        data_url: format!("data:{mime};base64,{}", BASE64.encode(bytes)),
+        mime: mime.into(),
+        name: file.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+    })
+}
+
 #[tauri::command]
 fn save_task_image(path: Option<String>, task_id: String, data: String, mime: String) -> Result<String, String> {
     let extension = match mime.as_str() {
@@ -622,6 +654,7 @@ pub fn run() {
             reserve_task_id,
             release_task_id,
             save_task_image,
+            read_local_image,
             read_task_image,
             review_show,
             review_request,

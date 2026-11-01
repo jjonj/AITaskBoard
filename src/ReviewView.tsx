@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
-import { archiveTask, listProjects, loadBoard, openTaskSession, taskSyncQueue, updateTask, type ProjectTab } from "./api";
+import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type MouseEvent } from "react";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { open } from "@tauri-apps/plugin-dialog";
+import { archiveTask, listProjects, loadBoard, openTaskSession, readLocalImage, saveTaskImage, taskSyncQueue, updateTask, type ProjectTab } from "./api";
 import { reviewAsset, reviewReconsider, reviewResolve, reviewShow,
   type ReviewArtifact, type ReviewManifest, type ReviewPin } from "./reviewApi";
 import type { Task } from "./types";
@@ -65,6 +67,8 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   const [snoozedLocally, setSnoozedLocally] = useState<Record<string, number>>(loadReviewSnoozes);
   const [responseOutcome, setResponseOutcome] = useState("");
   const [moreOpen, setMoreOpen] = useState(false);
+  const [inboxImages, setInboxImages] = useState<Array<{dataUrl:string;mime:string;name:string}>>([]);
+  useEffect(() => { setInboxImages([]); }, [selectedKey]);
   const videoRef = useRef<HTMLVideoElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const reviewTask = items.find((item) => keyOf(item) === selectedKey);
@@ -84,6 +88,94 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       (reviewTask?.task.review_status === "resolved" ||
        reviewTask?.task.review_status === "awaiting_revision"));
   const round = manifest?.rounds[manifest.rounds.length - 1];
+  const activeInboxKey = useRef(selectedKey);
+  activeInboxKey.current = selectedKey;
+  const addInboxPaths = async (raw: string[]) => {
+    const expected = selectedKey;
+    const paths = [...new Set(raw.map(path => path.trim()).filter(Boolean))];
+    const images = paths.filter(path => /\.(png|jpe?g|webp|gif)$/i.test(path));
+    const references = paths.filter(path => !images.includes(path));
+    if (references.length) {
+      const add = (text: string) => [text.trim(), ...references].filter(Boolean).join("\n");
+      if (isVisualReview) setNote(add);
+      else setUserNote(add);
+    }
+    for (const path of images) {
+      try {
+        const preview = await readLocalImage(path);
+        if (activeInboxKey.current === expected) setInboxImages(current => [...current, preview]);
+      } catch (cause) {
+        if (activeInboxKey.current === expected) setError(`Cannot preview ${path}: ${String(cause)}`);
+      }
+    }
+  };
+  const browseInboxFiles = async () => {
+    try {
+      const chosen = await open({ multiple: true, directory: false });
+      if (chosen) await addInboxPaths(Array.isArray(chosen) ? chosen : [chosen]);
+    } catch (cause) { setError(`File picker failed: ${String(cause)}`); }
+  };
+  const addBrowserImages = (files: File[]) => {
+    const key = selectedKey;
+    for (const file of files.filter(f => /^image\/(png|jpeg|webp|gif)$/.test(f.type))) {
+      if (file.size > 20*1024*1024) { setError("Image exceeds 20 MB."); continue; }
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (activeInboxKey.current === key && typeof reader.result === "string")
+          setInboxImages(current => [...current, { dataUrl: reader.result as string,
+            mime: file.type, name: file.name || "Pasted image" }]);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+  const onInboxPaste = (event: ClipboardEvent<HTMLElement>) => {
+    const files = [...event.clipboardData.items].filter(item => item.kind === "file" &&
+      /^image\/(png|jpeg|webp|gif)$/.test(item.type))
+      .map(item => item.getAsFile()).filter((item): item is File => !!item);
+    if (!files.length) return;
+    event.preventDefault();
+    addBrowserImages(files);
+  };
+  const onInboxDrop = (event: DragEvent<HTMLElement>) => {
+    if ("__TAURI_INTERNALS__" in window) return; // Native event provides authoritative absolute paths.
+    const files = [...event.dataTransfer.files];
+    if (!files.length) return;
+    event.preventDefault();
+    addBrowserImages(files);
+    if (files.some(file => !/^image\//.test(file.type)))
+      setError("Non-image files require native Explorer drag/drop or the file picker to preserve full paths.");
+  };
+  const attachInboxImages = async (id: string, boardPath: string) => {
+    const paths: string[] = [];
+    for (const image of inboxImages) {
+      const encoded = image.dataUrl.split(",", 2)[1];
+      if (!encoded) throw new Error("Image preview encoding missing");
+      const saved = await saveTaskImage(id, encoded, image.mime, boardPath);
+      paths.push(`![${image.name.replace(/[\[\]<>]/g, "")}](../${saved})`);
+    }
+    return paths;
+  };
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    let mounted = true;
+    let unlisten: (() => void) | undefined;
+    void getCurrentWebview().onDragDropEvent(({ payload }) => {
+      if (!mounted || payload.type !== "drop" || !selectedKey) return;
+      void addInboxPaths(payload.paths);
+    }).then(dispose => { if (mounted) unlisten = dispose; else dispose(); })
+      .catch(() => { /* Non-native previews still support Ctrl+V images. */ });
+    return () => { mounted = false; unlisten?.(); };
+  }, [selectedKey, isVisualReview]);
+  const inboxImagePreview = <div className="inbox-image-previews" aria-label="Pending image attachments">
+    {inboxImages.map((image, index) => <figure key={index}>
+      <img src={image.dataUrl} alt={image.name}/>
+      <figcaption title={image.name}>{image.name}</figcaption>
+      <button type="button" title="Remove attachment" onClick={() =>
+        setInboxImages(current => current.filter((_, i) => i !== index))}>×</button>
+    </figure>)}
+  </div>;
+
+
   const queueKey = items.filter((item) => !!item.task.review_status)
     .map((item) => keyOf(item) + ":" + item.task.revision).join("|");
 
@@ -358,11 +450,12 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
           ?? board.config.columns.find((col) => col.terminal)?.id;
         if (!doneColumn) throw new Error("This board has no Done column.");
       }
+      const imageLinks = await attachInboxImages(old.id, reviewTask.path);
       const updated: Task = {
         ...old,
         ...(needsChanges ? { column: "ai-ready", claimed_by: null, blocked_reason: null } :
           doneColumn ? { column: doneColumn, claimed_by: null } : {}),
-        user_notes: userNote,
+        user_notes: [userNote, ...imageLinks].filter(Boolean).join("\n\n"),
         acceptance_criteria: userCriteria.split(/\r?\n/).filter(Boolean),
         kind: needsChanges ? "task" : aiQuestion ? old.kind : markDone ? "task" : keepForUser ? (old.kind === "epic" ? "epic" : "for_user") : "task",
         attention: needsChanges ? attention.filter(flag => flag !== "blocked" && flag !== "needs-user") : attention,
@@ -381,6 +474,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
             : "review closed; original disposition unresolved");
       }
       onUserTaskUpdated?.(notice);
+      setInboxImages([]);
       // A response may deliberately leave "For user" enabled. Do not ask for
       // the same answer again in this Inbox pass.
       hideLocally(reviewTask, 60 * 60 * 1000);
@@ -480,13 +574,14 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
         task_id: reviewTask.task.id, verdict,
         choices: verdict === "picked" ? [choice] : verdict === "approved" ? [playable[0]?.id ?? "A"] : [],
         ranking: verdict === "ranked" ? ranking : [],
-        pins, note,
+        pins, note: [note, ...await attachInboxImages(reviewTask.task.id, reviewTask.path)].filter(Boolean).join("\n\n"),
         expected_task_revision: reviewTask.task.revision,
         expected_manifest_revision: manifest.revision,
       }, reviewTask.path);
       // Always advance the unified Inbox after a successful decision, even
       // when a rejected round remains open pending the agent's next variant.
       hideLocally(reviewTask, 60 * 60 * 1000);
+      setInboxImages([]);
       advance(keyOf(reviewTask));
       setManifest(verdict === "rejected" || verdict === "more-variants" ? resolved : null);
       setError("");
@@ -497,7 +592,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
     } finally { setSaving(false); }
   };
   const submitNoteOnly = async () => {
-    if (!reviewTask || !isVisualReview || !note.trim() || saving || resolved) return;
+    if (!reviewTask || !isVisualReview || !(note.trim() || inboxImages.length) || saving || resolved) return;
     setSaving(true);
     setError("");
     try {
@@ -505,12 +600,13 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       const latest = board.tasks.find(task => task.id === reviewTask.task.id);
       if (!latest || latest.archived) throw new Error("Original task is unavailable");
       const old = latest.user_notes.trim();
-      const message = note.trim();
+      const message = [note.trim(), ...await attachInboxImages(latest.id, reviewTask.path)].filter(Boolean).join("\n\n");
       await updateTask({ ...latest,
         user_notes: [old, message].filter(Boolean).join("\n\n"),
         attention: [...new Set([...latest.attention, "user-note" as const])],
       }, reviewTask.path);
       setNote("");
+      setInboxImages([]);
       await refresh(); // The review remains open; the next verdict uses the updated task revision.
     } catch (cause) {
       setError(`Unable to submit note: ${String(cause)}`);
@@ -696,6 +792,11 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       primaryReady={primaryReady}
       submit={submit}
       onNoteOnly={submitNoteOnly}
+      onBrowseFiles={() => void browseInboxFiles()}
+      imagePreviews={inboxImagePreview}
+      imageCount={inboxImages.length}
+      onPaste={onInboxPaste}
+      onDrop={onInboxDrop}
       onMoveToDraft={moveSelectedToDraft}
       onArchive={archiveSelected}
       onReconsider={reconsider}
@@ -703,7 +804,8 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   }
 
   return (
-    <section className="review-shell">
+    <section className="review-shell" onPaste={onInboxPaste}
+      onDragOver={event => event.preventDefault()} onDrop={onInboxDrop}>
       <button className="button secondary review-close review-close-corner" type="button"
         title="Close Inbox (Esc)" aria-label="Close Inbox" onClick={onClose}>×</button>
       <aside className="review-queue">
@@ -814,6 +916,9 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
                     }}
                       rows={7} placeholder="Your feedback or instructions…" />
                   </label>
+                  <button type="button" className="button secondary inbox-attach-button"
+                    onClick={() => void browseInboxFiles()}>+ Images / local files…</button>
+                  {inboxImages.length > 0 && inboxImagePreview}
                   <label>Acceptance criteria
                     <textarea value={userCriteria} onChange={(event) => {
                       setUserCriteria(event.currentTarget.value);
@@ -849,7 +954,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
               onSubmit={() => void submitUser()}
               onComplete={() => void submitUser(true)}
               onReopen={() => void submitUser(false, true)}
-              notePresent={!!userNote.trim() || !!userAnswer.trim()}
+              notePresent={!!userNote.trim() || !!userAnswer.trim() || inboxImages.length > 0}
               busy={saving}
               summary={reviewTask.task.kind === "for_user"
                 ? "Respond or complete this human-owned task"

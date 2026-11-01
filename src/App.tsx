@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 import { TASK_ICON_OPTIONS, TaskIconGlyph } from "./TaskIcons";
 import { TitleMarkup } from "./TitleMarkup";
@@ -28,6 +29,7 @@ import {
   createTask,
   reserveTaskId,
   releaseTaskId,
+  readLocalImage,
   saveTaskImage,
   highlightInFomni,
   loadBoard,
@@ -586,13 +588,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       if (!inside) return;
       const paths = [...new Set(payload.paths.filter((path) => path.trim()))];
       if (!paths.length) return;
-      setEditor((current) => {
-        if (!current) return current;
-        const initial = parseDescriptionTimeline(current.draft.description).initial.trimEnd();
-        const description = updateInitialDescription(current.draft.description,
-          [initial, ...paths].filter(Boolean).join("\n"));
-        return { ...current, draft: { ...current.draft, description } };
-      });
+      void addEditorFilePaths(paths);
     }).then((dispose) => {
       if (active) unlisten = dispose;
       else dispose();
@@ -1460,6 +1456,38 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     const after = await loadBoard(boardPath);
     applySnapshot(after);
   });
+
+  const addEditorFilePaths = async (rawPaths: string[]) => {
+    const paths = [...new Set(rawPaths.map(path => path.trim()).filter(Boolean))];
+    if (!paths.length) return;
+    const generation = imageDialogGeneration.current;
+    const images = paths.filter(path => /\.(png|jpe?g|webp|gif)$/i.test(path));
+    const nonImages = paths.filter(path => !images.includes(path));
+    if (nonImages.length) {
+      setEditor(current => current && generation === imageDialogGeneration.current
+        ? { ...current, draft: { ...current.draft,
+            user_notes: [current.draft.user_notes.trim(), ...nonImages].filter(Boolean).join("\n") } }
+        : current);
+    }
+    for (const path of images) {
+      try {
+        const preview = await readLocalImage(path);
+        if (generation === imageDialogGeneration.current) {
+          setPendingClipboardImages(current => [...current, {
+            dataUrl: preview.dataUrl, mime: preview.mime, name: preview.name,
+          }]);
+        }
+      } catch (reason) {
+        setError(`Unable to attach ${path}: ${errorText(reason)}`);
+      }
+    }
+  };
+  const browseEditorFiles = async () => {
+    try {
+      const selection = await open({ multiple: true, directory: false });
+      if (selection) await addEditorFilePaths(Array.isArray(selection) ? selection : [selection]);
+    } catch (reason) { setError(`File picker failed: ${errorText(reason)}`); }
+  };
 
   const pasteClipboardImages = (event: React.ClipboardEvent<HTMLElement>) => {
     if (busy) return;
@@ -3556,7 +3584,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
               event.stopPropagation();
               if (!(event.target as HTMLElement).closest(".editor-finish-menu")) setDoneMenuOpen(false);
             }} onPaste={pasteClipboardImages}>
-            {fileDropActive && <div className="editor-file-drop-hint">Drop to add file paths to Description</div>}
+            {fileDropActive && <div className="editor-file-drop-hint">Drop images to attach or files to link in Note to AI</div>}
             <div className="modal-header">
               <div className="eyebrow">
                 {editor.mode === "edit" && editor.original ? (
@@ -3997,6 +4025,20 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
                 }),
               })}
             />
+            {editor.mode === "create" && editor.draft.kind !== "epic" && <label>
+              Note to AI
+              <AutoTextarea minRows={2} value={editor.draft.user_notes}
+                placeholder="Instructions and local file paths…"
+                onChange={event => {
+                  const value = event.currentTarget.value;
+                  setEditor(current => current
+                    ? { ...current, draft: { ...current.draft, user_notes: value } }
+                    : current);
+                }} />
+            </label>}
+            <button type="button" className="button secondary editor-local-file-picker" disabled={busy}
+              onClick={() => void browseEditorFiles()} title="Attach image previews; add other local paths to Note to AI without uploading">
+              + Images / local files…</button>
             <TaskImageGallery
               description={editor.draft.description}
               boardPath={boardPath}
