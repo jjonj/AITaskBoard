@@ -1,0 +1,395 @@
+{
+  "generated": "2026-11-01T22:23:09.878276+00:00",
+  "boards": [
+    {
+      "name": "Wartribes",
+      "path": "B:\\GDrive\\SharedWithPhone\\Obsidian\\jjj\\Wartribes\\Tasks",
+      "tasks": 211,
+      "flags": [
+        {
+          "id": "WT-0017",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0043",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0048",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0051",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0056",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0060",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0069",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0101",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0103",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0109",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0110",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0111",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0153",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0168",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0171",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0211",
+          "type": "blocked_with_waiting_dependencies",
+          "waiting": [
+            "WT-0215"
+          ],
+          "reason": null,
+          "action": "inspect_not_automatic"
+        },
+        {
+          "id": "WT-0215",
+          "type": "blocked_with_waiting_dependencies",
+          "waiting": [
+            "WT-0208",
+            "WT-0088",
+            "WT-0089"
+          ],
+          "reason": null,
+          "action": "inspect_not_automatic"
+        },
+        {
+          "id": "WT-0218",
+          "type": "blocked_with_waiting_dependencies",
+          "waiting": [
+            "WT-0215"
+          ],
+          "reason": null,
+          "action": "inspect_not_automatic"
+        },
+        {
+          "id": "WT-0230",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0237",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0239",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0240",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0241",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0242",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0243",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0244",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0245",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0247",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0249",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0257",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WT-0312",
+          "type": "blocked_with_waiting_dependencies",
+          "waiting": [
+            "WT-0331",
+            "WT-0332"
+          ],
+          "reason": "Generated WorldLayers and PCG island do not exist; WT-0331 and WT-0332 must deliver them before generated-island simulator can run.",
+          "action": "inspect_not_automatic"
+        },
+        {
+          "id": "WT-0314",
+          "type": "blocked_with_waiting_dependencies",
+          "waiting": [
+            "WT-0331",
+            "WT-0332"
+          ],
+          "reason": "Real generated PCG island with navmesh and reachable food is absent; requires WT-0331 and WT-0332 before native fauna Recast validation.",
+          "action": "inspect_not_automatic"
+        },
+        {
+          "id": "WT-0332",
+          "type": "blocked_with_waiting_dependencies",
+          "waiting": [
+            "WT-0331"
+          ],
+          "reason": "Production-generated WorldLayers island does not yet exist; WT-0331 is needed to provide authentic terrain/biomes before authoring a bounded production PCG volume.",
+          "action": "inspect_not_automatic"
+        },
+        {
+          "id": "WT-0333",
+          "type": "blocked_with_waiting_dependencies",
+          "waiting": [
+            "WT-0331",
+            "WT-0332"
+          ],
+          "reason": "Production-generated island and authentic PCG resource layer do not exist yet; wait for WT-0331 and WT-0332 before end-to-end player harvest/danger acceptance.",
+          "action": "inspect_not_automatic"
+        },
+        {
+          "id": "WTE-0002",
+          "type": "unclaimed_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "WTE-0003",
+          "type": "unclaimed_in_progress",
+          "action": "inspect"
+        }
+      ]
+    },
+    {
+      "name": "t3code",
+      "path": "B:\\GDrive\\SharedWithPhone\\Obsidian\\jjj\\t3code\\Tasks",
+      "tasks": 196,
+      "flags": [
+        {
+          "id": "T3-0003",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "T3-0013",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "T3-0018",
+          "type": "blocked_without_reason",
+          "action": "inspect"
+        },
+        {
+          "id": "T3-0018",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "T3-0081",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "T3-0092",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "T3-0112",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "T3-0137",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "T3-0146",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "T3-0150",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "T3-0198",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "T3-0210",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        }
+      ]
+    },
+    {
+      "name": "Altraea",
+      "path": "B:\\GDrive\\SharedWithPhone\\Obsidian\\jjj\\Altraea\\Tasks",
+      "tasks": 25,
+      "flags": []
+    },
+    {
+      "name": "Citizen",
+      "path": "B:\\GDrive\\SharedWithPhone\\Obsidian\\jjj\\CitizenImperium\\Tasks",
+      "tasks": 0,
+      "flags": []
+    },
+    {
+      "name": "Misc",
+      "path": "B:\\GDrive\\SharedWithPhone\\Obsidian\\jjj\\Misc\\Tasks",
+      "tasks": 72,
+      "flags": [
+        {
+          "id": "MISC-0008",
+          "type": "blocked_with_waiting_dependencies",
+          "waiting": [
+            "MISC-0001",
+            "MISC-0002"
+          ],
+          "reason": "OpenRig Desktop MAIN has no approved typed review-decision adapter to release human gates with durable authenticated receipts.",
+          "action": "inspect_not_automatic"
+        },
+        {
+          "id": "MISC-0008",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "MISCE-0002",
+          "type": "unclaimed_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "MISCE-0003",
+          "type": "unclaimed_in_progress",
+          "action": "inspect"
+        }
+      ]
+    },
+    {
+      "name": "Omni",
+      "path": "B:\\GDrive\\SharedWithPhone\\Obsidian\\jjj\\Omni\\Tasks",
+      "tasks": 22,
+      "flags": [
+        {
+          "id": "OMN-0003",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        }
+      ]
+    },
+    {
+      "name": "Omniwork",
+      "path": "B:\\GDrive\\SharedWithPhone\\Obsidian\\jjj\\Omniwork\\Tasks",
+      "tasks": 44,
+      "flags": [
+        {
+          "id": "OW-0016",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        },
+        {
+          "id": "OW-0030",
+          "type": "claim_outside_in_progress",
+          "action": "inspect"
+        }
+      ]
+    },
+    {
+      "name": "Filler-backlog",
+      "path": "B:\\GDrive\\SharedWithPhone\\Obsidian\\jjj\\Filler-backlog\\Tasks",
+      "tasks": 2,
+      "flags": []
+    },
+    {
+      "name": "MonkuNoMori",
+      "path": "B:\\GDrive\\SharedWithPhone\\Obsidian\\jjj\\MonkuNoMori\\Tasks",
+      "tasks": 6,
+      "flags": []
+    },
+    {
+      "name": "Order of the Fallen",
+      "path": "B:\\GDrive\\SharedWithPhone\\Obsidian\\jjj\\OrderOfTheFallen\\Tasks",
+      "tasks": 449,
+      "flags": [
+        {
+          "id": "OTFE-0006",
+          "type": "unclaimed_in_progress",
+          "action": "inspect"
+        }
+      ]
+    },
+    {
+      "name": "TaskBoard",
+      "path": "B:\\GDrive\\SharedWithPhone\\Obsidian\\jjj\\Omnish\\Tasks",
+      "tasks": 0,
+      "flags": []
+    }
+  ]
+}
