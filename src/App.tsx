@@ -46,7 +46,6 @@ import {
   taskExecutionIntent,
   taskExecutionModes,
   taskSetExecutionMode,
-  taskRequestStartNow,
   taskSyncQueue,
   taskQueueOverview,
   taskQueueCapacity,
@@ -1837,7 +1836,16 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
           // background/foreground job for the same click.
           await openTaskSession(savedTask.id, boardPath);
         } else if (executionChoice === "start_now") {
-          await taskRequestStartNow(savedTask.id, current.revision, boardPath);
+          // Explicit Start now bypasses the background capacity scheduler.
+          // T3's open-task path owns single-task locking and UNKNOWN reconciliation.
+          const receipt = await openTaskSession(savedTask.id, boardPath, true);
+          if (receipt.status === "prompt_unknown" ||
+              receipt.status === "unknown" ||
+              receipt.status === "in_progress") {
+            notifyWarning = `T3 start: ${receipt.status}. The original request remains reserved; inspect its receipt before attempting another spawn.`;
+          } else if (receipt.status !== "opened" && receipt.status !== "created") {
+            throw new Error(`T3 did not confirm opening the task session (${String(receipt.status)}).`);
+          }
         } else if (executionTouched && executionChoice !== current.mode) {
           await taskSetExecutionMode(savedTask.id, current.revision, executionChoice, boardPath);
         }
