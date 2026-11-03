@@ -20,13 +20,13 @@ fn draft(column: &str) -> TaskDraft {
     }
 }
 
-fn age_file(path: &str) {
+fn age_file(path: &str, hours: u64) {
     let text = fs::read_to_string(path).unwrap();
     let text = text.lines().filter(|line| !line.starts_with("last_activity_at:"))
         .collect::<Vec<_>>().join("\n") + "\n";
     fs::write(path, text).unwrap();
     let file = fs::OpenOptions::new().write(true).open(path).unwrap();
-    file.set_modified(SystemTime::now() - Duration::from_secs(25 * 3600)).unwrap();
+    file.set_modified(SystemTime::now() - Duration::from_secs(hours * 3600)).unwrap();
 }
 
 #[test]
@@ -53,41 +53,55 @@ fn abandoned_task_requeues_once_and_preserves_the_timeline() {
     let (store, root) = board();
     let task = store.create(&root, draft("ai-ready")).unwrap();
     let claimed = store.claim(&root, &task.id, "agent").unwrap();
-    age_file(&claimed.path);
+    age_file(&claimed.path, 5);
     let recovered = store.load(&root).unwrap().tasks.into_iter().find(|t| t.id == task.id).unwrap();
     assert_eq!(recovered.column, "ai-ready");
     assert_eq!(recovered.claimed_by, None);
-    assert!(recovered.description.contains("Abandonment detected after 24 hours"));
+    assert!(recovered.description.contains("In Progress timed out after 4 hours"));
     let again = store.load(&root).unwrap().tasks.into_iter().find(|t| t.id == task.id).unwrap();
-    assert_eq!(again.description.matches("Abandonment detected").count(), 1);
+    assert_eq!(again.description.matches("In Progress timed out").count(), 1);
     fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn pending_inbox_is_not_todo_and_is_not_requeued_by_age() {
+fn pending_inbox_preserves_its_question_when_inactive_task_requeues() {
     let (store, root) = board();
     let task = store.create(&root, draft("ai-ready")).unwrap();
     let mut edited = task.clone();
     edited.attention.push(TaskAttention::Question);
     edited.question = Some(TaskQuestion { request_type: Some("decision".into()),
         prompt: "Choose one?".into(), options: vec!["A".into(), "B".into()], answer: None });
-    let pending = store.update(&root, edited).unwrap();
-    assert_eq!(pending.column, "in-progress");
-    age_file(&pending.path);
+    let mut pending = store.update(&root, edited).unwrap();
+    assert_eq!(pending.column, "ai-ready");
+    // Human manually starts the task without taking an AI claim.
+    pending.column = "in-progress".into();
+    let pending = store.update_as(&root, pending, task_core::MutationActor::Human).unwrap();
+    age_file(&pending.path, 5);
     let read = store.load(&root).unwrap().tasks.into_iter().find(|t| t.id == task.id).unwrap();
-    assert_eq!(read.column, "in-progress");
+    assert_eq!(read.column, "ai-ready");
     assert_eq!(read.claimed_by, None);
-    let mut invalid = read.clone();
-    invalid.column = "ai-ready".into();
-    assert!(store.update(&root, invalid).is_err());
-    // Legacy / externally edited Markdown can still create this state.
-    // The next board load repairs it without discarding the Inbox request.
-    let yaml = fs::read_to_string(&read.path).unwrap();
-    let yaml = yaml.replacen("column: in-progress", "column: ai-ready", 1);
-    fs::write(&read.path, yaml).unwrap();
-    let repaired = store.load(&root).unwrap().tasks.into_iter()
+    assert_eq!(read.question.as_ref().unwrap().prompt, "Choose one?");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn recent_and_t3_managed_claims_obey_four_hour_lease() {
+    let (store, root) = board();
+    let task = store.create(&root, draft("ai-ready")).unwrap();
+    let managed = store.claim_managed(&root, &task.id,
+        "t3-browser:8fd23b67-0a26-4082-8972-4425b500164f").unwrap();
+    age_file(&managed.task.path, 3);
+    let recent = store.load(&root).unwrap().tasks.into_iter()
         .find(|t| t.id == task.id).unwrap();
-    assert_eq!(repaired.column, "in-progress");
-    assert_eq!(repaired.question.as_ref().unwrap().prompt, "Choose one?");
+    assert_eq!(recent.column, "in-progress");
+    assert!(recent.claimed_by.is_some());
+    age_file(&recent.path, 5);
+    let expired = store.load(&root).unwrap().tasks.into_iter()
+        .find(|t| t.id == task.id).unwrap();
+    assert_eq!(expired.column, "ai-ready");
+    assert_eq!(expired.claimed_by, None);
+    assert!(!fs::read_to_string(&expired.path).unwrap().contains("\nclaim_token:"));
+    assert!(store.release_managed(&root, &task.id,
+        "t3-browser:8fd23b67-0a26-4082-8972-4425b500164f", &managed.claim_token).is_err());
     fs::remove_dir_all(root).unwrap();
 }

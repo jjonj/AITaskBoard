@@ -38,8 +38,7 @@ export function AgentRecoverySettings({boardPath,onClose}:Props) {
     <section role="dialog" aria-modal="true" aria-label="Agent recovery settings"
       className="agent-recovery-dialog" onMouseDown={event=>event.stopPropagation()}>
       <h2>Agent recovery</h2>
-      <p>Task identity and existing owner claims are preserved while T3 is unavailable or uncertain.
-        A new worker is never spawned automatically.</p>
+      <p>In Progress tasks automatically return to their ready column after four hours without task updates (or the configured timeout), releasing all claims including T3. Agent sessions are not closed.</p>
       {draft && <div className="agent-recovery-fields">
         {number("resumeWindowHours","Agent Resume Window (hours)",1,168,
           "Idle agents are contacted only if their last verified work falls within this window.")}
@@ -50,8 +49,8 @@ export function AgentRecoverySettings({boardPath,onClose}:Props) {
         </label>
         {number("t3OrphanGraceHours","Confirmed-gone T3 grace (hours)",1,168,
           "Only starts after an authoritative permanent-gone receipt; errors and unloaded sessions do not start it.")}
-        {number("externalLeaseHours","External agent inactivity lease (hours)",1,2160,
-          "Non-T3 agents can renew their lease by updating/claiming their task.")}
+        {number("externalLeaseHours","Task inactivity timeout (hours)",1,2160,
+          "All In Progress tasks, including T3 and manually started tasks. Any task update resets the timer; claims are released when it expires.")}
         {number("technicalRecheckDays","Technical blocker recheck age (days)",1,365,
           "Low-priority reminders, never worker spawning or dependency-only rechecks.")}
       </div>}

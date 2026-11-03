@@ -463,13 +463,12 @@ impl FsTaskStore {
         Ok(changed)
     }
 
-    /// On each board read, recover genuinely idle In Progress tasks.
-    /// Direct Markdown edits also count because they update the file timestamp.
+    /// On each board read, release In Progress tasks idle beyond their lease,
+    /// whether claimed by T3/external agents or manually started by the user.
+    /// Direct Markdown edits count through their file modification timestamp.
     fn maintain_abandoned_tasks(&self, root: &Path, snapshot: &BoardSnapshot) -> Result<bool, TaskStoreError> {
-        // An inactive T3 browser session is not a dead worker. A suspended, errored,
-        // throttled or offline T3 session must retain its claim until a separate
-        // authoritative permanently-gone receipt has completed its recovery grace.
-        // External agent claims use a configurable inactivity lease instead.
+        // Task ownership expires after inactivity even when the agent session
+        // remains recoverable. This does not close or revoke the T3 session.
         let hours = fs::read(root.join(".agent-resume-policy.json")).ok()
             .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
             .and_then(|value| value.get("externalLeaseHours").and_then(|hours| hours.as_i64()))
@@ -480,14 +479,7 @@ impl FsTaskStore {
         for task in snapshot.tasks.iter().filter(|task| !task.archived
             && matches!(task.kind, TaskKind::Task | TaskKind::Recurring)
             && task.column == IN_PROGRESS_COLUMN_ID
-            && task.completed.is_none() && !pending_human_request(task)) {
-            // Never infer permanent T3 disappearance from a clock or a failed
-            // inventory query. The separate session-recovery process may restore it.
-            if task.claimed_by.as_deref().is_some_and(|owner| {
-                let raw = owner.strip_prefix("t3-browser:").unwrap_or(owner);
-                raw.len() == 36 && raw.bytes().enumerate().all(|(i, b)|
-                    if [8, 13, 18, 23].contains(&i) { b == b'-' } else { b.is_ascii_hexdigit() })
-            }) { continue; }
+            && task.completed.is_none()) {
             let path = PathBuf::from(&task.path);
             let existing = fs::read_to_string(&path)?;
             if revision(&existing) != task.revision { continue; }
@@ -507,7 +499,7 @@ impl FsTaskStore {
             abandoned.column = return_column(&snapshot.config, origin.as_deref());
             abandoned.claimed_by = None;
             abandoned.description = append_description_update(&abandoned.description, "abandonment",
-                &format!("External claim expired after {hours} hours without task updates (previous owner: {previous_owner}). Moved out of In Progress. Please finish."));
+                &format!("In Progress timed out after {hours} hours without task updates (previous owner: {previous_owner}). Claim released; returned to {}.", abandoned.column));
             let rendered = stamp_activity(&render_with_claim_token(&abandoned, &existing, None)?, None, true)?;
             write_text_atomic(&path, &rendered)?;
             changed = true;
@@ -708,6 +700,14 @@ impl FsTaskStore {
 }
 
 impl FsTaskStore {
+    /// Lightweight periodic sweep: only reclaim expired In Progress claims.
+    /// Unlike `load`, this does not run unrelated board maintenance.
+    pub fn expire_inactive(&self, root: &Path) -> Result<bool, TaskStoreError> {
+        let _lock = acquire_lock(root)?;
+        let snapshot = self.load_unlocked(root)?;
+        self.maintain_abandoned_tasks(root, &snapshot)
+    }
+
     fn load_impl(&self, root: &Path) -> Result<BoardSnapshot, TaskStoreError> {
         let _lock = acquire_lock(root)?;
         let mut snapshot = self.load_unlocked(root)?;
@@ -1162,7 +1162,7 @@ fn mirror_local_related_links(
     Ok(())
 }
 
-const ABANDON_AFTER_HOURS: i64 = 24;
+const ABANDON_AFTER_HOURS: i64 = 4;
 
 /// Human Inbox requests remain in place even when their agent is inactive.
 fn pending_human_request(task: &Task) -> bool {

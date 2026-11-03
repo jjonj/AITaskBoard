@@ -583,6 +583,29 @@ fn sweep_registered_review_boards() {
     }
 }
 
+/// Sweep all vault boards (including hidden tabs) and registered external boards.
+/// The core owns the per-board lock, so active edits are never overwritten.
+fn sweep_inactive_taskboards() {
+    let mut roots = std::collections::HashMap::<String, PathBuf>::new();
+    if let Ok(catalog) = projects::list_projects() {
+        for project in catalog.projects {
+            roots.insert(project.path.to_ascii_lowercase(), PathBuf::from(project.path));
+        }
+    }
+    if let Ok(entries) = fs::read_dir(r"B:\GDrive\SharedWithPhone\Obsidian\jjj") {
+        for entry in entries.flatten() {
+            let root = entry.path().join("Tasks");
+            roots.insert(root.to_string_lossy().to_ascii_lowercase(), root);
+        }
+    }
+    let store = FsTaskStore::default();
+    for root in roots.into_values().filter(|root| root.join("_board.md").is_file()) {
+        if let Err(err) = store.expire_inactive(&root) {
+            eprintln!("TaskBoard inactivity sweep {}: {err}", root.display());
+        }
+    }
+}
+
 #[tauri::command]
 fn startup_review() -> Option<serde_json::Value> {
     let value: serde_json::Value = serde_json::from_str(&std::env::var("TASKBOARD_START_REVIEW").ok()?).ok()?;
@@ -645,6 +668,10 @@ pub fn run() {
             std::thread::spawn(|| loop {
                 sweep_registered_review_boards();
                 std::thread::sleep(std::time::Duration::from_secs(6 * 60 * 60));
+            });
+            std::thread::spawn(|| loop {
+                sweep_inactive_taskboards();
+                std::thread::sleep(std::time::Duration::from_secs(60));
             });
             use tauri::Manager;
             if let Some(window) = app.get_webview_window("main") {

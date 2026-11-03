@@ -14,7 +14,7 @@ pub(crate) struct AgentPolicy {
 }
 impl Default for AgentPolicy {
     fn default()->Self { Self{resume_window_hours:2,wake_recent_idle:true,
-        t3_orphan_grace_hours:2,external_lease_hours:24,technical_recheck_days:7} }
+        t3_orphan_grace_hours:2,external_lease_hours:4,technical_recheck_days:7} }
 }
 impl AgentPolicy {
     fn validate(&self)->Result<(),String>{
