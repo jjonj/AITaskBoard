@@ -40,6 +40,8 @@ enum TaskCommand {
     Create(TaskCreateArgs),
     Update(TaskUpdateArgs),
     Move(TaskMoveArgs),
+    /// Preview or repair old tasks whose claim and column disagree.
+    ReconcileClaims { #[arg(long)] apply: bool },
     Parent(TaskParentArgs),
     Complete(TaskTarget),
     Finish(TaskFinishArgs),
@@ -281,6 +283,12 @@ struct TaskUpdateArgs {
 struct TaskMoveArgs {
     target: String,
     column: String,
+    /// Required for agents entering In Progress; use the actual agent/session identity.
+    #[arg(long)]
+    agent: Option<String>,
+    /// Create a token-bound managed claim when entering In Progress.
+    #[arg(long)]
+    managed: bool,
     /// Required when moving into the Blocked column.
     #[arg(long)]
     blocked_reason: Option<String>,
@@ -968,6 +976,27 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
             let column = resolve_column(&snapshot.config, &args.column)?.id.clone();
             let mut task = resolve_task(&snapshot, &args.target, false)?.clone();
             ensure_task_rewrite_safe(&task)?;
+            if column == "in-progress" {
+                if task.column == column && task.claimed_by.is_some() {
+                    if args.agent.as_deref().is_some_and(|agent| task.claimed_by.as_deref() != Some(agent)) {
+                        return Err(CliError::new("already_claimed", "In Progress belongs to a different agent").exit(3));
+                    }
+                    return Ok(json!(task));
+                }
+                if task.claimed_by.is_some() {
+                    return Err(CliError::new("claim_column_mismatch", "Existing claim is outside In Progress; run task reconcile-claims --apply first").exit(3));
+                }
+                let agent = args.agent.as_deref().filter(|agent| !agent.trim().is_empty())
+                    .ok_or_else(|| CliError::new("agent_required", "Agents entering In Progress must claim it: task claim ID --agent AGENT, or task move ID In-Progress --agent AGENT").exit(3))?;
+                if args.managed {
+                    let claim = store.claim_managed(root, &task.id, agent).map_err(map_store_error)?;
+                    return Ok(json!({ "task": claim.task, "claim_token": claim.claim_token }));
+                }
+                return Ok(json!(store.claim(root, &task.id, agent).map_err(map_store_error)?));
+            }
+            if args.managed {
+                return Err(CliError::new("invalid_managed", "--managed only applies when entering In Progress").exit(3));
+            }
             if is_human_only(&task) && snapshot.config.columns.iter().any(|c| c.id == column && c.terminal) {
                 return Err(CliError::new("for_user_only", "For user tasks can only be completed by the user in TaskBoard").exit(4));
             }
@@ -980,6 +1009,8 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
             if let Some(reason) = &args.blocked_reason { task.blocked_reason = Some(reason.clone()); }
             Ok(json!(store.update_as_confirmed(root, task, task_core::MutationActor::Agent, args.confirm_genuine_block.as_deref(), "move").map_err(map_store_error)?))
         }
+        TaskCommand::ReconcileClaims { apply } =>
+            Ok(json!({ "applied": apply, "changes": store.reconcile_claim_columns(root, *apply).map_err(map_store_error)? })),
         TaskCommand::Parent(args) => {
             if !args.clear && args.parent.is_none() {
                 return Err(CliError::new("usage_error", "provide --parent <task> or --clear"));
@@ -1715,7 +1746,7 @@ mod tests {
 
         let move_done = run_task(&store, &root, &TaskCommand::Move(TaskMoveArgs {
             target: human.id.clone(), column: "done".into(),
-            blocked_reason: None, confirm_genuine_block: None,
+            agent: None, managed: false, blocked_reason: None, confirm_genuine_block: None,
         })).unwrap_err();
         assert_eq!(move_done.code, "for_user_only");
 
@@ -2211,6 +2242,46 @@ mod tests {
         let released = store.release_claim(&root, &task.id, "agent-a").unwrap();
         assert_eq!(released.claimed_by, None);
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn claims_follow_agent_moves_and_manual_in_progress_is_unclaimed() {
+        let root = temp_board("claim-column-sync");
+        let store = FsTaskStore::default();
+        store.ensure_board(&root, "Claim columns").unwrap();
+        let task = store.create(&root, draft("Move through columns")).unwrap();
+        let move_to = |column: &str, agent: Option<&str>| TaskCommand::Move(TaskMoveArgs {
+            target: task.id.clone(), column: column.into(), agent: agent.map(str::to_owned),
+            managed: false, blocked_reason: None, confirm_genuine_block: None,
+        });
+
+        assert_eq!(run_task(&store, &root, &move_to("in-progress", None)).unwrap_err().code, "agent_required");
+        let started = run_task(&store, &root, &move_to("in-progress", Some("agent-a"))).unwrap();
+        assert_eq!(started["column"], "in-progress");
+        assert_eq!(started["claimed_by"], "agent-a");
+        let stopped = run_task(&store, &root, &move_to("ai-ready", None)).unwrap();
+        assert_eq!(stopped["column"], "ai-ready");
+        assert!(stopped["claimed_by"].is_null());
+
+        let mut human = store.load(&root).unwrap().tasks.into_iter()
+            .find(|item| item.id == task.id).unwrap();
+        human.column = "in-progress".into();
+        let manual = store.update_as(&root, human, task_core::MutationActor::Human).unwrap();
+        assert!(manual.claimed_by.is_none());
+        let mismatches = store.reconcile_claim_columns(&root, false).unwrap();
+        assert_eq!(mismatches.len(), 1);
+        store.reconcile_claim_columns(&root, true).unwrap();
+        let ready = store.load(&root).unwrap().tasks.into_iter()
+            .find(|item| item.id == task.id).unwrap();
+        assert_eq!(ready.column, "ai-ready");
+
+        let managed = store.claim_managed(&root, &task.id, "agent-a").unwrap();
+        let finished = store.complete_managed(&root, &task.id, "agent-a", &managed.claim_token, &managed.task.revision).unwrap();
+        assert_eq!(finished.column, "done");
+        assert!(finished.claimed_by.is_none());
+        assert!(!fs::read_to_string(root.join("Active").join(format!("{}.md", task.id))).unwrap()
+            .contains("claim_token:"));
         let _ = fs::remove_dir_all(root);
     }
 }

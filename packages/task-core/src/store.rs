@@ -430,15 +430,11 @@ impl FsTaskStore {
                 return Err(TaskStoreError::Conflict(format!("{} changed during dependency release", task.id)));
             }
             let mut released = task.clone();
-            released.column = if released.claimed_by.is_some() &&
-                snapshot.config.columns.iter().any(|c| c.id == IN_PROGRESS_COLUMN_ID && !c.terminal) {
-                IN_PROGRESS_COLUMN_ID.to_string()
-            } else {
-                ready_column.id.clone()
-            };
+            released.column = ready_column.id.clone();
+            released.claimed_by = None;
             released.blocked_reason = None;
             apply_completion_state(&snapshot.config, &mut released);
-            write_text_atomic(&path, &render_task(&released, Some(&existing))?)?;
+            write_text_atomic(&path, &render_with_claim_token(&released, &existing, None)?)?;
             changed = true;
         }
         Ok(changed)
@@ -463,24 +459,6 @@ impl FsTaskStore {
                 write_text_atomic(&path, &after)?;
                 changed = true;
             }
-        }
-        Ok(changed)
-    }
-
-    /// Repair existing unanswered Inbox requests left in an AI Todo column.
-    fn maintain_inbox_placement(&self, snapshot: &BoardSnapshot) -> Result<bool, TaskStoreError> {
-        let mut changed = false;
-        for task in snapshot.tasks.iter().filter(|task| !task.archived
-            && pending_human_request(task) && is_todo(&snapshot.config, &task.column)) {
-            let path = PathBuf::from(&task.path);
-            let existing = fs::read_to_string(&path)?;
-            if revision(&existing) != task.revision { continue; }
-            let mut corrected = task.clone();
-            corrected.column = IN_PROGRESS_COLUMN_ID.into();
-            let rendered = update_activity(&render_task(&corrected, Some(&existing))?,
-                &existing, task, &corrected, &snapshot.config)?;
-            write_text_atomic(&path, &rendered)?;
-            changed = true;
         }
         Ok(changed)
     }
@@ -742,9 +720,6 @@ impl FsTaskStore {
         if self.maintain_completed_tasks(root, &snapshot)? {
             snapshot = self.load_unlocked(root)?;
         }
-        if self.maintain_inbox_placement(&snapshot)? {
-            snapshot = self.load_unlocked(root)?;
-        }
         if self.maintain_abandoned_tasks(root, &snapshot)? {
             snapshot = self.load_unlocked(root)?;
         }
@@ -914,6 +889,10 @@ impl FsTaskStore {
 
     pub(crate) fn create_as_unlocked(&self, root: &Path, draft: TaskDraft, actor: MutationActor) -> Result<Task, TaskStoreError> {
         let snapshot = self.load_unlocked(root)?;
+        if actor == MutationActor::Agent && draft.column == IN_PROGRESS_COLUMN_ID {
+            return Err(TaskStoreError::Invalid(
+                "agents must create in a ready column, then claim the task to enter In Progress".into()));
+        }
         validate_draft(&snapshot, &draft)?;
 
         let reserved = match (&draft.reserved_id, &draft.reservation_token) {
@@ -984,8 +963,6 @@ impl FsTaskStore {
         };
         if task.kind == TaskKind::Epic {
             task.column = DRAFT_COLUMN_ID.to_string();
-        } else if pending_human_request(&task) && is_todo(&snapshot.config, &task.column) {
-            task.column = IN_PROGRESS_COLUMN_ID.into();
         }
         apply_completion_state(&snapshot.config, &mut task);
         apply_blocked_state(None, &mut task, actor)?;
@@ -1076,15 +1053,23 @@ impl FsTaskStore {
            && (task.column == IN_PROGRESS_COLUMN_ID || snapshot.config.columns.iter().any(|c| c.id == task.column && c.terminal)) {
             ensure_dependencies_complete(&snapshot, &task)?;
         }
-        if !task.archived && pending_human_request(&task) && is_todo(&snapshot.config, &task.column)
-            && (!pending_human_request(&previous) || is_todo(&snapshot.config, &previous.column)) {
-            task.column = IN_PROGRESS_COLUMN_ID.into();
-        }
-        // A human moving a task out of the working column is also revoking
-        // the old worker's authority. Preserve normal Inbox answers but never
-        // leave an orphan claimant on a nonworking task.
-        if actor == MutationActor::Human && task.column != IN_PROGRESS_COLUMN_ID {
+        // The claim and In Progress must agree after every move, regardless of
+        // whether the change came from the desktop or an agent CLI.
+        // Human moves INTO In Progress are intentionally allowed unclaimed.
+        if task.column != IN_PROGRESS_COLUMN_ID {
             task.claimed_by = None;
+        } else if actor == MutationActor::Human && previous.column != IN_PROGRESS_COLUMN_ID {
+            task.claimed_by = None;
+        } else if actor == MutationActor::Agent && previous.column != IN_PROGRESS_COLUMN_ID {
+            // A generic task update cannot mint an agent identity or a managed
+            // claim token. Agents must enter via task claim (or move --agent).
+            return Err(TaskStoreError::Invalid(
+                "agent movement into In Progress requires task claim --agent <id>".into()));
+        }
+        if actor == MutationActor::Agent && task.claimed_by.is_some()
+            && task.claimed_by != previous.claimed_by {
+            return Err(TaskStoreError::Invalid(
+                "agent claims must use task claim --agent <id> (not a generic update)".into()));
         }
         if !task.archived {
             apply_completion_state(&snapshot.config, &mut task);
@@ -1237,9 +1222,11 @@ fn update_activity(rendered: &str, existing: &str, before: &Task, after: &Task, 
 
 fn release_to_original(task: &mut Task, config: &BoardConfig, existing: &str)
     -> Result<(), TaskStoreError> {
-    if task.column == IN_PROGRESS_COLUMN_ID && !pending_human_request(task) && task.completed.is_none() {
+    if task.column == IN_PROGRESS_COLUMN_ID {
         let origin = claim_metadata(existing, "in_progress_origin")?;
         task.column = return_column(config, origin.as_deref());
+        task.completed = None;
+        task.completed_at = None;
     }
     task.claimed_by = None;
     Ok(())
@@ -1372,10 +1359,9 @@ impl FsTaskStore {
             .ok_or_else(|| TaskStoreError::Invalid("board has no terminal column".into()))?;
         task.column = terminal.id.clone();
         apply_completion_state(&snapshot.config, &mut task);
+        task.claimed_by = None;
         validate_task(&snapshot, &task)?;
-        let rendered = if task.kind == TaskKind::Recurring {
-            render_with_claim_token(&task, &existing, None)?
-        } else { render_task(&task, Some(&existing))? };
+        let rendered = stamp_activity(&render_with_claim_token(&task, &existing, None)?, None, true)?;
         write_text_atomic(&path, &rendered)?;
         task.revision = revision(&rendered);
         let current = self.load_unlocked(root)?;
@@ -1411,6 +1397,38 @@ impl FsTaskStore {
         write_text_atomic(&path, &rendered)?;
         task.revision = revision(&rendered);
         Ok(task)
+    }
+
+    /// Preview or repair historical claim/column mismatches under the board lock.
+    /// Unclaimed In Progress tasks return to their recorded origin (or AI Ready).
+    /// Claimants outside In Progress are released without disturbing task content.
+    pub fn reconcile_claim_columns(&self, root: &Path, apply: bool) -> Result<Vec<String>, TaskStoreError> {
+        let _lock = acquire_lock(root)?;
+        let snapshot = self.load_unlocked(root)?;
+        let mut changes = Vec::new();
+        for task in snapshot.tasks.iter().filter(|task| !task.archived && task.kind != TaskKind::Epic) {
+            let in_progress = task.column == IN_PROGRESS_COLUMN_ID;
+            if in_progress == task.claimed_by.is_some() { continue; }
+            let path = find_task_path(root, &task.id)?;
+            let existing = fs::read_to_string(&path)?;
+            let mut current = parse_task(&path, false, &existing)?;
+            if current.revision != task.revision {
+                return Err(TaskStoreError::Conflict(format!("{} changed during claim reconciliation", task.id)));
+            }
+            if in_progress {
+                let origin = claim_metadata(&existing, "in_progress_origin")?;
+                current.column = return_column(&snapshot.config, origin.as_deref());
+                changes.push(format!("{}: In Progress -> {} (unclaimed)", task.id, current.column));
+            } else {
+                current.claimed_by = None;
+                changes.push(format!("{}: released claim outside In Progress ({})", task.id, current.column));
+            }
+            if apply {
+                let text = stamp_activity(&render_with_claim_token(&current, &existing, None)?, None, true)?;
+                write_text_atomic(&path, &text)?;
+            }
+        }
+        Ok(changes)
     }
 }
 
@@ -1465,7 +1483,16 @@ impl TaskStore for FsTaskStore {
                     claimed_by: owner.to_string(),
                 });
             }
-            let origin = claim_metadata(&existing, "in_progress_origin")?;
+            if claim_token(&existing)?.is_some() {
+                return Err(TaskStoreError::ClaimInstanceMismatch(
+                    format!("{id}: managed claim cannot be renewed as a manual claim")));
+            }
+            let origin = if task.column == IN_PROGRESS_COLUMN_ID {
+                claim_metadata(&existing, "in_progress_origin")?
+            } else {
+                Some(return_column(&snapshot.config, Some(&task.column)))
+            };
+            task.column = IN_PROGRESS_COLUMN_ID.into();
             let renewed = stamp_activity(&render_with_claim_token(&task, &existing, None)?,origin.as_deref(),true)?;
             write_text_atomic(&path,&renewed)?;
             task.revision=revision(&renewed);
@@ -2250,9 +2277,6 @@ fn validate_task(snapshot: &BoardSnapshot, task: &Task) -> Result<(), TaskStoreE
     validate_parent_epic_only(snapshot, task.kind, task.parent.as_deref(), Some(&task.id))?;
     validate_recurrence(task.kind, task.repeat_every_days, task.next_due.as_deref())?;
     validate_attention(&task.attention, task.question.as_ref())?;
-    if pending_human_request(task) && is_todo(&snapshot.config, &task.column) {
-        return Err(TaskStoreError::Invalid("Pending Inbox question/review cannot remain in a Todo column; use In Progress or Done".into()));
-    }
     validate_live(task)?;
     validate_icon(task.icon.as_deref())?;
     validate_epic_fields(task.kind, task.icon.as_deref(), &task.attention,
