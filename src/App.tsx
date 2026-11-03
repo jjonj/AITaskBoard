@@ -22,6 +22,7 @@ import { QueueOverviewPanel } from "./QueueOverviewPanel";
 import { TaskTracePanel } from "./TaskTracePanel";
 import { StaleBlockerPanel } from "./StaleBlockerPanel";
 import { AgentRecoverySettings } from "./AgentRecoverySettings";
+import { TaskFilterPanel, type TaskFilterSelection } from "./TaskFilterPanel";
 import { mergeTaskEdits } from "./taskMerge";
 import type { ProjectTab, TaskIdReservation, ExecutionMode, QueueOverview, QueueCapacity, ClaimHealth, StaleBlocker } from "./api";
 import {
@@ -297,6 +298,10 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const hideWaitingKey = storageKey("hideDependencyWaitingTasks");
   const [snapshot, setSnapshot] = useState<BoardSnapshot | null>(null);
   const [query, setQuery] = useState("");
+  const [taskFilters, setTaskFilters] = useState<TaskFilterSelection>({
+    icons: [], noIcon: false, columns: [], readiness: [], kinds: [], attention: [],
+  });
+  const [filterPanelOpen, setFilterPanelOpen] = useState(false);
   const [remoteSearchMatches, setRemoteSearchMatches] = useState<Array<{ id: string; title: string; project: string; path: string }>>([]);
   useEffect(() => {
     const needle = query.trim().toLowerCase();
@@ -600,6 +605,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     }
   });
   const boardRef = useRef<HTMLElement | null>(null);
+  const filterControlRef = useRef<HTMLDivElement | null>(null);
   const panRef = useRef({ active: false, startX: 0, scrollLeft: 0 });
   const localMutationVersion = useRef(0);
   const pendingTaskWrites = useRef(new Set<string>());
@@ -1042,6 +1048,11 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     return counts;
   }, [activeTasks]);
 
+  const columns = useMemo(
+    () => [...(snapshot?.config.columns ?? [])].sort((a, b) => a.order - b.order),
+    [snapshot],
+  );
+
   const visibleTasks = useMemo(() => {
     const needle = query.trim().toLowerCase();
     const candidates = needle
@@ -1062,15 +1073,28 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
         )
       : activeTasks;
 
-    // Collapsing an epic hides its executable descendants in every column,
-    // including while searching. Orange For user cards are always visible.
-    return candidates.filter((task) => !isHiddenByCollapsedEpic(task, collapsedTaskIds, taskMap));
-  }, [activeTasks, query, taskMap, collapsedTaskIds]);
+    const hasIconFilter = taskFilters.icons.length > 0 || taskFilters.noIcon;
+    return candidates.filter((task) => {
+      if (hasIconFilter && !(task.icon
+        ? taskFilters.icons.includes(task.icon)
+        : taskFilters.noIcon)) return false;
+      if (taskFilters.columns.length && !taskFilters.columns.includes(task.column)) return false;
+      if (taskFilters.readiness.length && !taskFilters.readiness.includes(readinessOf(task))) return false;
+      if (taskFilters.attention.length && !taskFilters.attention.some(flag => task.attention.includes(flag))) return false;
+      if (taskFilters.kinds.length) {
+        const kind = isForUser(task) ? "for_user" : task.kind;
+        if (!taskFilters.kinds.includes(kind)) return false;
+      }
 
-  const columns = useMemo(
-    () => [...(snapshot?.config.columns ?? [])].sort((a, b) => a.order - b.order),
-    [snapshot],
-  );
+      // Collapsing an epic hides its executable descendants in every column,
+      // including while searching. Orange For user cards are always visible.
+      return !isHiddenByCollapsedEpic(task, collapsedTaskIds, taskMap);
+    });
+  }, [activeTasks, query, taskMap, collapsedTaskIds, taskFilters, remotePrerequisites, columns]);
+
+  const activeFilterCount = taskFilters.icons.length + Number(taskFilters.noIcon) +
+    taskFilters.columns.length + taskFilters.readiness.length +
+    taskFilters.kinds.length + taskFilters.attention.length;
   const userQueueTasks = useMemo(
     () => snapshot
       ? newestUserTasks(activeTasks.filter((task) => isUserQueueEligible(task, snapshot, userQueueSnoozes)))
@@ -2818,6 +2842,28 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       undoCount, reviewOpen, keyboardSelectedTaskId, query, userQueueTasks, childCounts, doneMenuOpen]);
 
   useEffect(() => {
+    if (reviewOpen) setFilterPanelOpen(false);
+  }, [reviewOpen]);
+
+  useEffect(() => {
+    if (!filterPanelOpen) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !filterControlRef.current?.contains(event.target)) {
+        setFilterPanelOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setFilterPanelOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [filterPanelOpen]);
+
+  useEffect(() => {
     if (!contextMenu && !columnContextMenu) return;
     const close = () => { setContextMenu(null); setColumnContextMenu(null); };
     window.addEventListener("blur", close);
@@ -2925,6 +2971,30 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
                 </button>)}
               </div>}
           </div>
+          {!reviewOpen && <div className="task-filter-control" ref={filterControlRef}>
+            <button type="button"
+              className={`button secondary task-filter-trigger${activeFilterCount ? " has-filters" : ""}`}
+              onClick={() => setFilterPanelOpen(open => !open)}
+              aria-expanded={filterPanelOpen}
+              aria-haspopup="dialog"
+              title="Filter cards by icon, column, readiness, type and attention states">
+              <svg viewBox="0 0 20 20" width="15" height="15" aria-hidden="true"
+                fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round">
+                <path d="M2.5 4h15l-5.8 6.4v5.1l-3.4 1.8v-6.9z" />
+              </svg>
+              Filters{activeFilterCount > 0 && <span className="task-filter-count">{activeFilterCount}</span>}
+            </button>
+            {filterPanelOpen && <TaskFilterPanel
+              filters={taskFilters}
+              columns={columns.map(column => ({ id: column.id, name: column.name }))}
+              matchingCount={visibleTasks.length}
+              onChange={setTaskFilters}
+              onClear={() => setTaskFilters({
+                icons: [], noIcon: false, columns: [], readiness: [], kinds: [], attention: [],
+              })}
+              onClose={() => setFilterPanelOpen(false)}
+            />}
+          </div>}
           <details className="toolbar-more">
             <summary className="button secondary" title="More TaskBoard actions">More ▾</summary>
             <div className="toolbar-more-menu">
@@ -3020,7 +3090,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
           const columnQueueMixed = queuedColumnCount > 0 && queuedColumnCount < eligibleColumnQueue.length;
           const columnTasks = orderCardsByDependencies(applyCardPlacements(allColumnTasks
             .filter((task) => !(column.id === "blocked" && hideBlockedInboxTasks && isInReviewInbox(task)))
-            .filter((task) => !hideWaitingTasks || isComplete(task.id) || task.column === "in-progress" || readinessOf(task) !== "waiting")
+            .filter((task) => !hideWaitingTasks || taskFilters.readiness.includes("waiting") || isComplete(task.id) || task.column === "in-progress" || readinessOf(task) !== "waiting")
             .sort((a, b) => column.terminal
               ? completedSortTime(b) - completedSortTime(a) || b.id.localeCompare(a.id)
               : attentionRank(a) - attentionRank(b) ||
