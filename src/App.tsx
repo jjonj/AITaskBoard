@@ -370,7 +370,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
         setQueueSyncStatuses(Object.fromEntries(result.items.map(item =>
           [item.id, { status: item.status, reason: item.reason ?? null }])));
         const unresolved = result.items.filter(item =>
-          !["registered", "terminal", "canceled", "not_queued"].includes(item.status));
+          !["registered", "queued", "terminal", "canceled", "not_queued"].includes(item.status));
         setQueueRecoveryWarning([
           ...unresolved.slice(0, 3).map(item =>
             `${item.id}: ${item.status} — ${item.reason ?? "inspect exact OpenRig receipt"}`),
@@ -380,7 +380,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       }).catch(reason => {
         if (active) {
           setQueueReconciliationOffline(true);
-          setQueueRecoveryWarning(`OpenRig Queue reconciliation unavailable: ${String(reason)}`);
+          setQueueRecoveryWarning(`Queue reconciliation unavailable: ${String(reason)}`);
         }
       }).finally(() => { busy = false; });
     };
@@ -1657,10 +1657,10 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     // to roll it back; report the independent queue result explicitly.
     try {
       const result = await taskSyncQueue(id, boardPath);
-      if (["not_queued", "registered", "terminal", "canceled"].includes(result.status)) return null;
-      return `${id} saved locally; OpenRig queue ${result.status}: ${result.reason || result.qitemId || "reconcile this task"}`;
+      if (["not_queued", "queued", "registered", "terminal", "canceled"].includes(result.status)) return null;
+      return `${id} saved locally; queue ${result.status}: ${result.reason || result.qitemId || "reconcile this task"}`;
     } catch (error) {
-      return `${id} saved locally, but OpenRig queue sync is unavailable: ${errorText(error)}`;
+      return `${id} saved locally, but queue sync is unavailable: ${errorText(error)}`;
     }
   };
 
@@ -1707,7 +1707,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     if (conflicts.length) setError(`Column preference saved. ${conflicts.length} task(s) require Queue reconciliation: ${conflicts.slice(0, 3).join(" · ")}`);
     else {
       void taskQueueReconcile(boardPath).then(() => refresh(boardPath, true)).catch(err =>
-        setQueueRecoveryWarning(`OpenRig unavailable: ${errorText(err)}`));
+        setQueueRecoveryWarning(`Queue reconciliation unavailable: ${errorText(err)}`));
     }
   });
 

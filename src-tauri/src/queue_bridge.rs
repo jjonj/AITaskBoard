@@ -108,6 +108,15 @@ pub(crate) async fn sync(path: PathBuf, id: String) -> Result<QueueSyncStatus, S
     let reference = ref_json(&path, &id);
     let request = execution.queue_request.as_deref();
     let qid = request.map(|request| format!("qitem-taskboard-{request}"));
+    // T3 now owns NEW queued work. Never register an unattempted intent with
+    // OpenRig: that would allow two independent schedulers to start the task.
+    // Existing OpenRig attempts/receipts retain their original owner until
+    // terminal reconciliation, so an UNKNOWN registration is never duplicated.
+    if execution.mode == ExecutionMode::Queue && dispatchable &&
+        execution.queue_attempt.is_none() && execution.queue_receipt.is_none() {
+        return Ok(status("queued", qid,
+            Some("T3 local queue; starts only while Keep T3 Busy is enabled and capacity permits".into())));
+    }
     if !matches!(task.kind, TaskKind::Task|TaskKind::Recurring) || finished || execution.mode == ExecutionMode::Backlog || (!dispatchable && execution.queue_attempt.is_some()) {
         if let (Some(qitem), Some(request), Some(attempt)) = (qid.as_deref(),request,execution.queue_attempt.as_deref()) {
             if attempt != request || execution.queue_receipt.as_deref().is_some_and(|receipt| receipt != qitem) {
@@ -231,51 +240,83 @@ pub(crate) async fn sync(path: PathBuf, id: String) -> Result<QueueSyncStatus, S
     Ok(status("registered",qid,None))
 }
 
-/** OW-0019: read-only projection of the ONE OpenRig task queue. Authentication
- * remains in native code, not in renderer JS or HTML. */
+/** T3 is the dispatcher; show the authoritative TaskBoard queued intents
+ * rather than an unrelated OpenRig outbox. Legacy registrations remain labeled. */
 pub(crate) async fn overview(path: PathBuf) -> Result<Value, String> {
-    let bearer = token()?;
-    let client = client()?;
-    let board_root = path.to_string_lossy().trim_end_matches(['\\','/']).replace('/', "\\");
-    let response = client.get(format!("{DAEMON}/api/queue/taskboard/overview"))
-        .bearer_auth(&bearer)
-        .query(&[("environmentId", "pc"), ("boardRoot", board_root.as_str())])
-        .send().await
-        .map_err(|_| "OpenRig queue overview unavailable; no queue write attempted".to_owned())?;
-    let code = response.status();
-    let result = response.json::<Value>().await
-        .map_err(|_| "OpenRig queue overview returned invalid JSON".to_owned())?;
-    if !code.is_success() {
-        return Err(format!("OpenRig queue overview refused ({code}): {}",
-            result["error"].as_str().unwrap_or("unknown error")));
+    let store = FsTaskStore::default();
+    let board = store.load(&path).map_err(|e| e.to_string())?;
+    let root = path.to_string_lossy().trim_end_matches(['\\', '/']).replace('/', "\\");
+    let mut items = Vec::new();
+    for task in board.tasks.iter().filter(|task| !task.archived &&
+        task.completed.is_none() && task.column == task_core::AI_READY_COLUMN_ID &&
+        matches!(task.kind, TaskKind::Task | TaskKind::Recurring)) {
+        let intent = store.execution_intent(&path, &task.id).map_err(|e| e.to_string())?;
+        if intent.mode != ExecutionMode::Queue {continue;}
+        let Some(request) = intent.queue_request else {continue;};
+        let legacy = intent.queue_attempt.is_some() || intent.queue_receipt.is_some();
+        let started = task.claimed_by.as_ref().map(|claim| claim.starts_with("t3:") ||
+            claim.starts_with("t3-browser:")).unwrap_or(false);
+        let session = task.claimed_by.as_ref().and_then(|claim| {
+            claim.strip_prefix("t3-browser:").or_else(|| claim.strip_prefix("t3:"))
+        });
+        items.push(json!({
+            "qitemId": format!("qitem-taskboard-{request}"),
+            "taskId":task.id,"summary":task.title,
+            "state":if started {"running"}else{"pending"},
+            "priority":if task.attention.contains(&task_core::TaskAttention::Priority){"urgent"}else{"routine"},
+            "createdAt":task.created,"updatedAt":chrono::Utc::now().to_rfc3339(),
+            "claimedAt":null,"pickup":null,"waiting":null,
+            "startupState":if legacy {Some("legacy-openrig")} else {None},
+            "t3SessionId":session
+        }));
     }
-    if result["schema"] != "openrig-taskboard-queue-overview/v1" ||
-        result["environmentId"] != "pc" ||
-        result["boardRoot"] != board_root {
-        return Err("OpenRig queue overview identity/schema mismatch".into());
-    }
-    Ok(result)
+    items.sort_by(|a,b| {
+        let pa = a["priority"] == "urgent";
+        let pb = b["priority"] == "urgent";
+        pb.cmp(&pa).then_with(|| a["createdAt"].as_str().cmp(&b["createdAt"].as_str()))
+    });
+    let active_count = items.len();
+    Ok(json!({"schema":"t3-taskboard-queue-overview/v1",
+        "observedAt":chrono::Utc::now().to_rfc3339(),
+        "environmentId":"pc","boardRoot":root,"activeCount":active_count,
+        "limit":active_count,"hasMore":false,"items":items}))
 }
 
-/** OW-0019: provider capacity is advisory and may be unavailable (HTTP 503).
- * Never interpret an unavailable/partial snapshot as free slots. */
+/** T3's one authority counts all manually and automatically working agents.
+ * No OpenRig credentials, daemon readiness or independent capacity policy. */
 pub(crate) async fn capacity() -> Result<Value, String> {
-    let bearer = token()?;
-    let client = client()?;
-    let response = client.get(format!("{DAEMON}/api/integrations/t3/capacity"))
-        .bearer_auth(&bearer).send().await
-        .map_err(|_| "OpenRig T3 capacity unavailable; no launch attempted".to_owned())?;
-    let code = response.status();
-    let snapshot = response.json::<Value>().await
-        .map_err(|_| "OpenRig T3 capacity returned invalid JSON".to_owned())?;
-    if code != StatusCode::OK && code != StatusCode::SERVICE_UNAVAILABLE {
-        return Err(format!("OpenRig T3 capacity query refused ({code})"));
-    }
-    if !snapshot["working"].is_number() || !snapshot["limit"].is_number() ||
-        !snapshot["admissible"].is_boolean() || !snapshot["reason"].is_null() && !snapshot["reason"].is_string() {
-        return Err("OpenRig T3 capacity payload invalid or incomplete".into());
-    }
-    Ok(snapshot)
+    tauri::async_runtime::spawn_blocking(|| {
+        use std::process::{Command, Stdio};
+        use std::io::Write;
+        let script = r"D:\SSDProjects\Tools\t3code\scripts\chatgpt-sessions.mjs";
+        if !std::path::Path::new(script).is_file() {
+            return Err("T3 capacity CLI unavailable".to_owned());
+        }
+        let mut cmd = Command::new("node.exe");
+        cmd.arg(script).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        #[cfg(windows)] {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
+        let mut child=cmd.spawn().map_err(|e|format!("Cannot query T3 capacity: {e}"))?;
+        if let Some(mut input)=child.stdin.take() {
+            input.write_all(br#"{"action":"caffy","op":"capacity"}"#)
+                .map_err(|e|format!("T3 capacity request failed: {e}"))?;
+        }
+        let output=child.wait_with_output()
+            .map_err(|e|format!("T3 capacity receipt unavailable: {e}"))?;
+        if !output.status.success() {
+            return Err(format!("T3 capacity unavailable: {}",
+                String::from_utf8_lossy(&output.stderr).chars().take(240).collect::<String>()));
+        }
+        let value:Value=serde_json::from_slice(&output.stdout)
+            .map_err(|e|format!("T3 capacity response invalid: {e}"))?;
+        if !value["working"].is_number() || !value["limit"].is_number() ||
+            !value["admissible"].is_boolean() {
+            return Err("T3 capacity response incomplete".into());
+        }
+        Ok(value)
+    }).await.map_err(|e|format!("T3 capacity query failed: {e}"))?
 }
 
 /** OW-0019: change the ordering priority only for the currently registered

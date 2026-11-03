@@ -102,11 +102,11 @@ export const taskRequestStartNow = (id: string, expectedRevision: string, path?:
   invoke<ExecutionIntent>("task_request_start_now", { path, id, expectedRevision });
 
 export type QueueSyncResult = {
-  status: "not_queued" | "unavailable" | "registered" | "terminal" | "running" | "canceled" | "unknown" | "rejected" | "conflict";
+  status: "not_queued" | "queued" | "unavailable" | "registered" | "terminal" | "running" | "canceled" | "unknown" | "rejected" | "conflict";
   qitemId: string | null;
   reason: string | null;
 };
-/** Native authenticated one-shot bridge; never exposes OpenRig bearer to renderer. */
+/** Native bridge: new Queue intentions are T3-owned; legacy OpenRig attempts reconcile with their original owner. */
 export const taskSyncQueue = (id: string, path?: string) =>
   invoke<QueueSyncResult>("task_sync_queue", { path, id });
 
@@ -118,12 +118,12 @@ export type QueueOverviewItem = {
   t3SessionId: string | null;
 };
 export type QueueOverview = {
-  schema: "openrig-taskboard-queue-overview/v1";
+  schema: "t3-taskboard-queue-overview/v1";
   observedAt: string; environmentId: "pc"; boardRoot: string;
   activeCount: number | null; hasMore: boolean; limit: number;
   items: QueueOverviewItem[];
 };
-/** Read-only canonical OpenRig board queue. Credentials never reach the renderer. */
+/** Read-only TaskBoard queue intents; T3 owns admission and launch. */
 export const taskQueueOverview = (path?: string) =>
   invoke<QueueOverview>("task_queue_overview", { path });
 

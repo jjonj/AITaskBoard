@@ -21,12 +21,13 @@ const statusLabel = (item: QueueOverviewItem) => {
   if (item.startupState === "reserved") return "Capacity reserved · launch not attempted";
   if (item.startupState === "starting") return "Launch submitted · reply not verified";
   if (item.startupState === "indeterminate") return "Launch outcome UNKNOWN · reconciliation required";
-  if (item.state === "pending") return "Pending · pickup not verified";
+  if (item.state === "pending") return item.startupState === "legacy-openrig"
+    ? "Legacy OpenRig registration · pending"
+    : "Queued in T3 · waiting for Keep T3 Busy and capacity";
   return item.state;
 };
 
-/** The native bridge reads OpenRig's exact board-scoped canonical queue.
- * No second job registry, launch poller, or inferred provider status. */
+/** Native bridge reads TaskBoard intent, with T3 owning admission/spawn. */
 export function QueueOverviewPanel({ boardPath, capacity, onClose, onOpenTask, onChanged }: Props) {
   const [snapshot, setSnapshot] = useState<QueueOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -100,15 +101,17 @@ export function QueueOverviewPanel({ boardPath, capacity, onClose, onOpenTask, o
     setBusyId(item.qitemId);
     try {
       const intent = await taskExecutionIntent(item.taskId, boardPath);
-      if (intent.mode !== "queue" || intent.queue_receipt !== item.qitemId) {
-        throw new Error("TaskBoard Queue receipt no longer matches this OpenRig item. No cancellation sent.");
+      if (intent.mode !== "queue" || !intent.queue_request ||
+          `qitem-taskboard-${intent.queue_request}` !== item.qitemId ||
+          (intent.queue_receipt && intent.queue_receipt !== item.qitemId)) {
+        throw new Error("TaskBoard queue identity no longer matches this item. No cancellation sent.");
       }
       // This first saves a human Backlog intent with an optimistic revision.
       // Native sync then checks the original queue row and performs a guarded
       // pending-only cancel. Timeout/UNKNOWN is not replayed automatically.
       await taskSetExecutionMode(item.taskId, intent.revision, "backlog", boardPath);
       const result = await taskSyncQueue(item.taskId, boardPath);
-      if (result.status !== "canceled" && result.status !== "terminal") {
+      if (!["canceled", "terminal", "not_queued"].includes(result.status)) {
         setActionWarning(`${item.taskId}: ${result.status} — ${result.reason ?? "exact queue reconciliation required"}`);
       }
       onChanged?.();
@@ -121,7 +124,7 @@ export function QueueOverviewPanel({ boardPath, capacity, onClose, onOpenTask, o
   };
 
   return (
-    <aside className="omni-queue-drawer" aria-label="OpenRig queued work" role="dialog" aria-modal="false">
+    <aside className="omni-queue-drawer" aria-label="T3 queued work" role="dialog" aria-modal="false">
       <div className="omni-queue-heading">
         <div>
           <strong>Queue</strong>
@@ -141,7 +144,7 @@ export function QueueOverviewPanel({ boardPath, capacity, onClose, onOpenTask, o
             : `Background admission paused: ${capacity.reason ?? "no verified free slot"}`}</strong>
         </> : <strong>T3 capacity unavailable. No background availability inferred.</strong>}
       </div>
-      {error && <p className="omni-queue-warning" role="status">OpenRig unavailable: {error}. No capacity or job state inferred.</p>}
+      {error && <p className="omni-queue-warning" role="status">Queue unavailable: {error}. No capacity or job state inferred.</p>}
       {actionWarning && <p className="omni-queue-warning" role="status">{actionWarning}</p>}
       {snapshot?.hasMore && <p className="omni-queue-warning">Queue list truncated. Counts are not exact.</p>}
       {snapshot && !snapshot.items.length && <p className="omni-queue-empty">No active queued jobs on this board.</p>}
@@ -152,14 +155,15 @@ export function QueueOverviewPanel({ boardPath, capacity, onClose, onOpenTask, o
               <strong>{item.taskId ?? "Unverified task reference"}</strong>
               <span>{item.priority}</span>
             </div>
-            <p>{item.summary ?? "No title available from OpenRig"}</p>
+            <p>{item.summary ?? "No title available"}</p>
             <small>{statusLabel(item)}</small>
             <div className="omni-queue-actions">
               <button type="button" disabled={!item.taskId}
                 onClick={() => { if (item.taskId) onOpenTask(item.taskId); }}>Open task</button>
               {item.state === "pending" && !["starting","indeterminate"].includes(item.startupState ?? "") && (
+
                 <>
-                  <label className="omni-queue-priority-label">
+                  {item.startupState === "legacy-openrig" ? <><label className="omni-queue-priority-label">
                     Priority
                     <select aria-label={`Priority for ${item.taskId ?? item.qitemId}`}
                       value={item.priority} disabled={!!busyId || !item.taskId}
@@ -180,7 +184,7 @@ export function QueueOverviewPanel({ boardPath, capacity, onClose, onOpenTask, o
                       other.qitemId !== item.qitemId && other.state === "pending" &&
                       snapshot.items.indexOf(other) > snapshot.items.indexOf(item))}
                     title="Move later within the same priority group" aria-label={`Move ${item.taskId} later`}
-                    onClick={() => void movePending(item, "down")}>↓</button>
+                    onClick={() => void movePending(item, "down")}>↓</button></> : <span title="Set Priority in the TaskBoard card">Priority follows task card</span>}
                   <button type="button" disabled={!!busyId || !item.taskId}
                     onClick={() => void cancel(item)}>{busyId === item.qitemId ? "Updating…" : "Cancel queue"}</button>
                 </>
