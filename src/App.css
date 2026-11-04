@@ -3690,3 +3690,100 @@ body.card-dragging .project-tab-wrapper:not(.selected):hover {
   .queue-capacity-chip, .topbar-meta { display: none; }
   .toolbar-toggle { padding: 0 7px; }
 }
+
+/* Compact human-decision Inbox: the question is primary; long engineering
+   context and criteria remain available without crowding the answer. */
+.review-human-stage .review-heading {
+  align-items: flex-start;
+  padding: 4px 50px 10px 5px;
+  gap: 16px;
+}
+.review-human-stage .review-heading > div:first-child { flex: 1 1 auto; min-width: 0; }
+.review-human-stage .review-heading > div:last-child {
+  display: flex; align-items: center; justify-content: flex-end;
+  flex-wrap: wrap; flex: 0 1 280px; min-width: 0;
+}
+.review-human-stage .review-heading h2 { line-height: 1.28; max-width: 720px; }
+.review-human-workspace { grid-template-columns: minmax(0, 1fr) minmax(200px, 245px); }
+.review-human-workspace .review-stage-column {
+  background: transparent; border: 0; padding: 0;
+}
+.review-human-workspace .review-user-fields { padding: 0; gap: 12px; }
+.review-human-workspace .review-user-question {
+  padding: 16px; border: 1px solid #65543f;
+  border-left: 3px solid #d9a75d; border-radius: 8px;
+  background: #292826;
+}
+.review-human-workspace .review-user-question > strong {
+  display: block; color: #f5ecde; font-size: 15px;
+  font-weight: 670; line-height: 1.42;
+}
+.review-human-workspace .review-user-choice {
+  display: grid; grid-template-columns: 1fr;
+  gap: 7px; margin-top: 14px;
+}
+.review-human-workspace .review-user-choice .button {
+  display: flex; align-items: center; justify-content: flex-start;
+  width: 100%; min-height: 38px; padding: 8px 12px;
+  font-size: 12px; line-height: 1.4; text-align: left;
+  font-weight: 560; white-space: normal; cursor: pointer;
+  color: #e0eaf2; background: #18232e; border: 1px solid #3a5265;
+}
+.review-human-workspace .review-user-choice .button:hover:not(:disabled) {
+  border-color: #90b8d4; background: #253847;
+}
+.review-human-workspace .review-user-choice .button[aria-pressed="true"] {
+  border-color: #69c1a0; background: #21463e; color: #edfff6;
+}
+.review-choice-marker {
+  width: 16px; height: 16px; flex: none;
+  border: 1.5px solid #688195; border-radius: 50%;
+  display: inline-grid; place-items: center;
+  font-size: 11px; margin-right: 9px;
+}
+.review-user-choice [aria-pressed="true"] .review-choice-marker {
+  border-color: #79d9b2; background: #357d64; color: white;
+}
+.review-human-workspace .review-user-fields > label { font-weight: 570; }
+.review-human-workspace .review-user-fields textarea {
+  min-height: 90px; line-height: 1.4;
+}
+.review-human-workspace .inbox-attach-button {
+  justify-self: start; font-size: 11px;
+}
+.review-human-details {
+  min-width: 0; display: flex; flex-direction: column;
+  gap: 10px; padding: 12px; border: 1px solid #334555;
+  border-radius: 8px; background: #18232d; font-size: 12px;
+}
+.review-human-details > strong { color: #bddbdc; font-size: 12px; }
+.review-human-details > p { margin: 0; color: #acbdca; line-height: 1.42; }
+.review-task-context {
+  border-top: 1px solid #344452; padding-top: 10px; color: #c3d4e3;
+}
+.review-task-context summary {
+  cursor: pointer; color: #a8c5dd; font-weight: 650;
+  font-size: 11px; list-style-position: inside;
+}
+.review-task-context p { font-size: 11px; margin: 9px 0 0; max-height: 240px;
+  overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+.review-task-context textarea { box-sizing: border-box; margin-top: 8px;
+  width: 100%; padding: 8px; border-radius: 6px;
+  border: 1px solid #496171; color: #edf4fb; background: #16212a; font: inherit;
+  resize: vertical; }
+.review-human-task-links { margin-top: 2px; display: flex;
+  gap: 10px; align-items: center; flex-wrap: wrap; }
+.review-human-task-links small { color: #90aabd; font-size: 10px; }
+.review-human-task-links .button { min-height: 30px; font-size: 11px; }
+.inbox-undo-answer { border-color: #5a7a8a; color: #c7e3eb; }
+.review-placeholder .button { margin-top: 12px; }
+@media (max-width: 1050px) {
+  .review-human-workspace { grid-template-columns: minmax(0, 1fr); }
+  .review-human-details { gap: 8px; }
+}
+@media (max-width: 790px) {
+  .review-human-stage .review-heading { padding-right: 42px; flex-wrap: wrap; gap: 7px; }
+  .review-human-stage .review-heading > div:last-child { flex-basis: auto; justify-content: flex-start; }
+  .review-human-workspace .review-user-question { padding: 12px; }
+  .review-human-workspace .review-user-question > strong { font-size: 13px; }
+}

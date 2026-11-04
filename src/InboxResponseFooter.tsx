@@ -28,7 +28,9 @@ type Props = {
   onSnooze: (milliseconds: number) => void;
   onSubmit: (verdict?: string) => void;
   onComplete?: () => void;
+  completeLabel?: string;
   onReopen?: () => void;
+  onUndoLast?: () => void;
   onNoteOnly?: () => void;
   notePresent?: boolean;
   primaryLabel?: string;
@@ -40,12 +42,14 @@ type Props = {
 
 export function InboxResponseFooter({
   mode, outcomes = [], onOutcome, onSkip, onSnooze, onSubmit,
-  onComplete, onReopen, onNoteOnly, notePresent = false, primaryLabel,
+  onComplete, completeLabel = "Done", onReopen, onUndoLast, onNoteOnly, notePresent = false, primaryLabel,
   busy, disabled = false, submitDisabled = false, summary,
 }: Props) {
   const [snooze, setSnooze] = useState<number>(24 * 60 * 60 * 1000);
   return <footer className="inbox-response-footer" aria-label="Inbox response actions">
     <div className="inbox-response-left">
+      {onUndoLast && <button className="button secondary inbox-undo-answer" type="button"
+        disabled={busy} onClick={onUndoLast} title="Return to the last answered question">↶ Undo last answer</button>}
       <button className="button secondary" type="button" disabled={busy} onClick={onSkip}>Skip</button>
       <div className="inbox-response-snooze">
         <button className="button secondary" type="button" disabled={busy}
@@ -72,14 +76,17 @@ export function InboxResponseFooter({
           {index === 0 && notePresent ? " + note" : ""}
         </button>)}
       </> : <>
-        {notePresent && !onComplete && <button className="button secondary" type="button"
-          disabled={busy || disabled} onClick={() => onSubmit()}>Submit ↵</button>}
+        {!onReopen && <button className="button primary" type="button"
+          disabled={busy || disabled || !notePresent} onClick={() => onSubmit()}
+          title={!notePresent ? "Choose an option or write an answer" : "Send your answer and return this task to AI Ready"}>
+          Submit ↵
+        </button>}
         {onReopen && <button className="button secondary" type="button"
           disabled={busy || disabled} onClick={onReopen}>Needs changes / Reopen</button>}
-        {onComplete && <button className="button primary" type="button"
-          disabled={busy || disabled} onClick={onComplete}>Done</button>}
-        {!onComplete && !notePresent && <button className="button primary" type="button"
-          disabled={busy || disabled} onClick={() => onSubmit()}>Submit ↵</button>}
+        {onComplete && <button className={onReopen ? "button primary" : "button secondary"} type="button"
+          disabled={busy || disabled} onClick={onComplete} title={onReopen
+            ? "Accept this completed implementation"
+            : "Close this task without requesting any changes"}>{completeLabel}</button>}
       </>}
     </div>
   </footer>;

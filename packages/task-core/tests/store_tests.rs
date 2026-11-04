@@ -1397,3 +1397,40 @@ fn human_and_legacy_blocked_tasks_are_not_stranded() {
     assert!(store.create(&root, draft("Agent blocked", "blocked", None)).is_err());
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn human_can_keep_waiting_implementation_and_undo_answer_without_requeueing() {
+    use task_core::{MutationActor, TaskAttention, TaskQuestion};
+    let root = temp_board("waiting-keep-current");
+    let store = FsTaskStore::default();
+    store.ensure_board(&root, "Test").unwrap();
+    let created = store.create(&root, draft("Choose existing behavior", "ai-ready", None)).unwrap();
+    let mut request = created;
+    request.question = Some(TaskQuestion {
+        request_type: Some("decision".into()),
+        prompt: "Change the behavior or keep it?".into(),
+        options: vec!["Change it".into(), "Keep it".into()],
+        answer: None,
+    });
+    request.attention.push(TaskAttention::Question);
+    let pending = store.update_as(&root, request, MutationActor::Human).unwrap();
+    assert_eq!(pending.column, "blocked");
+    assert!(pending.claimed_by.is_none());
+
+    let mut keep = pending.clone();
+    keep.column = "done".into();
+    keep.question.as_mut().unwrap().answer = Some("Keep current implementation".into());
+    keep.attention.retain(|flag| *flag != TaskAttention::Question);
+    let done = store.update_as(&root, keep, MutationActor::Human).unwrap();
+    assert_eq!(done.column, "done");
+    assert!(done.completed.is_some());
+    assert!(!done.ai_notes.contains("USER DECISION - IMPLEMENT NEXT"));
+
+    let mut undo = pending;
+    undo.revision = done.revision;
+    let restored = store.update_as(&root, undo, MutationActor::Human).unwrap();
+    assert_eq!(restored.column, "blocked");
+    assert!(restored.completed.is_none());
+    assert_eq!(restored.question.unwrap().answer, None);
+    fs::remove_dir_all(root).unwrap();
+}

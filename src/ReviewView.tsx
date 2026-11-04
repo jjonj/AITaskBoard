@@ -10,6 +10,9 @@ import { VisualReviewInspector } from "./VisualReviewInspector";
 import { InboxResponseFooter, reviewOutcomes } from "./InboxResponseFooter";
 
 type QueueItem = { path: string; project: string; task: Task };
+// Only the most recent text-Inbox action is reversible. Its saved revision
+// guards against undo overwriting progress made by another agent afterwards.
+type AnswerUndo = { path: string; key: string; before: Task; savedRevision: string };
 type Props = {
   project: ProjectTab;
   onClose: () => void;
@@ -64,6 +67,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   const [userCriteria, setUserCriteria] = useState("");
   const [keepForUser, setKeepForUser] = useState(false);
   const [userAnswer, setUserAnswer] = useState("");
+  const [lastAnswered, setLastAnswered] = useState<AnswerUndo | null>(null);
   const [snoozedLocally, setSnoozedLocally] = useState<Record<string, number>>(loadReviewSnoozes);
   const [responseOutcome, setResponseOutcome] = useState("");
   const [moreOpen, setMoreOpen] = useState(false);
@@ -397,7 +401,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   }, [activeArtifact?.path]);
   const activeSrc = (artifact?: ReviewArtifact) => artifact &&
     (assets[artifact.path] || (artifact.poster && assets[artifact.poster]) || "");
-  const advance = (excludingKey?: string, skipCurrent = false) => {
+  const advance = (excludingKey?: string, skipCurrent = false, keepOpenForUndo = false) => {
     if (skipCurrent && selectedKey) skippedThisPass.current.add(selectedKey);
     const index = items.findIndex((item) => keyOf(item) === selectedKey);
     const ordered = index < 0 ? items : [...items.slice(index + 1), ...items.slice(0, index)];
@@ -405,6 +409,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       !skippedThisPass.current.has(keyOf(item)) &&
       !(Number(snoozedLocally[keyOf(item)]) > Date.now()));
     if (next) setSelectedKey(keyOf(next));
+    else if (keepOpenForUndo) setSelectedKey("");
     else onClose();
   };
 
@@ -429,13 +434,15 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       const old = reviewTask.task;
       const aiQuestion = old.kind === "task" && old.attention.includes("question") &&
         !!old.question && !old.question.answer;
-      // The green Done action is an explicit acceptance/dismissal, even if
-      // another option was selected before it was clicked.
-      const answer = reopen ? "Needs changes" : aiQuestion && markDone ? "Done"
-        : userAnswer.trim() ? userAnswer : userNote;
-      if (aiQuestion && !answer.trim()) throw new Error("Choose a response or enter feedback before submitting.");
       const isApproval = aiQuestion && (old.question?.request_type === "verification" || old.column === "done");
-      const isWaitingAnswer = aiQuestion && !isApproval;
+      // Done on a decision is a deliberate "keep the current implementation",
+      // NOT another answer to implement. The choice and any note are ignored
+      // as a proposed change unless the human explicitly presses Submit.
+      const answer = reopen ? "Needs changes" : aiQuestion && markDone
+        ? (isApproval ? "Done" : "Keep current implementation")
+        : userAnswer.trim() ? userAnswer : userNote;
+      if (aiQuestion && !answer.trim()) throw new Error("Choose an option or enter an answer before submitting.");
+      const isWaitingAnswer = aiQuestion && !isApproval && !markDone;
       const needsChanges = reopen || (isApproval && answer.toLowerCase() === "needs changes");
       const attention = old.attention.filter(flag => flag !== "question" && flag !== "needs-user" && flag !== "blocked");
       if ((isWaitingAnswer || needsChanges) && !attention.includes("user-note")) attention.push("user-note");
@@ -469,15 +476,43 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
             : entry.includes("partial_or_blocked") ? "partial approval or other work remains"
             : "review closed; original disposition unresolved");
       }
+      setLastAnswered({ path: reviewTask.path, key: keyOf(reviewTask), before: old, savedRevision: saved.revision });
       onUserTaskUpdated?.(notice);
       setInboxImages([]);
       // A response may deliberately leave "For user" enabled. Do not ask for
       // the same answer again in this Inbox pass.
       hideLocally(reviewTask, 60 * 60 * 1000);
-      advance(keyOf(reviewTask));
+      advance(keyOf(reviewTask), false, true);
       void refresh();
     } catch (cause) {
       setError(`Could not save this task: ${String(cause)}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+  const undoLastAnswer = async () => {
+    if (!lastAnswered || saving) return;
+    setSaving(true);
+    setError("");
+    try {
+      const board = await loadBoard(lastAnswered.path);
+      const current = board.tasks.find(task => task.id === lastAnswered.before.id);
+      if (!current || current.revision !== lastAnswered.savedRevision)
+        throw new Error("This task has changed since your response. Undo was stopped to protect the agent's newer work.");
+      await updateTask({ ...lastAnswered.before, revision: current.revision }, lastAnswered.path);
+      const key = lastAnswered.key;
+      setSnoozedLocally(current => {
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+      skippedThisPass.current.delete(key);
+      setLastAnswered(null);
+      onUserTaskUpdated?.();
+      await refresh();
+      setSelectedKey(key);
+    } catch (cause) {
+      setError(`Could not undo your last answer: ${String(cause)}`);
     } finally {
       setSaving(false);
     }
@@ -857,14 +892,19 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
         <div className="review-scroll">
         {error && <div className="error-banner" role="alert">{error}</div>}
         {!reviewTask ? (
-          <div className="review-placeholder">No pending feedback. Open the board to continue work.</div>
+          <div className="review-placeholder">
+            <p>All caught up.</p>
+            {lastAnswered && <button type="button" className="button secondary"
+              disabled={saving} onClick={() => void undoLastAnswer()}>
+              ↶ Undo last answer · {lastAnswered.before.id}
+            </button>}
+          </div>
         ) : !isVisualReview ? (
           <div className="review-human-stage">
             <header className="review-heading">
               <div>
                 <small>{reviewTask.project} · {reviewTask.task.id}</small>
                 <h2>{reviewTask.task.title}</h2>
-                <p>{reviewTask.task.description || "Provide your instructions for this task."}</p>
               </div>
               <div className="flex items-center gap-2">
                 {(reviewTask.task.claimed_by || reviewTask.task.live?.with_me) && (
@@ -886,21 +926,26 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
                 </div>
               </div>
             </header>
-            <div className="review-workspace">
+            <div className="review-workspace review-human-workspace">
               <div className="review-stage-column">
                 <div className="review-user-fields">
                   {reviewTask.task.question?.prompt && (
                     <div className="review-user-question">
                       <strong>{reviewTask.task.question.prompt}</strong>
-                      <div className="review-user-choice">
-                        {(reviewTask.task.question.options || []).map((value) =>
+                      {!!reviewTask.task.question.options?.length && <div className="review-user-choice"
+                        role="group" aria-label="Choose your answer">
+                        {reviewTask.task.question.options.map((value) =>
                           <button type="button" key={value}
+                            disabled={saving} aria-pressed={userAnswer === value}
                             className={userAnswer === value ? "button primary" : "button secondary"}
-                            onClick={() => { setUserAnswer(value); setKeepForUser(false); }}>{value}</button>)}
-                      </div>
+                            onClick={() => { setUserAnswer(value); setKeepForUser(false); }}>
+                            <span className="review-choice-marker" aria-hidden="true">{userAnswer === value ? "✓" : ""}</span>
+                            <span>{value}</span>
+                          </button>)}
+                      </div>}
                     </div>
                   )}
-                  <label>Your response
+                  <label>{reviewTask.task.question?.options.length ? "Add a note (optional)" : "Your answer"}
                     <textarea onKeyDown={(event) => {
                       if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
                         event.preventDefault();
@@ -910,18 +955,13 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
                       setUserNote(event.currentTarget.value);
                       setKeepForUser(false);
                     }}
-                      rows={7} placeholder="Your feedback or instructions…" />
+                      rows={4} placeholder={reviewTask.task.question?.options.length
+                        ? "Optional explanation or extra instructions…" : "Write your answer…"} />
                   </label>
                   <button type="button" className="button secondary inbox-attach-button"
                     onClick={() => void browseInboxFiles()}>+ Images / local files…</button>
                   {inboxImages.length > 0 && inboxImagePreview}
-                  <label>Acceptance criteria
-                    <textarea value={userCriteria} onChange={(event) => {
-                      setUserCriteria(event.currentTarget.value);
-                      setKeepForUser(false);
-                    }}
-                      rows={4} placeholder="One criterion per line" />
-                  </label>
+
                   {(reviewTask.task.kind === "for_user" || reviewTask.task.attention.includes("needs-user")) &&
                     <label className="review-user-checkbox">
                       <input type="checkbox" checked={keepForUser}
@@ -930,15 +970,29 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
                     </label>}
                 </div>
               </div>
-              <div className="review-feedback-rail">
-                <h3>Task details</h3>
-                <p>{reviewTask.task.category || "Uncategorized"} · {reviewTask.task.column}</p>
-                <p>Respond without leaving this inbox. All messages, visual files and
-                  ordinary feedback are handled through the same queue.</p>
-                {reviewTask.path === project.path && (
-                  <button className="button secondary" type="button"
-                    onClick={() => onOpenUserTask?.(reviewTask.task)}>Full editor ↗</button>
-                )}
+              <div className="review-feedback-rail review-human-details">
+                <strong>After you respond</strong>
+                <p>{reviewTask.task.question?.request_type === "verification" || reviewTask.task.column === "done"
+                  ? "Done accepts the finished work. Needs changes sends it back for implementation."
+                  : "Submit sends your answer to AI Ready. Done · Keep current closes the task without changes."}</p>
+                <details className="review-task-context">
+                  <summary>Task context</summary>
+                  <p>{reviewTask.task.description || "No additional context."}</p>
+                </details>
+                <details className="review-task-context">
+                  <summary>Requirements {userCriteria.trim() && "· editable"}</summary>
+                  <textarea aria-label="Acceptance criteria" value={userCriteria} onChange={event => {
+                    setUserCriteria(event.currentTarget.value);
+                    setKeepForUser(false);
+                  }} rows={5} placeholder="One criterion per line" />
+                </details>
+                <div className="review-human-task-links">
+                  <small>{reviewTask.task.category || "Uncategorized"}</small>
+                  {reviewTask.path === project.path && (
+                    <button className="button secondary" type="button"
+                      onClick={() => onOpenUserTask?.(reviewTask.task)}>Full editor ↗</button>
+                  )}
+                </div>
               </div>
             </div>
             <InboxResponseFooter
@@ -948,13 +1002,19 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
               onSkip={() => advance(undefined, true)}
               onSnooze={snoozeSelected}
               onSubmit={() => void submitUser()}
-              onComplete={reviewTask.task.question?.request_type === "verification" || reviewTask.task.column === "done" || reviewTask.task.kind === "for_user" ? () => void submitUser(true) : undefined}
+              onComplete={() => void submitUser(true)}
+              completeLabel={reviewTask.task.attention.includes("question") &&
+                reviewTask.task.column !== "done" && reviewTask.task.question?.request_type !== "verification"
+                ? "Done · Keep current" : "Done"}
               onReopen={reviewTask.task.question?.request_type === "verification" || reviewTask.task.column === "done" ? () => void submitUser(false, true) : undefined}
+              onUndoLast={lastAnswered ? () => void undoLastAnswer() : undefined}
               notePresent={!!userNote.trim() || !!userAnswer.trim() || inboxImages.length > 0}
               busy={saving}
               summary={reviewTask.task.kind === "for_user"
-                ? "Respond or complete this human-owned task"
-                : reviewTask.task.question?.request_type === "verification" || reviewTask.task.column === "done" ? "Done accepts implementation; Needs changes returns to AI Ready" : "Submit records your decision and returns work to AI Ready"}
+                ? "Submit instructions or finish the human task"
+                : reviewTask.task.question?.request_type === "verification" || reviewTask.task.column === "done"
+                  ? "Done accepts; Needs changes reopens"
+                  : "Submit → AI Ready · Done keeps current implementation"}
             />
           </div>
         ) : !round ? (

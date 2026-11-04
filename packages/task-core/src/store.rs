@@ -1060,7 +1060,10 @@ impl FsTaskStore {
         let answer = task.question.as_ref().and_then(|q| q.answer.as_ref()).cloned();
         if actor == MutationActor::Human && previous.column == BLOCKED_COLUMN_ID
             && previous_pending && answer.as_ref().is_some_and(|a| !a.trim().is_empty())
-            && previous.question.as_ref().is_some_and(|q| q.request_type.as_deref() != Some("verification")) {
+            && previous.question.as_ref().is_some_and(|q| q.request_type.as_deref() != Some("verification"))
+            // Explicit Done / Keep current must complete the task, not turn
+            // into another implementation instruction in AI Ready.
+            && !snapshot.config.columns.iter().any(|c| c.id == task.column && c.terminal) {
             let decision = format!("USER DECISION - IMPLEMENT NEXT\nQuestion: {}\nAnswer: {}",
                 previous.question.as_ref().map(|q| q.prompt.as_str()).unwrap_or(""),
                 answer.as_deref().unwrap_or(""));
