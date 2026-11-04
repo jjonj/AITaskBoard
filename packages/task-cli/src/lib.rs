@@ -462,16 +462,27 @@ impl CliError {
 
 /// Run the same CLI from the console binary or the desktop executable.
 pub fn entry() {
-    // Dynamically load owner guidance; no rebuild is needed when it changes.
+    // Task-wide guidance belongs to task help, not to the create command.
+    // Keep create --help as a backward-compatible guidance entry point.
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    if argv.windows(3).any(|part|
-        part[0] == "task" && part[1] == "create" && part[2] == "--help"
-    ) {
+    let task_help = argv.windows(2).any(|part| {
+        part[0] == "task" && ["help", "--help", "-h"].contains(&part[1].as_str())
+    });
+    let create_help = argv.windows(3).any(|part| {
+        part[0] == "task" && part[1] == "create" && ["--help", "-h"].contains(&part[2].as_str())
+    });
+    if task_help || create_help {
         let mut command = Cli::command();
-        let create = command.find_subcommand_mut("task")
-            .and_then(|task| task.find_subcommand_mut("create"))
-            .expect("TaskBoard create subcommand");
-        println!("{}\n", create.render_long_help());
+        let task = command.find_subcommand_mut("task")
+            .expect("TaskBoard task subcommand");
+        let text = if task_help {
+            task.render_long_help().to_string()
+        } else {
+            task.find_subcommand_mut("create")
+                .expect("TaskBoard create subcommand")
+                .render_long_help().to_string()
+        };
+        println!("{text}\n");
         match fs::read_to_string(TASK_CREATE_GUIDANCE) {
             Ok(guidance) => println!("{guidance}"),
             Err(error) => {
