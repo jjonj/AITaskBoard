@@ -116,6 +116,9 @@ export type QueueOverviewItem = {
   createdAt: string; updatedAt: string; claimedAt: string | null;
   pickup: unknown | null; waiting: unknown | null; startupState: string | null;
   t3SessionId: string | null;
+  queueState?: string | null; reservationId?: string | null;
+  reservationExpiresAt?: string | null; readiness?: boolean;
+  dependencies?: string[]; claimedBy?: string | null;
 };
 export type QueueOverview = {
   schema: "t3-taskboard-queue-overview/v1";

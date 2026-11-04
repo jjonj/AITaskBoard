@@ -7,7 +7,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 #[path = "execution.rs"]
 mod execution;
-pub use execution::{ExecutionIntent, ExecutionMode};
+pub use execution::{ExecutionIntent, ExecutionMode, QueueState};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
@@ -1101,6 +1101,7 @@ impl FsTaskStore {
         } else { render_task(&task, Some(&existing))? };
         let rendered = queue_policy_text(&rendered, &task, &snapshot, Some(&previous))?;
         let text = update_activity(&rendered, &existing, &previous, &task, &snapshot.config)?;
+        let text = reset_released_queue_lifecycle(&text, &task)?;
         write_text_atomic(&path, &text)?;
         task.revision = revision(&text);
         if previous.related_to != task.related_to {
@@ -1298,6 +1299,9 @@ impl FsTaskStore {
             || !recurring_due(&task) {
             return Err(TaskStoreError::Invalid("task is not executable or its recurrence is not due".into()));
         }
+        if matches!(claim_metadata(&existing, "queue_state")?.as_deref(), Some("reserved" | "starting")) {
+            return Err(TaskStoreError::Conflict(format!("{id} is reserved for T3 queue dispatch")));
+        }
         let snapshot = self.load_unlocked(root)?;
         ensure_dependencies_complete(&snapshot, &task)?;
         if snapshot.config.columns.iter().any(|col| col.id == task.column && col.terminal)
@@ -1362,6 +1366,7 @@ impl FsTaskStore {
         task.claimed_by = None;
         validate_task(&snapshot, &task)?;
         let rendered = stamp_activity(&render_with_claim_token(&task, &existing, None)?, None, true)?;
+        let rendered = mark_queue_completed_lifecycle(&rendered, &task)?;
         write_text_atomic(&path, &rendered)?;
         task.revision = revision(&rendered);
         let current = self.load_unlocked(root)?;
@@ -1394,6 +1399,7 @@ impl FsTaskStore {
             serde_yaml::Value::String(expected.into()));
         let rendered = format!("---\n{}---\n{}", serde_yaml::to_string(&map)
             .map_err(|e| TaskStoreError::Parse(e.to_string()))?, body);
+        let rendered = reset_released_queue_lifecycle(&rendered, &task)?;
         write_text_atomic(&path, &rendered)?;
         task.revision = revision(&rendered);
         Ok(task)
@@ -1425,6 +1431,7 @@ impl FsTaskStore {
             }
             if apply {
                 let text = stamp_activity(&render_with_claim_token(&current, &existing, None)?, None, true)?;
+                let text = reset_released_queue_lifecycle(&text, &current)?;
                 write_text_atomic(&path, &text)?;
             }
         }
@@ -1466,6 +1473,9 @@ impl TaskStore for FsTaskStore {
         }
         if task.kind == TaskKind::ForUser || task.attention.contains(&TaskAttention::NeedsUser) {
             return Err(TaskStoreError::Invalid(format!("{} is a FOR USER task requiring user input: agents may not claim it", task.id)));
+        }
+        if matches!(claim_metadata(&existing, "queue_state")?.as_deref(), Some("reserved" | "starting")) {
+            return Err(TaskStoreError::Conflict(format!("{} is reserved for T3 queue dispatch", task.id)));
         }
         let snapshot = self.load_unlocked(root)?;
         ensure_dependencies_complete(&snapshot, &task)?;
@@ -1540,7 +1550,18 @@ impl TaskStore for FsTaskStore {
         }
         let snapshot = self.load_unlocked(root)?;
         release_to_original(&mut task, &snapshot.config, &existing)?;
-        let text = stamp_activity(&render_task(&task, Some(&existing))?, None, true)?;
+        let rendered = stamp_activity(&render_task(&task, Some(&existing))?, None, true)?;
+        let (yaml, body) = split_frontmatter(&rendered)?;
+        let mut metadata: serde_yaml::Mapping = serde_yaml::from_str(&yaml)
+            .map_err(|error| TaskStoreError::Parse(error.to_string()))?;
+        if metadata.get(serde_yaml::Value::String("execution_mode".into())).and_then(serde_yaml::Value::as_str) == Some("queue") {
+            metadata.insert(serde_yaml::Value::String("queue_state".into()), serde_yaml::Value::String("queued".into()));
+            metadata.remove(serde_yaml::Value::String("queue_reservation_id".into()));
+            metadata.remove(serde_yaml::Value::String("queue_reservation_expires_at".into()));
+            metadata.remove(serde_yaml::Value::String("queue_session_id".into()));
+        }
+        let text = format!("---\n{}---\n{}", serde_yaml::to_string(&metadata)
+            .map_err(|error| TaskStoreError::Parse(error.to_string()))?, body);
         write_text_atomic(&path, &text)?;
         task.revision = revision(&text);
         Ok(task)
@@ -2611,7 +2632,43 @@ fn parse_task(path: &Path, archived: bool, text: &str) -> Result<Task, TaskStore
     })
 }
 
-/// Single source of dispatch eligibility for the native OpenRig producer.
+fn mark_queue_completed_lifecycle(text: &str, task: &Task) -> Result<String, TaskStoreError> {
+    if task.completed.is_none() { return Ok(text.to_owned()); }
+    let (yaml, body) = split_frontmatter(text)?;
+    let mut mapping: serde_yaml::Mapping = serde_yaml::from_str(&yaml)
+        .map_err(|error| TaskStoreError::Parse(error.to_string()))?;
+    if mapping.get(serde_yaml::Value::String("execution_mode".into()))
+        .and_then(serde_yaml::Value::as_str) != Some("queue") {
+        return Ok(text.to_owned());
+    }
+    mapping.insert(serde_yaml::Value::String("queue_state".into()), serde_yaml::Value::String("completed".into()));
+    mapping.remove(serde_yaml::Value::String("queue_reservation_expires_at".into()));
+    Ok(format!("---\n{}---\n{}", serde_yaml::to_string(&mapping)
+        .map_err(|error| TaskStoreError::Parse(error.to_string()))?, body))
+}
+
+fn reset_released_queue_lifecycle(text: &str, task: &Task) -> Result<String, TaskStoreError> {
+    if task.claimed_by.is_some() || task.completed.is_some() { return Ok(text.to_owned()); }
+    let (yaml, body) = split_frontmatter(text)?;
+    let mut mapping: serde_yaml::Mapping = serde_yaml::from_str(&yaml)
+        .map_err(|error| TaskStoreError::Parse(error.to_string()))?;
+    if mapping.get(serde_yaml::Value::String("queue_state".into()))
+        .and_then(serde_yaml::Value::as_str) != Some("working") {
+        return Ok(text.to_owned());
+    }
+    if mapping.get(serde_yaml::Value::String("execution_mode".into()))
+        .and_then(serde_yaml::Value::as_str) != Some("queue") {
+        return Ok(text.to_owned());
+    }
+    mapping.insert(serde_yaml::Value::String("queue_state".into()), serde_yaml::Value::String("queued".into()));
+    mapping.remove(serde_yaml::Value::String("queue_reservation_id".into()));
+    mapping.remove(serde_yaml::Value::String("queue_reservation_expires_at".into()));
+    mapping.remove(serde_yaml::Value::String("queue_session_id".into()));
+    Ok(format!("---\n{}---\n{}", serde_yaml::to_string(&mapping)
+        .map_err(|error| TaskStoreError::Parse(error.to_string()))?, body))
+}
+
+/// Single source of dispatch eligibility for the T3 queue dispatcher.
 pub fn queue_task_ready(snapshot: &BoardSnapshot, task: &Task) -> bool {
     !task.archived && task.completed.is_none() && task.claimed_by.is_none() &&
         matches!(task.kind, TaskKind::Task | TaskKind::Recurring) &&
@@ -2622,7 +2679,7 @@ pub fn queue_task_ready(snapshot: &BoardSnapshot, task: &Task) -> bool {
 }
 
 /// Apply only durable policy-derived Queue intent. This is a metadata write,
-/// never a worker start; the existing OpenRig bridge owns dispatch/reconciliation.
+/// never a worker start; T3 owns new dispatch and OpenRig only reconciles legacy attempts.
 fn queue_policy_text(
     text: &str, task: &Task, snapshot: &BoardSnapshot, previous: Option<&Task>,
 ) -> Result<String, TaskStoreError> {
@@ -2657,9 +2714,11 @@ fn queue_policy_text(
     let queued = map.get(key("execution_mode")).and_then(|v| v.as_str()) == Some("queue");
     if (column.auto_queue || inherited) && !manual && !queued &&
         map.get(key("queue_registration_attempt")).is_none() &&
+        map.get(key("queue_receipt")).is_none() &&
         ensure_dependencies_complete_for(&snapshot.tasks, &task.depends_on).is_ok() {
         map.insert(key("execution_mode"), key("queue"));
         map.insert(key("queue_request"), key(&uuid::Uuid::new_v4().to_string()));
+        map.insert(key("queue_state"), key("queued"));
         changed = true;
     }
     if !changed { return Ok(text.to_owned()); }
@@ -2733,6 +2792,11 @@ fn render_task(task: &Task, existing: Option<&str>) -> Result<String, TaskStoreE
         for (key, value) in known {
             mapping.insert(key, value);
         }
+    }
+    if task.completed.is_some() &&
+        mapping.get(serde_yaml::Value::String("execution_mode".into())).and_then(serde_yaml::Value::as_str) == Some("queue") {
+        mapping.insert(serde_yaml::Value::String("queue_state".into()), serde_yaml::Value::String("completed".into()));
+        mapping.remove(serde_yaml::Value::String("queue_reservation_expires_at".into()));
     }
     let yaml = serde_yaml::to_string(&mapping).map_err(|e| TaskStoreError::Parse(e.to_string()))?;
     let body = render_task_body(task, existing_body.as_deref());

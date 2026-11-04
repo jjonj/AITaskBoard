@@ -248,26 +248,48 @@ pub(crate) async fn overview(path: PathBuf) -> Result<Value, String> {
     let root = path.to_string_lossy().trim_end_matches(['\\', '/']).replace('/', "\\");
     let mut items = Vec::new();
     for task in board.tasks.iter().filter(|task| !task.archived &&
-        task.completed.is_none() && task.column == task_core::AI_READY_COLUMN_ID &&
         matches!(task.kind, TaskKind::Task | TaskKind::Recurring)) {
         let intent = store.execution_intent(&path, &task.id).map_err(|e| e.to_string())?;
         if intent.mode != ExecutionMode::Queue {continue;}
-        let Some(request) = intent.queue_request else {continue;};
-        let legacy = intent.queue_attempt.is_some() || intent.queue_receipt.is_some();
-        let started = task.claimed_by.as_ref().map(|claim| claim.starts_with("t3:") ||
-            claim.starts_with("t3-browser:")).unwrap_or(false);
-        let session = task.claimed_by.as_ref().and_then(|claim| {
+        let Some(request) = intent.queue_request.as_deref() else {continue;};
+        let legacy_qitem = intent.queue_request.as_ref()
+            .map(|request| format!("qitem-taskboard-{request}"));
+        let legacy = (intent.queue_attempt.is_some() || intent.queue_receipt.is_some()) &&
+            intent.queue_retired_receipt.as_deref() != legacy_qitem.as_deref();
+        let terminal = task.completed.is_some() || board.config.columns.iter()
+            .any(|column| column.terminal && column.id == task.column);
+        let queue_state = if terminal { task_core::QueueState::Completed }
+            else { intent.queue_state.unwrap_or(task_core::QueueState::Queued) };
+        if queue_state == task_core::QueueState::Completed { continue; }
+        let ready = task_core::queue_task_ready(&board, task) && task_core::recurring_due(task);
+        let session = intent.queue_session_id.as_deref().or_else(|| task.claimed_by.as_ref().and_then(|claim| {
             claim.strip_prefix("t3-browser:").or_else(|| claim.strip_prefix("t3:"))
-        });
+        }));
+        let working = (queue_state == task_core::QueueState::Working && session.is_some()) ||
+            task.claimed_by.as_deref().is_some_and(|claim|
+                claim.starts_with("t3:") || claim.starts_with("t3-browser:"));
+        let startup_state = if legacy { Some("legacy-openrig") }
+            else { match queue_state {
+                task_core::QueueState::Reserved => Some("reserved"),
+                task_core::QueueState::Starting => Some("starting"),
+                _ if !ready => Some("not-ready"),
+                _ => None,
+            }};
         items.push(json!({
             "qitemId": format!("qitem-taskboard-{request}"),
             "taskId":task.id,"summary":task.title,
-            "state":if started {"running"}else{"pending"},
+            "state":if working {"running"}else{"pending"},
             "priority":if task.attention.contains(&task_core::TaskAttention::Priority){"urgent"}else{"routine"},
             "createdAt":task.created,"updatedAt":chrono::Utc::now().to_rfc3339(),
             "claimedAt":null,"pickup":null,"waiting":null,
-            "startupState":if legacy {Some("legacy-openrig")} else {None},
-            "t3SessionId":session
+            "startupState":startup_state,
+            "t3SessionId":session,
+            "queueState":format!("{queue_state:?}").to_ascii_lowercase(),
+            "reservationId":intent.queue_reservation_id,
+            "reservationExpiresAt":intent.queue_reservation_expires_at,
+            "readiness":ready,
+            "dependencies":task.depends_on,
+            "claimedBy":task.claimed_by,
         }));
     }
     items.sort_by(|a,b| {
@@ -279,7 +301,7 @@ pub(crate) async fn overview(path: PathBuf) -> Result<Value, String> {
     Ok(json!({"schema":"t3-taskboard-queue-overview/v1",
         "observedAt":chrono::Utc::now().to_rfc3339(),
         "environmentId":"pc","boardRoot":root,"activeCount":active_count,
-        "limit":active_count,"hasMore":false,"items":items}))
+        "limit":100,"hasMore":false,"items":items}))
 }
 
 /** T3's one authority counts all manually and automatically working agents.
@@ -292,8 +314,12 @@ pub(crate) async fn capacity() -> Result<Value, String> {
         if !std::path::Path::new(script).is_file() {
             return Err("T3 capacity CLI unavailable".to_owned());
         }
+        let t3_home = std::env::var_os("T3CODE_HOME").map(PathBuf::from)
+            .or_else(|| std::env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join(".t3")))
+            .ok_or("T3 home is not configured; cannot resolve the active capacity pipe")?;
         let mut cmd = Command::new("node.exe");
-        cmd.arg(script).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.env("T3CODE_HOME", t3_home)
+            .arg(script).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         #[cfg(windows)] {
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(0x0800_0000);

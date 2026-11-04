@@ -21,8 +21,10 @@ const statusLabel = (item: QueueOverviewItem) => {
   if (item.startupState === "reserved") return "Capacity reserved · launch not attempted";
   if (item.startupState === "starting") return "Launch submitted · reply not verified";
   if (item.startupState === "indeterminate") return "Launch outcome UNKNOWN · reconciliation required";
+  if (item.state === "running" || item.queueState === "working") return "Working in T3";
+  if (item.startupState === "not-ready") return "Queued · waiting for dependencies or readiness";
   if (item.state === "pending") return item.startupState === "legacy-openrig"
-    ? "Legacy OpenRig registration · pending"
+    ? "Legacy OpenRig registration · held until ownership is reconciled"
     : "Queued in T3 · waiting for Keep T3 Busy and capacity";
   return item.state;
 };
@@ -136,7 +138,7 @@ export function QueueOverviewPanel({ boardPath, capacity, onClose, onOpenTask, o
       </div>
       <div className="omni-queue-capacity" role="status">
         {capacity ? <>
-          <span>Verified T3 working: {capacity.working} / soft limit {capacity.limit}</span>
+          <span>Verified T3 working: {capacity.working} / maximum capacity {capacity.limit}</span>
           <span>Reserved starts: {capacity.reserved}</span>
           <span>Unverified sessions: {capacity.unknown}</span>
           <strong>{capacity.admissible

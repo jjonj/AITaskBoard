@@ -531,13 +531,22 @@ fn open_task_session(path: Option<String>, id: String, implement: Option<bool>) 
     if implement.unwrap_or(false) && !claimant.is_empty() {
         return Err("Task is already claimed; open or reconcile its existing session instead.".into());
     }
+    if implement.unwrap_or(false) {
+        // Explicit Start now may bypass capacity, but it must atomically preempt
+        // only a not-yet-started queue reservation before T3 receives the request.
+        FsTaskStore::default().prepare_manual_start(&path, &id).map_err(|error| error.to_string())?;
+    }
     let request = serde_json::json!({
         "action": "open-task",
         "taskRef": { "board": path.display().to_string(), "id": id },
         "intent": if implement.unwrap_or(false) { "implement" } else { "conversation" },
         "kind": if implement.unwrap_or(false) { Some("chatgpt") } else { None },
     });
+    let t3_home = std::env::var_os("T3CODE_HOME").map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join(".t3")))
+        .ok_or("T3 home is not configured; cannot resolve the active app-control pipe")?;
     let mut process = Command::new("node").arg(script)
+        .env("T3CODE_HOME", t3_home)
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
         .creation_flags(0x08000000).spawn().map_err(|e| format!("Cannot launch T3 CLI: {e}"))?;
     if let Some(mut stdin) = process.stdin.take() {

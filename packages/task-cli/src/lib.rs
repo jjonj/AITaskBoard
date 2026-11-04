@@ -52,6 +52,7 @@ enum TaskCommand {
     #[command(alias = "release_task")]
     Release(TaskClaimArgs),
     Execution(TaskExecutionCommandArgs),
+    Queue { #[command(subcommand)] command: TaskQueueCommand },
     Live { #[command(subcommand)] command: TaskLiveCommand },
     Review { #[command(subcommand)] command: ReviewCommand },
 }
@@ -69,6 +70,51 @@ enum ExecutionAction {
     Set { mode: String, #[arg(long)] revision: String },
     StartNow { #[arg(long)] revision: String },
     Receipt { #[arg(long)] request: String, #[arg(long)] receipt: String },
+}
+
+#[derive(Subcommand)]
+enum TaskQueueCommand {
+    /// Structured, read-only list for the T3 dispatcher.
+    List,
+    Reserve(TaskQueueReserveArgs),
+    Starting(TaskQueueReservationArgs),
+    Working(TaskQueueWorkingArgs),
+    /// Release a reservation only after a definitive T3 not-created receipt.
+    Failed(TaskQueueFailedArgs),
+    /// Human Start now preempts a queue item only before it enters Starting.
+    Preempt(TaskTarget),
+}
+
+#[derive(Args)]
+struct TaskQueueReserveArgs {
+    target: String,
+    #[arg(long)] queue_request: String,
+    #[arg(long)] request_id: String,
+    #[arg(long, default_value_t = 180)] lease_seconds: u64,
+}
+
+#[derive(Args)]
+struct TaskQueueReservationArgs {
+    target: String,
+    #[arg(long)] request_id: String,
+}
+
+#[derive(Args)]
+struct TaskQueueWorkingArgs {
+    target: String,
+    #[arg(long)] queue_request: String,
+    #[arg(long)] request_id: String,
+    #[arg(long)] session_id: String,
+}
+
+#[derive(Args)]
+struct TaskQueueFailedArgs {
+    target: String,
+    #[arg(long)] queue_request: String,
+    #[arg(long)] request_id: String,
+    #[arg(long)] reason: String,
+    #[arg(long = "confirmed-not-created", required = true, action = clap::ArgAction::SetTrue)]
+    confirmed_not_created: bool,
 }
 
 /// Persist live collaboration on the existing task; never creates or sends a session.
@@ -636,6 +682,100 @@ fn run_live(store: &FsTaskStore, root: &Path, command: &TaskLiveCommand) -> Resu
     Ok(json!(saved))
 }
 
+fn run_task_queue(store: &FsTaskStore, root: &Path, command: &TaskQueueCommand) -> Result<Value, CliError> {
+    use task_core::{ExecutionMode, QueueState, queue_task_ready, recurring_due};
+    match command {
+        TaskQueueCommand::List => {
+            let snapshot = load_checked(store, root)?;
+            let mut items = Vec::new();
+            for task in snapshot.tasks.iter().filter(|task| !task.archived &&
+                matches!(task.kind, task_core::TaskKind::Task | task_core::TaskKind::Recurring)) {
+                let intent = store.execution_intent(root, &task.id).map_err(map_store_error)?;
+                if intent.mode != ExecutionMode::Queue { continue; }
+                let ready = queue_task_ready(&snapshot, task) && recurring_due(task);
+                let legacy_qitem = intent.queue_request.as_ref()
+                    .map(|request| format!("qitem-taskboard-{request}"));
+                let legacy_openrig = (intent.queue_attempt.is_some() || intent.queue_receipt.is_some()) &&
+                    intent.queue_retired_receipt.as_deref() != legacy_qitem.as_deref();
+                let terminal = task.completed.is_some() || snapshot.config.columns.iter()
+                    .any(|column| column.terminal && column.id == task.column);
+                let state = if terminal { QueueState::Completed } else {
+                    intent.queue_state.unwrap_or(QueueState::Queued)
+                };
+                let state = match state {
+                    QueueState::Queued => "queued",
+                    QueueState::Reserved => "reserved",
+                    QueueState::Starting => "starting",
+                    QueueState::Working => "working",
+                    QueueState::Completed => "completed",
+                };
+                let priority = if task.attention.contains(&TaskAttention::Priority) { "urgent" } else { "routine" };
+                items.push(json!({
+                    "taskId": task.id,
+                    "title": task.title,
+                    "created": task.created,
+                    "priority": priority,
+                    "dependencies": task.depends_on,
+                    "readiness": ready,
+                    "readinessReason": if ready { Value::Null } else {
+                        json!("Task is claimed, blocked, outside AI Ready, waiting on dependencies, or not due")
+                    },
+                    "claimed": task.claimed_by.is_some(),
+                    "claimedBy": task.claimed_by,
+                    "queueRequest": intent.queue_request,
+                    "state": state,
+                    "reservationId": intent.queue_reservation_id,
+                    "reservationExpiresAt": intent.queue_reservation_expires_at,
+                    "sessionId": intent.queue_session_id,
+                    "legacyOpenRig": legacy_openrig,
+                    "legacyQueueAttempt": intent.queue_attempt,
+                    "legacyQueueReceipt": intent.queue_receipt,
+                    "error": intent.queue_error,
+                }));
+            }
+            items.sort_by(|a,b| {
+                let pa = a["priority"] == "urgent";
+                let pb = b["priority"] == "urgent";
+                pb.cmp(&pa).then_with(|| a["created"].as_str().cmp(&b["created"].as_str()))
+            });
+            Ok(json!({
+                "schema": "taskboard-dispatch-queue/v1",
+                "boardRoot": root.to_string_lossy(),
+                "observedAt": chrono::Utc::now().to_rfc3339(),
+                "items": items,
+            }))
+        }
+        TaskQueueCommand::Reserve(args) => {
+            let result = store.reserve_queue_task(root, &args.target, &args.queue_request,
+                &args.request_id, args.lease_seconds).map_err(map_store_error)?;
+            Ok(json!({"status":"reserved","taskId":args.target,"intent":result}))
+        }
+        TaskQueueCommand::Starting(args) => {
+            let result = store.start_queue_task(root, &args.target, &args.request_id).map_err(map_store_error)?;
+            Ok(json!({"status":"starting","taskId":args.target,"intent":result}))
+        }
+        TaskQueueCommand::Working(args) => {
+            let result = store.claim_queue_working(root, &args.target, &args.queue_request,
+                &args.request_id, &args.session_id).map_err(map_store_error)?;
+            Ok(json!({"status":"working","taskId":args.target,"sessionId":args.session_id,"intent":result}))
+        }
+        TaskQueueCommand::Failed(args) => {
+            if !args.confirmed_not_created {
+                return Err(CliError::new("confirmation_required", "Only a definitive T3 not-created receipt may release a start reservation"));
+            }
+            let result = store.requeue_failed_start(root, &args.target, &args.queue_request,
+                &args.request_id, &args.reason).map_err(map_store_error)?;
+            Ok(json!({"status":"queued","taskId":args.target,"intent":result}))
+        }
+        TaskQueueCommand::Preempt(args) => {
+            let snapshot = load_checked(store, root)?;
+            let task = resolve_task(&snapshot, &args.target, false)?;
+            store.prepare_manual_start(root, &task.id).map_err(map_store_error)?;
+            Ok(json!({"status":"preempted","taskId":task.id}))
+        }
+    }
+}
+
 fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<Value, CliError> {
     match command {
         TaskCommand::Review { command } => match command {
@@ -1030,6 +1170,7 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
             Ok(json!(store.update(root, task).map_err(map_store_error)?))
         }
         TaskCommand::Live { command } => run_live(store, root, command),
+        TaskCommand::Queue { command } => run_task_queue(store, root, command),
         TaskCommand::Execution(args) => {
             let snapshot = load_checked(store, root)?;
             let task = resolve_task(&snapshot, &args.target, false)?;
