@@ -1,3 +1,4 @@
+import { ToolbarIcon } from "./ToolbarIcons";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -301,6 +302,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     icons: [], noIcon: false, columns: [], readiness: [], kinds: [], attention: [],
   });
   const [filterPanelOpen, setFilterPanelOpen] = useState(false);
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [remoteSearchMatches, setRemoteSearchMatches] = useState<Array<{ id: string; title: string; project: string; path: string }>>([]);
   useEffect(() => {
     const needle = query.trim().toLowerCase();
@@ -531,6 +533,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const editorModalRef = useRef<HTMLElement | null>(null);
   const autosavingDraft = useRef(false);
   const epicSingleClickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const suppressEpicClickUntil = useRef(0); // swallow the click that ends an epic drag
   const [fileDropActive, setFileDropActive] = useState(false);
   const [doneMenuOpen, setDoneMenuOpen] = useState(false);
   const [copiedTaskId, setCopiedTaskId] = useState<string | null>(null);
@@ -605,6 +608,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   });
   const boardRef = useRef<HTMLElement | null>(null);
   const filterControlRef = useRef<HTMLDivElement | null>(null);
+  const moreMenuRef = useRef<HTMLDivElement | null>(null);
   const panRef = useRef({ active: false, startX: 0, scrollLeft: 0 });
   const localMutationVersion = useRef(0);
   const pendingTaskWrites = useRef(new Set<string>());
@@ -2095,6 +2099,68 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     }));
   };
 
+  // Epic columns are derived from their tasks (see derived_epic_column in task-core),
+  // so dragging an epic moves its whole open work stream: every unfinished
+  // descendant task follows. Agent-claimed tasks stay put so running work isn't
+  // disrupted. One Undo restores everything.
+  const moveEpicTo = async (epicId: string, column: string) => {
+    if (!snapshot) return;
+    const leaves: Task[] = [];
+    const queue = [epicId];
+    const seen = new Set<string>();
+    while (queue.length) {
+      const parent = queue.pop()!;
+      for (const child of snapshot.tasks) {
+        if (child.parent !== parent || seen.has(child.id)) continue;
+        seen.add(child.id);
+        if (child.kind === "epic") queue.push(child.id);
+        else if (!child.archived && !child.completed) leaves.push(child);
+      }
+    }
+    const target = columns.find((item) => item.id === column);
+    const movable = leaves.filter((task) => task.column !== column && !task.claimed_by);
+    const skipped = leaves.filter((task) => task.claimed_by && task.column !== column);
+    if (!leaves.length) {
+      setError(`${epicId} has no open tasks yet. An epic sits in the column of its tasks, so add a task to it first.`);
+      return;
+    }
+    if (!movable.length) {
+      if (skipped.length) setError(`${epicId}: its open tasks are claimed by agents and were left in place.`);
+      return;
+    }
+    if (target?.terminal && !window.confirm(`Move ${epicId} to ${target.name}? This completes ${movable.length} open task(s). You can undo this.`)) return;
+    const before = snapshot;
+    const now = new Date().toISOString();
+    localMutationVersion.current += 1;
+    setError("");
+    try {
+      for (const task of movable) {
+        pendingTaskWrites.current.add(task.id);
+        await updateTask({
+          ...task,
+          column,
+          position_after: null,
+          positioned_at: null,
+          ...(target?.terminal ? {
+            kind: task.kind === "for_user" ? "task" as const : task.kind,
+            attention: task.attention.filter((flag) => flag !== "needs-user"),
+            completed_at: now,
+          } : {}),
+        }, boardPath);
+      }
+      const after = await loadBoard(boardPath);
+      pushUndo({ kind: "board", label: `move epic ${epicId}`, before, after });
+      applySnapshot(after);
+      flashTaskActivity([epicId, ...movable.map((task) => task.id)].map((id) => ({ id, kind: "moved" as const })));
+      if (skipped.length) setError(`Moved ${movable.length} task(s). Left ${skipped.map((task) => task.id).join(", ")} in place (claimed by an agent).`);
+    } catch (err) {
+      setError(errorText(err));
+      await refresh(boardPath, true);
+    } finally {
+      for (const task of movable) pendingTaskWrites.current.delete(task.id);
+    }
+  };
+
   const makeSubtaskOf = async (id: string, parentId: string) => {
     const task = taskMap.get(id);
     const parent = taskMap.get(parentId);
@@ -2125,12 +2191,26 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     }));
   };
 
+  // Column under the pointer; below a short column, its whole vertical lane
+  // still counts so cards can be dropped without aiming at the column body.
+  const columnAtPoint = (x: number, y: number) => {
+    const direct = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-column-id]")?.dataset.columnId;
+    if (direct) return direct;
+    const lane = [...document.querySelectorAll<HTMLElement>(".board [data-column-id]")].find((element) => {
+      const rect = element.getBoundingClientRect();
+      return x >= rect.left && x <= rect.right && y >= rect.top;
+    });
+    return lane?.dataset.columnId ?? null;
+  };
+
   const beginCardDrag = (
     event: React.MouseEvent<HTMLElement>,
     task: Task,
   ) => {
     if (event.button !== 0) return;
-    if (task.kind === "epic") return; // Click inspects; double-click toggles children.
+    // Epics drag too (moving their work stream); a plain click on an epic is
+    // left to the card's onClick (single = inspect, double = collapse).
+    const isEpic = task.kind === "epic";
     event.preventDefault();
 
     const startX = event.clientX;
@@ -2160,7 +2240,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
         .elementFromPoint(x, y)
         ?.closest<HTMLElement>("[data-task-id]")
         ?.dataset.taskId;
-      if (!candidate || candidate === task.id) return null;
+      if (isEpic || !candidate || candidate === task.id) return null; // epics only target columns
       // Normal cards are placement targets, not parents. Only epic cards
       // establish hierarchy; moving onto another card merely places below it.
       return taskMap.has(candidate) ? candidate : null;
@@ -2220,17 +2300,18 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
         ? document.elementFromPoint(upEvent.clientX, upEvent.clientY)
             ?.closest<HTMLElement>(".column-header")
         : null;
-      const columnTarget = dragging
-        ? document
-            .elementFromPoint(upEvent.clientX, upEvent.clientY)
-            ?.closest<HTMLElement>("[data-column-id]")
-            ?.dataset.columnId
-        : null;
+      const columnTarget = dragging ? columnAtPoint(upEvent.clientX, upEvent.clientY) : null;
 
       cleanup();
 
       if (!dragging) {
-        openEdit(task);
+        if (!isEpic) openEdit(task);
+        return;
+      }
+      if (isEpic) {
+        suppressEpicClickUntil.current = Date.now() + 300;
+        const column = taskTarget?.column ?? columnTarget;
+        if (column) void moveEpicTo(task.id, column);
         return;
       }
 
@@ -2853,6 +2934,21 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     if (reviewOpen) setFilterPanelOpen(false);
   }, [reviewOpen]);
 
+  // The More menu closes on outside click or Escape, like the filter panel.
+  useEffect(() => {
+    if (!moreMenuOpen) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !moreMenuRef.current?.contains(event.target)) setMoreMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") setMoreMenuOpen(false); };
+    document.addEventListener("pointerdown", closeOutside);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [moreMenuOpen]);
+
   useEffect(() => {
     if (!filterPanelOpen) return;
     const closeOutside = (event: PointerEvent) => {
@@ -2889,6 +2985,8 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     );
   }
 
+  const inboxCount = activeTasks.filter((task) => task.review_status === "open").length + userQueueTasks.length;
+
   return (
     <main
       className="app-shell"
@@ -2918,36 +3016,33 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
         onChanged={() => void refresh(boardPath, true)} />}
       {reviewNotice ? <div className="review-reconciliation-notice" role="status">{reviewNotice}</div> : null}
       <header className="topbar">
-        <div>
+        <div className="topbar-title" title={boardPath}>
           <h1>{snapshot.config.name}</h1>
+          <span className="topbar-meta"><span className="status-dot" />
+            {activeTasks.length} active · {snapshot.tasks.filter((task) => task.archived).length} archived</span>
         </div>
+        <div className="review-mode-switch" role="group" aria-label="TaskBoard view">
+          <button type="button" className={reviewOpen ? "" : "active"}
+            onClick={() => setReviewOpen(false)}>Board</button>
+          <button type="button" className={reviewOpen ? "active" : ""}
+            onClick={() => setReviewOpen(true)} disabled={!!editor}
+            title="Open unified feedback inbox: visual reviews and For user quick replies (Ctrl+R)">
+            Inbox {inboxCount > 0 && <span className="review-mode-count attention">{inboxCount}</span>}
+          </button>
+          <button type="button" className={queueDrawerOpen ? "active" : ""}
+            onClick={() => setQueueDrawerOpen(open => !open)} disabled={!!editor}
+            aria-expanded={queueDrawerOpen} title="Open exact OpenRig queue overview">
+            Queue <span className="review-mode-count">{queueTelemetry?.hasMore ? `${queueTelemetry.limit}+`
+              : queueTelemetry?.activeCount ?? "?"}</span>
+          </button>
+        </div>
+        <span className="queue-capacity-chip" role="status"
+          title={capacityTelemetry?.reason ?? "Current verified T3/OpenRig capacity"}>
+          <span className={`capacity-dot${capacityTelemetry && capacityTelemetry.working > 0 ? " busy" : ""}`} />
+          {capacityTelemetry?.reason === null && capacityTelemetry.unknown === 0
+            ? capacityTelemetry.working : "?"}/{capacityTelemetry?.limit ?? "?"} agents
+        </span>
         <div className="toolbar">
-          <div className="review-mode-switch" role="group" aria-label="TaskBoard view">
-            <button type="button" className={reviewOpen ? "button secondary" : "button primary"}
-              onClick={() => setReviewOpen(false)}>Board</button>
-            <button type="button" className={reviewOpen ? "button primary" : "button secondary"}
-              onClick={() => setReviewOpen(true)} disabled={!!editor}
-              title="Open unified feedback inbox: visual reviews and For user quick replies (Ctrl+R)">
-              Inbox <span className="review-mode-count">{activeTasks.filter((task) => task.review_status === "open").length + userQueueTasks.length}</span>
-            </button>
-            <button type="button" className={queueDrawerOpen ? "button primary" : "button secondary"}
-              onClick={() => setQueueDrawerOpen(open => !open)} disabled={!!editor}
-              aria-expanded={queueDrawerOpen} title="Open exact OpenRig queue overview">
-              Queue <span className="review-mode-count">{queueTelemetry?.hasMore ? `${queueTelemetry.limit}+`
-                : queueTelemetry?.activeCount ?? "?"}</span>
-            </button>
-          </div>
-          <span className="queue-capacity-chip" role="status"
-            title={capacityTelemetry?.reason ?? "Current verified T3/OpenRig capacity"}>
-            OpenRig · {capacityTelemetry?.reason === null && capacityTelemetry.unknown === 0
-              ? capacityTelemetry.working : "?"}/{capacityTelemetry?.limit ?? "?"} active
-          </span>
-          {!reviewOpen && <label className="hide-waiting-filter"
-            title="Hide tasks that cannot start until prerequisites finish. Does not change their status.">
-            <input type="checkbox" checked={hideWaitingTasks}
-              onChange={(event) => setHideWaitingTasks(event.currentTarget.checked)} />
-            <span>Hide waiting</span>
-          </label>}
           <div className="search-wrap">
             <span>⌕</span>
             <input
@@ -3003,75 +3098,77 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
               onClose={() => setFilterPanelOpen(false)}
             />}
           </div>}
-          <details className="toolbar-more">
-            <summary className="button secondary" title="More TaskBoard actions">More ▾</summary>
-            <div className="toolbar-more-menu">
-              <button type="button" className="button secondary"
-                title="Configure resume window, idle wake, missing-session grace and external leases"
-                onClick={() => setAgentSettingsOpen(true)}>Agent recovery settings</button>
-              <button type="button" className="button secondary"
-                title="Show genuine stale technical blockers, excluding dependency waiting. No workers are spawned."
-                onClick={() => setStaleDrawerOpen(true)}>
-                Recheck blockers · {staleBlockers.length}
+          {!reviewOpen && <button type="button"
+            className={`toolbar-toggle${hideWaitingTasks ? " on" : ""}`}
+            aria-pressed={hideWaitingTasks}
+            onClick={() => setHideWaitingTasks((value) => !value)}
+            title="Hide tasks that cannot start until prerequisites finish. Does not change their status.">
+            Hide waiting
+          </button>}
+          <div className="toolbar-icons" role="group" aria-label="Board actions">
+            <button type="button" className="icon-tool" onClick={() => void undoLast()}
+              disabled={busy || undoCount === 0 || !!editor}
+              title={undoCount ? `Undo last action (Ctrl+Z) · ${undoCount} available` : "Nothing to undo"}
+              aria-label="Undo">
+              <ToolbarIcon name="undo" />
+            </button>
+            <button type="button" className={`icon-tool${refreshFeedback === "working" ? " spinning" : refreshFeedback === "done" ? " confirmed" : ""}`}
+              onClick={() => window.dispatchEvent(new Event("taskboard:refresh-all"))}
+              disabled={busy || refreshFeedback === "working"}
+              title={refreshFeedback === "done" ? "Updated" : "Refresh all project boards from Markdown files (F5)"}
+              aria-label="Refresh">
+              <ToolbarIcon name="refresh" />
+            </button>
+            <button type="button" className="icon-tool" onClick={toggleAllEpicsCollapsed}
+              disabled={busy || !epicIdsWithChildren.length}
+              title={allEpicsCollapsed ? "Expand all epics" : "Collapse all epics (orange For user tasks stay visible)"}
+              aria-label={allEpicsCollapsed ? "Expand all epics" : "Collapse all epics"}>
+              <ToolbarIcon name={allEpicsCollapsed ? "expand" : "collapse"} />
+            </button>
+          </div>
+          <div className="toolbar-more" ref={moreMenuRef}>
+            <button type="button" className={`icon-tool${moreMenuOpen ? " open" : ""}`}
+              aria-haspopup="menu" aria-expanded={moreMenuOpen} title="More TaskBoard actions"
+              onClick={() => setMoreMenuOpen((open) => !open)}>
+              <ToolbarIcon name="more" />
+              {(staleBlockers.length > 0 || userQueueTasks.length > 0) && <span className="more-dot" />}
+            </button>
+            {moreMenuOpen && <div className="toolbar-more-menu" role="menu">
+              <div className="menu-section">Board</div>
+              <button type="button" role="menuitem" onClick={() => { setMoreMenuOpen(false); addColumn(); }} disabled={busy}>
+                <ToolbarIcon name="column" /><span>Add column</span>
               </button>
-              <button type="button" className="button secondary" onClick={startUserQueue}
-                disabled={busy || userQueueTasks.length === 0}
-                title="Direct For user quick-reply queue (Ctrl+Q)">
-                For user · {userQueueTasks.length}
+              <button type="button" role="menuitem" onClick={() => { setMoreMenuOpen(false); setReleasesOpen(true); }} disabled={busy}>
+                <ToolbarIcon name="releases" /><span>Releases</span>
               </button>
-          <button
-            className="button secondary epic-collapse-all"
-            onClick={toggleAllEpicsCollapsed}
-            disabled={busy || !epicIdsWithChildren.length}
-            title={allEpicsCollapsed
-              ? "Expand all epics to show their tasks again"
-              : "Collapse every epic across all columns. Orange For user tasks stay visible."}
-            aria-label={allEpicsCollapsed ? "Expand all epics" : "Collapse all epics"}
-          >
-            <span aria-hidden="true">{allEpicsCollapsed ? "▾" : "▸"}</span>
-            {allEpicsCollapsed ? "Expand all epics" : "Collapse all epics"}
-          </button>
-          <button
-            className="button secondary"
-            onClick={() => void undoLast()}
-            disabled={busy || undoCount === 0 || !!editor}
-            title="Undo last TaskBoard action (Ctrl+Z)"
-          >
-            Undo{undoCount ? ` (${undoCount})` : ""}
-          </button>
-          <button
-            className="button secondary"
-            onClick={() => window.dispatchEvent(new Event("taskboard:refresh-all"))}
-            disabled={busy || refreshFeedback === "working"}
-            title="Refresh all project boards from Markdown files (F5)"
-          >
-            {refreshFeedback === "working" ? "Refreshing…" : refreshFeedback === "done" ? "✓ Updated" : "Refresh"}
-          </button>
-          <button className="button secondary" onClick={addColumn} disabled={busy}
-            title="Add a new TaskBoard column">
-            + Column
-          </button>
-            </div>
-          </details>
-          <button className="button secondary" onClick={() => setReleasesOpen(true)} disabled={busy}>Releases</button>
-          <button className="button primary" onClick={() => openCreate()} disabled={busy}
+              <button type="button" role="menuitem" onClick={() => { setMoreMenuOpen(false); openTaskDump(); }} disabled={busy || !!editor}
+                title="Paste one task per line (Ctrl+V on the board also opens Task Dump)">
+                <ToolbarIcon name="dump" /><span>Task dump</span><kbd>Ctrl+V</kbd>
+              </button>
+              <div className="menu-section">Agents &amp; people</div>
+              <button type="button" role="menuitem" onClick={() => { setMoreMenuOpen(false); startUserQueue(); }}
+                disabled={busy || userQueueTasks.length === 0} title="Direct For user quick-reply queue">
+                <ToolbarIcon name="user" /><span>For user queue</span>
+                {userQueueTasks.length > 0 ? <em className="menu-count warm">{userQueueTasks.length}</em> : <kbd>Ctrl+Q</kbd>}
+              </button>
+              <button type="button" role="menuitem" onClick={() => { setMoreMenuOpen(false); setStaleDrawerOpen(true); }}
+                title="Show genuine stale technical blockers, excluding dependency waiting. No workers are spawned.">
+                <ToolbarIcon name="blockers" /><span>Recheck blockers</span>
+                {staleBlockers.length > 0 && <em className="menu-count danger">{staleBlockers.length}</em>}
+              </button>
+              <button type="button" role="menuitem" onClick={() => { setMoreMenuOpen(false); setAgentSettingsOpen(true); }}
+                title="Configure resume window, idle wake, missing-session grace and external leases">
+                <ToolbarIcon name="agents" /><span>Agent recovery settings</span>
+              </button>
+              <div className="menu-footer" title={boardPath}><ToolbarIcon name="folder" size={13} /><span>{boardPath}</span></div>
+            </div>}
+          </div>
+          <button className="button primary new-task-button" onClick={() => openCreate()} disabled={busy}
             title="Create a task (Ctrl+Space or Ctrl+T)">
-            + Task
-          </button>
-          <button className="button secondary" onClick={() => openTaskDump()} disabled={busy || !!editor}
-            title="Paste one task per line (Ctrl+V on the board also opens Task Dump).">
-            Task Dump
+            <ToolbarIcon name="plus" size={14} /> Task
           </button>
         </div>
       </header>
-
-      <div className="pathbar">
-        <span className="status-dot" />
-        <span>{boardPath}</span>
-        <span className="spacer" />
-        <span>{activeTasks.length} active</span>
-        <span>{snapshot.tasks.filter((task) => task.archived).length} archived</span>
-      </div>
 
       {error && <div className="error-banner">{error}</div>}
       {queueRecoveryWarning && <div className="warning-banner" role="status">Queue reconciliation: {queueRecoveryWarning}</div>}
@@ -3168,7 +3265,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
                 title="Drag to reorder"
               >
                 <div className="column-title">
-                  <span>{column.name}</span>
+                  <span className="column-name" title={column.name}>{column.name}</span>
                   <small>{columnTasks.length}</small>
                   {column.awake_until && Date.parse(column.awake_until) > Date.now() && (
                     <span className="column-awake" title="This column recently woke from snooze">☀</span>
@@ -3206,9 +3303,9 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
                       {column.advisory ? "!" : "✓"}
                     </button>
                   )}
-                  <button title="Collapse column" onClick={() => toggleColumnHidden(column.id)}>│</button>
-                  <button title="Rename" onClick={() => renameColumn(column.id)}>✎</button>
-                  <button title="Delete" onClick={() => deleteColumn(column.id)}>×</button>
+                  <button className="column-secondary-action" title="Collapse column" onClick={() => toggleColumnHidden(column.id)}>│</button>
+                  <button className="column-secondary-action" title="Rename" onClick={() => renameColumn(column.id)}>✎</button>
+                  <button className="column-secondary-action" title="Delete" onClick={() => deleteColumn(column.id)}>×</button>
                 </div>
               </div>
 
@@ -3255,7 +3352,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
                       style={{ marginLeft: Math.min(depth, 4) * 12 }}
                       onMouseDown={(event) => { setKeyboardSelectedTaskId(task.id); beginCardDrag(event, task); }}
                       onClick={() => {
-                        if (task.kind !== "epic") return;
+                        if (task.kind !== "epic" || Date.now() < suppressEpicClickUntil.current) return;
                         if (epicSingleClickTimer.current) clearTimeout(epicSingleClickTimer.current);
                         epicSingleClickTimer.current = setTimeout(() => {
                           epicSingleClickTimer.current = null;
@@ -3312,6 +3409,12 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
                             {collapsedTaskIds.has(task.id) ? "▸" : "▾"}
                           </button>
                         )}
+                        {task.icon && (
+                          <span className={`task-icon ${task.icon}`} title={TASK_ICON_OPTIONS.find((item) => item.value === task.icon)?.label}>
+                            <TaskIconGlyph icon={task.icon} />
+                          </span>
+                        )}
+                        <span className="task-meta-spacer" />
                         {queueEligible(task) && <button type="button"
                           className={`queue-intent-toggle card-queue-toggle${executionModes[task.id]?.mode === "queue" ? " queued" : ""}`}
                           title={executionModes[task.id]?.mode === "queue"
@@ -3325,28 +3428,6 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
                           onPointerDown={event => event.stopPropagation()}
                           onMouseDown={event => event.stopPropagation()}
                           onClick={event => { event.stopPropagation(); void toggleTaskQueue(task); }}><QueueArrows /></button>}
-                        {task.icon && (
-                          <span className={`task-icon ${task.icon}`} title={TASK_ICON_OPTIONS.find((item) => item.value === task.icon)?.label}>
-                            <TaskIconGlyph icon={task.icon} />
-                          </span>
-                        )}
-                        <h3><TitleMarkup title={task.title} /></h3>
-                        {task.claimed_by && (
-                          <button type="button" className="task-more-button"
-                            aria-label={`More actions for ${task.id}`}
-                            title="Task actions, including open claimed T3 session"
-                            onPointerDown={(event) => event.stopPropagation()}
-                            onMouseDown={(event) => event.stopPropagation()}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              const rect = event.currentTarget.getBoundingClientRect();
-                              setContextMenu({
-                                taskId: task.id,
-                                x: Math.min(rect.right, window.innerWidth - 240),
-                                y: Math.min(rect.bottom, window.innerHeight - 410),
-                              });
-                            }}>···</button>
-                        )}
                         {task.kind === "task" && !isForUser(task) && (
                           <span className={`readiness-badge ${readinessOf(task)}`}
                             title={readinessOf(task) === "waiting" ? `Waiting for ${waitingFor(task).join(", ")}` : readinessOf(task) === "ready" ? "Ready to start" : "Blocked"}
@@ -3370,7 +3451,24 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
                             )}
                           </div>
                         )}
+                        {task.claimed_by && (
+                          <button type="button" className="task-more-button"
+                            aria-label={`More actions for ${task.id}`}
+                            title="Task actions, including open claimed T3 session"
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              const rect = event.currentTarget.getBoundingClientRect();
+                              setContextMenu({
+                                taskId: task.id,
+                                x: Math.min(rect.right, window.innerWidth - 240),
+                                y: Math.min(rect.bottom, window.innerHeight - 410),
+                              });
+                            }}>···</button>
+                        )}
                       </div>
+                      <h3><TitleMarkup title={task.title} /></h3>
                       {task.kind === "epic" && (() => {
                         const status = epicProgress(task);
                         return <div className="epic-progress" title={`${status.done}/${status.total} completed  /  ${status.inProgress} in progress  /  ${status.blocked} waiting/blocked`}>
@@ -3467,7 +3565,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
             {hoverTask.task.category && <span>{hoverTask.task.category}</span>}
             {hoverTask.task.parent && <span>Subtask of {hoverTask.task.parent}</span>}
             {hoverTask.task.claimed_by && <span title={claimTooltip(hoverTask.task)}>{claimTooltip(hoverTask.task)}</span>}
-            {hoverTask.task.kind === "epic" && <span>Coordination only  -  cannot be claimed or moved</span>}
+            {hoverTask.task.kind === "epic" && <span>Coordination only  -  drag to move all its open tasks</span>}
             {hoverTask.task.kind === "task" && !isForUser(hoverTask.task) && <span>Readiness: {readinessOf(hoverTask.task)}</span>}
             {isForUser(hoverTask.task) && <span>FOR USER — awaiting user input.</span>}
           </div>

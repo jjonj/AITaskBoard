@@ -1643,7 +1643,7 @@ body.column-dragging * {
   border: 1px solid #8c769e;
   border-left: 4px solid #bc9fdd;
   background: #2c253a;
-  cursor: default;
+  cursor: grab; /* dragging an epic moves its open tasks */
 }
 .task-card.epic-card:hover { background: #383048; }
 .dependency-badge {
@@ -3565,4 +3565,128 @@ body.card-dragging .project-tab-wrapper:not(.selected):hover {
 .task-filter-footer strong { color: #e4f2f1; }
 @media (max-width: 700px) {
   .task-filter-panel { right: -42px; max-height: 68vh; }
+}
+
+/* ─── UX refresh 2026-11-03 ───────────────────────────────────────────────
+   One compact header row: title + stats, view switch, agent capacity, then
+   search/filters, quick icon actions, the More menu and + Task. The old
+   path bar is folded into the title tooltip and the More menu footer. */
+.topbar {
+  min-height: 54px;
+  padding: 8px 14px 8px 18px;
+  justify-content: flex-start;
+  gap: 12px;
+}
+.topbar-title { display: flex; flex-direction: column; min-width: 0; flex: 0 1 auto; margin-right: 6px; }
+.topbar-title h1 { font-size: 18px; line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.topbar-meta { display: inline-flex; align-items: center; gap: 6px; margin-top: 2px; color: #7e8996; font-size: 10.5px; white-space: nowrap; }
+.topbar-meta .status-dot { width: 6px; height: 6px; box-shadow: none; }
+
+.review-mode-switch { gap: 2px; padding: 2px; border-radius: 9px; background: #12171d; border-color: #2d3640; flex: none; }
+.review-mode-switch > button {
+  height: 28px; padding: 0 11px; display: inline-flex; align-items: center; gap: 5px;
+  border: 0; border-radius: 7px; background: transparent; color: #a9b4c0;
+  font-size: 12px; font-weight: 650; cursor: pointer;
+}
+.review-mode-switch > button:hover:not(:disabled):not(.active) { background: #1f2730; color: #e6ebf0; }
+.review-mode-switch > button.active { background: #e3e7ec; color: #161a1f; }
+.review-mode-switch > button:disabled { opacity: .45; cursor: default; }
+.review-mode-count { margin-left: 0; min-width: 18px; padding: 0 5px; border-radius: 9px; background: rgba(127,140,155,.18); font-size: 10.5px; line-height: 17px; text-align: center; opacity: 1; }
+.review-mode-count.attention { background: #e59a43; color: #2a1806; font-weight: 800; }
+.review-mode-switch > button.active .review-mode-count { background: rgba(22,26,31,.12); }
+
+.queue-capacity-chip { display: inline-flex; align-items: center; gap: 6px; padding: 0 9px; height: 28px; border-radius: 14px; background: transparent; border-color: #2f3a46; flex: none; }
+.capacity-dot { width: 7px; height: 7px; border-radius: 50%; background: #5b6672; }
+.capacity-dot.busy { background: #4fc28a; box-shadow: 0 0 0 3px rgba(79,194,138,.16); }
+
+.toolbar { margin-left: auto; flex-wrap: nowrap; gap: 6px; }
+.toolbar .search-wrap { height: 32px; width: clamp(140px, 18vw, 280px); }
+.toolbar .button { height: 32px; }
+.toolbar .task-filter-trigger { padding: 0 10px; }
+
+.toolbar-toggle {
+  height: 32px; padding: 0 10px; border: 1px solid #343a43; border-radius: 8px;
+  background: #1b1f24; color: #9aa6b2; font-size: 12px; font-weight: 650; white-space: nowrap; cursor: pointer;
+}
+.toolbar-toggle:hover { background: #242930; color: #e6ebf0; }
+.toolbar-toggle.on { background: #143331; border-color: #2f7b72; color: #8fe0d3; }
+
+.toolbar-icons { display: flex; padding: 2px; gap: 1px; border: 1px solid #2d3640; border-radius: 9px; background: #12171d; }
+.icon-tool {
+  position: relative; width: 28px; height: 28px; padding: 0; display: grid; place-items: center;
+  border: 0; border-radius: 7px; background: transparent; color: #a9b4c0; cursor: pointer;
+}
+.toolbar-more > .icon-tool { width: 32px; height: 32px; border: 1px solid #343a43; background: #1b1f24; border-radius: 8px; }
+.icon-tool:hover:not(:disabled), .icon-tool.open { background: #27303a; color: #fff; }
+.icon-tool:disabled { opacity: .35; cursor: default; }
+.icon-tool.spinning svg { animation: tb-spin .8s linear infinite; }
+.icon-tool.confirmed { color: #6fd39c; }
+@keyframes tb-spin { to { transform: rotate(360deg); } }
+.more-dot { position: absolute; top: 5px; right: 5px; width: 7px; height: 7px; border-radius: 50%; background: #e59a43; border: 1.5px solid #1b1f24; }
+
+.new-task-button { display: inline-flex; align-items: center; gap: 5px; padding: 0 13px 0 10px; }
+
+/* More menu: grouped rows with icon, label and a right-aligned count/shortcut. */
+.toolbar-more-menu {
+  top: calc(100% + 6px); min-width: 268px; padding: 5px; gap: 0;
+  border-color: #38424e; border-radius: 10px; background: #1a2028;
+  box-shadow: 0 16px 40px rgba(0,0,0,.45);
+}
+.toolbar-more-menu .menu-section {
+  padding: 8px 9px 4px; color: #6f7b88; font-size: 10px; font-weight: 800;
+  letter-spacing: .09em; text-transform: uppercase;
+}
+.toolbar-more-menu .menu-section:first-child { padding-top: 4px; }
+.toolbar-more-menu > button {
+  display: flex; align-items: center; gap: 9px; width: 100%; height: 32px; padding: 0 9px;
+  border: 0; border-radius: 6px; background: transparent; color: #dbe2e9;
+  font-size: 12.5px; text-align: left; cursor: pointer;
+}
+.toolbar-more-menu > button svg { color: #8794a2; flex: none; }
+.toolbar-more-menu > button > span { flex: 1; }
+.toolbar-more-menu > button:hover:not(:disabled) { background: #29323d; }
+.toolbar-more-menu > button:hover:not(:disabled) svg { color: #dbe2e9; }
+.toolbar-more-menu > button:disabled { opacity: .42; cursor: default; }
+.toolbar-more-menu kbd { color: #6f7b88; font: 600 10.5px/1 inherit; }
+.menu-count { min-width: 20px; padding: 2px 6px; border-radius: 9px; font: normal 800 10.5px/1.2 inherit; text-align: center; }
+.menu-count.warm { background: #e59a43; color: #2a1806; }
+.menu-count.danger { background: #6a2a31; color: #ffb5bb; }
+.toolbar-more-menu .menu-footer {
+  display: flex; align-items: center; gap: 6px; margin-top: 5px; padding: 7px 9px 3px;
+  border-top: 1px solid #2b333d; color: #6f7b88; font-size: 10.5px;
+}
+.toolbar-more-menu .menu-footer span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+
+/* Columns fill the space the slimmer header frees; long names truncate
+   instead of wrapping, and rarely used actions appear on hover. */
+.column { max-height: 100%; }
+.hidden-column { height: 100%; }
+.column-header { min-height: 40px; padding: 6px 6px 6px 12px; }
+.column-title { flex: 1; }
+.column-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.column-actions { opacity: 1; flex: none; align-items: center; }
+.column-actions button { width: 25px; height: 25px; }
+.column:not(:hover) .column-secondary-action { display: none; }
+.column-actions .column-secondary-action { color: #6f7a86; }
+
+/* Cards: a compact meta line (ID, type, status, actions) above a full-width
+   title, so titles stop truncating after two or three words. */
+.cards { padding: 8px; }
+.task-card { margin-bottom: 6px; padding: 7px 9px 8px; }
+.task-card .task-title-row { align-items: center; gap: 5px; min-height: 20px; }
+.task-meta-spacer { flex: 1; min-width: 4px; }
+.task-card .task-attention-icons { margin-left: 0; padding-top: 0; }
+.task-card .card-queue-toggle { width: 20px; height: 20px; margin-right: 0; border-color: transparent; }
+.task-card .card-queue-toggle:not(.queued) { opacity: .55; }
+.task-card:hover .card-queue-toggle { opacity: 1; border-color: #3e4a52; }
+.task-card > h3 {
+  margin-top: 4px; min-height: 0; font-size: 12.5px; line-height: 1.38;
+  -webkit-line-clamp: 3; line-clamp: 3; color: #e8edf2;
+}
+.task-card .task-icon { transform: scale(.9); }
+.task-card.epic-card > h3 { font-weight: 600; color: #f1e9fb; }
+.epic-progress { margin-top: 6px; }
+@media (max-width: 920px) {
+  .queue-capacity-chip, .topbar-meta { display: none; }
+  .toolbar-toggle { padding: 0 7px; }
 }
