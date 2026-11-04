@@ -72,13 +72,13 @@ export function InboxResponseFooter({
           {index === 0 && notePresent ? " + note" : ""}
         </button>)}
       </> : <>
-        {notePresent && <button className="button secondary" type="button"
+        {notePresent && !onComplete && <button className="button secondary" type="button"
           disabled={busy || disabled} onClick={() => onSubmit()}>Submit ↵</button>}
         {onReopen && <button className="button secondary" type="button"
           disabled={busy || disabled} onClick={onReopen}>Needs changes / Reopen</button>}
         {onComplete && <button className="button primary" type="button"
           disabled={busy || disabled} onClick={onComplete}>Done</button>}
-        {!onComplete && <button className="button primary" type="button"
+        {!onComplete && !notePresent && <button className="button primary" type="button"
           disabled={busy || disabled} onClick={() => onSubmit()}>Submit ↵</button>}
       </>}
     </div>

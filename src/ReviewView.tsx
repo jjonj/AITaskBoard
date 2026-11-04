@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type MouseEvent } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import { archiveTask, listProjects, loadBoard, openTaskSession, readLocalImage, saveTaskImage, taskSyncQueue, taskEnqueueAgentNotice, taskReconcileAgentNotices, updateTask, type ProjectTab } from "./api";
+import { archiveTask, listProjects, loadBoard, openTaskSession, readLocalImage, saveTaskImage, taskSyncQueue, updateTask, type ProjectTab } from "./api";
 import { reviewAsset, reviewReconsider, reviewResolve, reviewShow,
   type ReviewArtifact, type ReviewManifest, type ReviewPin } from "./reviewApi";
 import type { Task } from "./types";
@@ -255,7 +255,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
     setNote("");
     setMediaIndex(0);
     setPinMode(false);
-    setUserNote(reviewTask?.task.user_notes ?? "");
+    setUserNote("");
     setUserCriteria(reviewTask?.task.acceptance_criteria.join("\n") ?? "");
     setKeepForUser(reviewTask?.task.kind === "for_user" ||
       !!reviewTask?.task.attention.includes("needs-user"));
@@ -432,49 +432,32 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       // The green Done action is an explicit acceptance/dismissal, even if
       // another option was selected before it was clicked.
       const answer = reopen ? "Needs changes" : aiQuestion && markDone ? "Done"
-        : userAnswer.trim() || (aiQuestion ? userNote.trim() : "");
-      if (aiQuestion && !answer) throw new Error("Choose a response or enter feedback before submitting.");
-      // A decision or action response resolves its associated blocker; unrelated feedback does not.
-      const resolvesBlock = aiQuestion && !markDone && !!answer &&
-        (old.column === "blocked" || old.attention.includes("blocked")) &&
-        (old.question?.request_type === "decision" || old.question?.request_type === "action");
-      const needsChanges = reopen || (aiQuestion && !markDone && answer.toLowerCase() === "needs changes");
-      const reopenForWork = needsChanges || resolvesBlock;
-      // An Inbox Done response closes an AI request; it does not turn the
-      // implementation task into Done. For user tasks remain directly completable.
-      const attention = (aiQuestion ? old.attention.filter((flag) => flag !== "question" && flag !== "needs-user")
-        : markDone ? old.attention.filter((flag) => flag !== "needs-user")
-        : keepForUser ? [...new Set([...old.attention, "needs-user" as const])]
-        : old.attention.filter((flag) => flag !== "needs-user"))
-        .filter((flag) => flag !== "question" || !answer);
-      if (aiQuestion && !attention.includes("user-note")) attention.push("user-note");
+        : userAnswer.trim() ? userAnswer : userNote;
+      if (aiQuestion && !answer.trim()) throw new Error("Choose a response or enter feedback before submitting.");
+      const isApproval = aiQuestion && (old.question?.request_type === "verification" || old.column === "done");
+      const isWaitingAnswer = aiQuestion && !isApproval;
+      const needsChanges = reopen || (isApproval && answer.toLowerCase() === "needs changes");
+      const attention = old.attention.filter(flag => flag !== "question" && flag !== "needs-user" && flag !== "blocked");
+      if ((isWaitingAnswer || needsChanges) && !attention.includes("user-note")) attention.push("user-note");
       let doneColumn: string | undefined;
-      if (markDone) {
+      if (markDone && !isWaitingAnswer) {
         const board = await loadBoard(reviewTask.path);
-        doneColumn = board.config.columns.find((col) => col.id === "done" && col.terminal)?.id
-          ?? board.config.columns.find((col) => col.terminal)?.id;
+        doneColumn = board.config.columns.find(col => col.id === "done" && col.terminal)?.id
+          ?? board.config.columns.find(col => col.terminal)?.id;
         if (!doneColumn) throw new Error("This board has no Done column.");
       }
       const imageLinks = await attachInboxImages(old.id, reviewTask.path);
       const updated: Task = {
         ...old,
-        ...(reopenForWork ? { column: resolvesBlock && old.claimed_by ? "in-progress" : "ai-ready",
-          claimed_by: resolvesBlock ? old.claimed_by : null, blocked_reason: null } :
+        ...(isWaitingAnswer || needsChanges ? { column: "ai-ready", claimed_by: null, blocked_reason: null } :
           doneColumn ? { column: doneColumn, claimed_by: null } : {}),
-        user_notes: [userNote, ...imageLinks].filter(Boolean).join("\n\n"),
+        user_notes: [old.user_notes, userNote, ...imageLinks].filter(Boolean).join("\n\n"),
         acceptance_criteria: userCriteria.split(/\r?\n/).filter(Boolean),
         kind: needsChanges ? "task" : aiQuestion ? old.kind : markDone ? "task" : keepForUser ? (old.kind === "epic" ? "epic" : "for_user") : "task",
-        attention: reopenForWork ? attention.filter(flag => flag !== "blocked" && flag !== "needs-user") : attention,
+        attention,
         question: old.question ? { ...old.question, answer: answer || null } : null,
       };
       const saved = await updateTask(updated, reviewTask.path);
-      if (resolvesBlock && saved.claimed_by && saved.column === "in-progress") {
-        // A human answer restores work to the same owner when one exists.
-        // The durable outbox survives T3 outages; dispatch is not an interrupt.
-        await taskEnqueueAgentNotice(reviewTask.path, saved.id, saved.claimed_by,
-          saved.revision, "human-response");
-        void taskReconcileAgentNotices(reviewTask.path).catch(() => null);
-      }
       let notice: string | undefined;
       if (saved.completed && saved.category === "Implementation Review" && saved.related_to.length === 1) {
         const board = await loadBoard(reviewTask.path);
@@ -892,7 +875,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
                     {openingTaskSession ? "Opening…" : "Open Session"}
                   </button>
                 )}
-                <span className={`inbox-task-column-chip column-${reviewTask.task.column}`}>{reviewTask.task.column}</span>
+                <span className={`inbox-task-column-chip column-${reviewTask.task.column}`}>{reviewTask.task.column === "blocked" ? "Waiting" : reviewTask.task.column}</span>
                 <div className="inbox-more-wrap">
                   <button className="button secondary" type="button" aria-label="More Inbox actions"
                     aria-expanded={moreOpen} onClick={() => setMoreOpen(value => !value)}>⋯</button>
@@ -965,13 +948,13 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
               onSkip={() => advance(undefined, true)}
               onSnooze={snoozeSelected}
               onSubmit={() => void submitUser()}
-              onComplete={() => void submitUser(true)}
-              onReopen={() => void submitUser(false, true)}
+              onComplete={reviewTask.task.question?.request_type === "verification" || reviewTask.task.column === "done" || reviewTask.task.kind === "for_user" ? () => void submitUser(true) : undefined}
+              onReopen={reviewTask.task.question?.request_type === "verification" || reviewTask.task.column === "done" ? () => void submitUser(false, true) : undefined}
               notePresent={!!userNote.trim() || !!userAnswer.trim() || inboxImages.length > 0}
               busy={saving}
               summary={reviewTask.task.kind === "for_user"
                 ? "Respond or complete this human-owned task"
-                : "Done closes the feedback request; Needs changes returns work to AI Ready"}
+                : reviewTask.task.question?.request_type === "verification" || reviewTask.task.column === "done" ? "Done accepts implementation; Needs changes returns to AI Ready" : "Submit records your decision and returns work to AI Ready"}
             />
           </div>
         ) : !round ? (

@@ -50,5 +50,5 @@ pub fn handoff_bundle(task: &Task) -> HandoffPacket {
     HandoffPacket {origin_sessions,latest_claim:task.claimed_by.clone(),user_decisions,
         progress,artifact_references,commit_references,uncommitted_references,
         latest_rejection,
-        instructions:format!("Continue {} using current TaskBoard revision; inspect previous work, assets, decisions and working tree before edits. Missing evidence is unknown, not completed.",task.id)}
+        instructions:format!("Continue {} using current TaskBoard revision. FIRST implement any USER DECISION in user_decisions / AI Notes as the next requirement. Do not request approval again for an answered question. Inspect previous work and working tree before edits; missing evidence is unknown, not completed.",task.id)}
 }

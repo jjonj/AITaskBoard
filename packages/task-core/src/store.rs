@@ -215,7 +215,7 @@ pub fn default_board_config(name: impl Into<String>) -> BoardConfig {
             },
             Column {
                 id: "blocked".into(),
-                name: "Blocked".into(),
+                name: "Waiting".into(),
                 order: 3,
                 terminal: false,
                 hidden: false,
@@ -1052,6 +1052,37 @@ impl FsTaskStore {
            && previous.column != task.column
            && (task.column == IN_PROGRESS_COLUMN_ID || snapshot.config.columns.iter().any(|c| c.id == task.column && c.terminal)) {
             ensure_dependencies_complete(&snapshot, &task)?;
+        }
+        // A human answer to a parked question is an executable instruction,
+        // never an approval of unfinished implementation. Persist it on the
+        // original task within this same locked Markdown update.
+        let previous_pending = previous.question.as_ref().is_some_and(|q| q.answer.is_none());
+        let answer = task.question.as_ref().and_then(|q| q.answer.as_ref()).cloned();
+        if actor == MutationActor::Human && previous.column == BLOCKED_COLUMN_ID
+            && previous_pending && answer.as_ref().is_some_and(|a| !a.trim().is_empty())
+            && previous.question.as_ref().is_some_and(|q| q.request_type.as_deref() != Some("verification")) {
+            let decision = format!("USER DECISION - IMPLEMENT NEXT\nQuestion: {}\nAnswer: {}",
+                previous.question.as_ref().map(|q| q.prompt.as_str()).unwrap_or(""),
+                answer.as_deref().unwrap_or(""));
+            if !task.ai_notes.contains(&decision) {
+                task.ai_notes = format!("{decision}\n\n{}", task.ai_notes);
+            }
+            task.column = AI_READY_COLUMN_ID.into();
+            task.claimed_by = None;
+            task.blocked_reason = None;
+            task.attention.retain(|flag| !matches!(flag, TaskAttention::Question | TaskAttention::Blocked | TaskAttention::NeedsUser));
+            if !task.attention.contains(&TaskAttention::UserNote) { task.attention.push(TaskAttention::UserNote); }
+        }
+        // An unfinished human decision is parked, not claimed. Keep the legacy
+        // blocked column ID for existing boards while presenting it as Waiting.
+        let asks_human = task.kind == TaskKind::Task && task.question.as_ref()
+            .is_some_and(|q| q.answer.is_none() && q.request_type.as_deref() != Some("verification"))
+            && !snapshot.config.columns.iter().any(|c| c.id == task.column && c.terminal);
+        if asks_human && snapshot.config.columns.iter().any(|c| c.id == BLOCKED_COLUMN_ID) {
+            task.column = BLOCKED_COLUMN_ID.into();
+            task.claimed_by = None;
+            task.blocked_reason = None;
+            task.attention.retain(|flag| *flag != TaskAttention::Blocked);
         }
         // The claim and In Progress must agree after every move, regardless of
         // whether the change came from the desktop or an agent CLI.
@@ -2178,7 +2209,8 @@ pub const BLOCKED_COLUMN_ID: &str = "blocked";
 /// Executable work is blocked by the `blocked` flag or the Blocked column.
 pub fn is_task_blocked(task: &Task) -> bool {
     task.kind != TaskKind::Epic &&
-        (task.column == BLOCKED_COLUMN_ID || task.attention.contains(&TaskAttention::Blocked))
+        (task.attention.contains(&TaskAttention::Blocked) || (task.column == BLOCKED_COLUMN_ID &&
+            !task.question.as_ref().is_some_and(|q| q.answer.is_none() && q.request_type.as_deref() != Some("verification"))))
 }
 
 /// Enforce `blocked_reason` semantics and record the reason as a red
@@ -2188,6 +2220,14 @@ pub fn is_task_blocked(task: &Task) -> bool {
 /// working without a reason, so legacy blocked items are never stranded.
 fn apply_blocked_state(previous: Option<&Task>, task: &mut Task, actor: MutationActor) -> Result<(), TaskStoreError> {
     if !is_task_blocked(task) {
+        task.blocked_reason = None;
+        return Ok(());
+    }
+    // Waiting for the user's answer is not a technical obstacle and has no
+    // blocked reason. The question itself is the durable Inbox request.
+    if task.column == BLOCKED_COLUMN_ID && task.question.as_ref()
+        .is_some_and(|q| q.answer.is_none() && q.request_type.as_deref() != Some("verification"))
+        && !task.attention.contains(&TaskAttention::Blocked) {
         task.blocked_reason = None;
         return Ok(());
     }
@@ -2544,6 +2584,11 @@ fn parse_board(text: &str) -> Result<BoardConfig, TaskStoreError> {
     let mut config: BoardConfig =
         serde_yaml::from_str(&yaml).map_err(|e| TaskStoreError::Parse(e.to_string()))?;
 
+    // Keep legacy column IDs stable so existing task links remain valid, but
+    // display their human/external obstacle lane as Waiting on every client.
+    if let Some(column) = config.columns.iter_mut().find(|c| c.id == BLOCKED_COLUMN_ID) {
+        if column.name.eq_ignore_ascii_case("blocked") { column.name = "Waiting".into(); }
+    }
     // Backward compatibility: older boards predate per-column AI readiness.
     // If no column is explicitly marked ready, keep the canonical AI Ready
     // column ready so existing boards retain their old semantics.

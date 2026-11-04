@@ -1018,8 +1018,10 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     return !!item && (item.archived || !!item.completed || (!id.includes("#") && columns.some((col) => col.id === item.column && col.terminal)));
   };
   const waitingFor = (task: Task): string[] => (task.depends_on || []).filter((id) => !isComplete(id));
+  const awaitingUserAnswer = (task: Task) => task.column === "blocked" && task.attention.includes("question") && !!task.question && !task.question.answer;
   const readinessOf = (task: Task) => task.kind === "epic" ? "epic"
     : isForUser(task) ? "for_user"
+    : awaitingUserAnswer(task) ? "waiting"
     : task.attention.includes("blocked") || task.column === "blocked" ? "blocked"
     : waitingFor(task).length ? "waiting" : "ready";
   const epicProgress = (epic: Task) => {
@@ -3265,7 +3267,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
                 title="Drag to reorder"
               >
                 <div className="column-title">
-                  <span className="column-name" title={column.name}>{column.name}</span>
+                  <span className="column-name" title={column.id === "blocked" ? "Waiting" : column.name}>{column.id === "blocked" ? "Waiting" : column.name}</span>
                   <small>{columnTasks.length}</small>
                   {column.awake_until && Date.parse(column.awake_until) > Date.now() && (
                     <span className="column-awake" title="This column recently woke from snooze">☀</span>
@@ -3430,9 +3432,9 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
                           onClick={event => { event.stopPropagation(); void toggleTaskQueue(task); }}><QueueArrows /></button>}
                         {task.kind === "task" && !isForUser(task) && (
                           <span className={`readiness-badge ${readinessOf(task)}`}
-                            title={readinessOf(task) === "waiting" ? `Waiting for ${waitingFor(task).join(", ")}` : readinessOf(task) === "ready" ? "Ready to start" : "Blocked"}
-                            aria-label={readinessOf(task) === "ready" ? "Ready to start" : readinessOf(task) === "waiting" ? `Waiting for ${waitingFor(task).join(", ")}` : "Blocked"}>
-                            {readinessOf(task) === "waiting" ? `WAIT ${waitingFor(task).length}` : readinessOf(task) === "blocked" ? "BLOCKED" : "\u25B6"}
+                            title={readinessOf(task) === "waiting" ? awaitingUserAnswer(task) ? "Waiting for your answer" : `Waiting for ${waitingFor(task).join(", ")}` : readinessOf(task) === "ready" ? "Ready to start" : "Blocked"}
+                            aria-label={readinessOf(task) === "ready" ? "Ready to start" : readinessOf(task) === "waiting" ? awaitingUserAnswer(task) ? "Waiting for your answer" : `Waiting for ${waitingFor(task).join(", ")}` : "Blocked"}>
+                            {readinessOf(task) === "waiting" ? awaitingUserAnswer(task) ? "WAITING" : `WAIT ${waitingFor(task).length}` : readinessOf(task) === "blocked" ? "BLOCKED" : "\u25B6"}
                           </span>
                         )}
                         {!!task.attention.length && (

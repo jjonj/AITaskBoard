@@ -1921,6 +1921,7 @@ mod tests {
         store.ensure_board(&root, "Test").unwrap();
         let one = store.create(&root, draft("Implement feature")).unwrap();
         let id = one.id.clone();
+        store.claim(&root, &id, "InitialWorker").unwrap();
         let user = TaskCommand::AskUser(TaskAskUserArgs {
             target: id.clone(), request_type: "decision".into(),
             question: "Which approach?".into(), options: vec!["A".into(), "B".into()],
@@ -1928,13 +1929,19 @@ mod tests {
         });
         let response = run_task(&store, &root, &user).unwrap();
         assert_eq!(response["task"]["question"]["request_type"], "decision");
+        assert_eq!(response["task"]["column"], "blocked");
+        assert!(response["task"]["claimed_by"].is_null());
         assert_eq!(run_task(&store, &root, &user).unwrap_err().code, "request_already_open");
         let snapshot = store.load(&root).unwrap();
         assert_eq!(snapshot.tasks.len(), 1);
         let mut answer = snapshot.tasks.into_iter().find(|task| task.id == id).unwrap();
         answer.question.as_mut().unwrap().answer = Some("A".into());
         answer.attention.retain(|flag| flag != &TaskAttention::Question);
-        store.update(&root, answer).unwrap();
+        let resumed = store.update_as(&root, answer, task_core::MutationActor::Human).unwrap();
+        assert_eq!(resumed.column, "ai-ready");
+        assert!(resumed.claimed_by.is_none());
+        assert!(resumed.ai_notes.contains("USER DECISION - IMPLEMENT NEXT"));
+        assert!(resumed.ai_notes.contains("Answer: A"));
         store.claim(&root, &id, "TestWorker").unwrap();
         let finish = TaskCommand::Finish(TaskFinishArgs {
             target: id.clone(), verification: "user".into(),
