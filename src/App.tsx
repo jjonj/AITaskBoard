@@ -540,6 +540,12 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const imageDialogGeneration = useRef(0);
   const editorModalRef = useRef<HTMLElement | null>(null);
   const autosavingDraft = useRef(false);
+  const [autoSavedDraft, setAutoSavedDraft] = useState<{ id: string; title: string } | null>(null);
+  useEffect(() => {
+    if (!autoSavedDraft) return;
+    const timeout = window.setTimeout(() => setAutoSavedDraft(null), 9000);
+    return () => window.clearTimeout(timeout);
+  }, [autoSavedDraft]);
   const epicSingleClickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const suppressEpicClickUntil = useRef(0); // swallow the click that ends an epic drag
   const [fileDropActive, setFileDropActive] = useState(false);
@@ -1364,10 +1370,12 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
         reserved_id: reservedTaskId.id,
         reservation_token: reservedTaskId.token,
       };
-      void createTask(draft, boardPath).then(async () => {
+      void createTask(draft, boardPath).then(async (saved) => {
         const latest = await loadBoard(boardPath);
         applySnapshot(latest);
+        flashTaskActivity([{ id: saved.id, kind: "created" }]);
         closeEditor(latest, true);
+        setAutoSavedDraft({ id: saved.id, title: saved.title });
       }).catch((error) => setError(`Could not auto-save draft: ${errorText(error)}`))
         .finally(() => { autosavingDraft.current = false; setBusy(false); });
       return;
@@ -3229,6 +3237,31 @@ Details: ${queueRecoveryWarning}`;
       </header>
 
       {error && <div className="error-banner">{error}</div>}
+      {autoSavedDraft && <div className="draft-saved-toast" role="status">
+        <span className="draft-saved-toast-icon" aria-hidden="true">✓</span>
+        <div className="draft-saved-toast-copy">
+          <strong>Saved to Drafts</strong>
+          <span title={autoSavedDraft.title}>{autoSavedDraft.id} · {autoSavedDraft.title}</span>
+          <small>Auto-deletes in 24 hours unless edited.</small>
+        </div>
+        <button type="button" className="draft-saved-toast-show" onClick={() => {
+          const task = snapshot.tasks.find((item) => item.id === autoSavedDraft.id);
+          setAutoSavedDraft(null);
+          if (!task) return;
+          setQuery("");
+          window.setTimeout(() => {
+            const card = document.querySelector<HTMLElement>(`[data-task-id="${CSS.escape(task.id)}"].task-card`);
+            if (card) {
+              card.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+              flashTaskActivity([{ id: task.id, kind: "created" }]);
+            } else {
+              openEdit(task);
+            }
+          }, 90);
+        }}>Show</button>
+        <button type="button" className="draft-saved-toast-dismiss" aria-label="Dismiss draft notification"
+          onClick={() => setAutoSavedDraft(null)}>×</button>
+      </div>}
       {queueRecoveryWarning && <div className="queue-attention-banner" role="alert">
         <span><strong>Queue needs attention</strong> <span title={queueRecoveryWarning}>{queueRecoveryWarning}</span></span>
         <button type="button" className="button secondary" disabled={queueRecoveryAgentBusy}
