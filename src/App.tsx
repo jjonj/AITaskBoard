@@ -1579,19 +1579,28 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     setQueueRecoveryAgentBusy(true);
     const miscRoot = "B:\\GDrive\\SharedWithPhone\\Obsidian\\jjj\\Misc\\Tasks";
     try {
-      // Reuse the user's existing diagnostics task rather than creating a
-      // duplicate each time a queue receipt genuinely needs intervention.
-      try {
-        const misc = await loadBoard(miscRoot);
-        const task = misc.tasks.find(item => item.id === "MISC-0119");
-        if (task) {
-          const diagnostic = `Queue integrity issue (${new Date().toISOString()})
+      const misc = await loadBoard(miscRoot);
+      const existing = misc.tasks.find(item => item.id === "MISC-0119" && !item.archived);
+      const diagnostic = `Queue integrity issue (${new Date().toISOString()})
 Board: ${boardPath}
 Details: ${queueRecoveryWarning}`;
-          await updateTask({ ...task, user_notes: [task.user_notes, diagnostic].filter(Boolean).join("\n\n") }, miscRoot);
-        }
-      } catch { /* The worker can inspect the original task and live queue even if its note is busy. */ }
-      await openTaskSession("MISC-0119", miscRoot, true);
+      // Reuse the user's original diagnostic task. If it was already marked
+      // Done, the explicit Spawn click reopens it before requesting a worker.
+      // If the old task has been archived, create a fresh repair assignment.
+      const recovery = existing ? await updateTask({
+        ...existing,
+        ...(misc.config.columns.some(column => column.id === existing.column && column.terminal)
+          ? { column: "ai-ready", completed: null, completed_at: null, claimed_by: null } : {}),
+        user_notes: [existing.user_notes, diagnostic].filter(Boolean).join("\n\n"),
+      }, miscRoot) : await createTask({
+        kind: "task", title: "Investigate TaskBoard queue integrity failure",
+        column: "ai-ready", parent: null, category: "TaskBoard",
+        icon: "bug", attention: ["priority"], question: null,
+        depends_on: [], related_to: [], acceptance_criteria: [],
+        ai_notes: "", user_notes: diagnostic, notes: "",
+        description: "Investigate the queue receipt conflict/UNKNOWN outcome and repair it without duplicating a dispatch.",
+      }, miscRoot);
+      await openTaskSession(recovery.id, miscRoot, !hasTaskSession(recovery));
       setQueueRecoveryWarning("");
     } catch (reason) {
       setError(`Could not start queue-recovery agent: ${errorText(reason)}`);
