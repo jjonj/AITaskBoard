@@ -37,6 +37,11 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   const [items, setItems] = useState<QueueItem[]>([]);
   const [selectedKey, setSelectedKey] = useState("");
   const initialSelectionApplied = useRef(false);
+  // An Inbox opened empty is intentionally allowed to show its empty state.
+  // Once it has shown feedback, close when the queue is exhausted.
+  const hasShownFeedback = useRef(false);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
   // Skips last for this Inbox pass; manual selection can still revisit the item.
   const skippedThisPass = useRef<Set<string>>(new Set());
   const [manifest, setManifest] = useState<ReviewManifest | null>(null);
@@ -222,6 +227,11 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
           .map((task) => ({ project: board.name, path: board.path, task })))
         .filter((item) => !(Number(snoozedLocally[keyOf(item)]) > Date.now()));
       pending.sort((a, b) => b.task.created.localeCompare(a.task.created) || a.task.id.localeCompare(b.task.id));
+      if (pending.length) hasShownFeedback.current = true;
+      else if (hasShownFeedback.current) {
+        closeRef.current();
+        return;
+      }
       setItems(pending);
       if (initialTaskId && !initialSelectionApplied.current) {
         initialSelectionApplied.current = true;
@@ -401,7 +411,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   }, [activeArtifact?.path]);
   const activeSrc = (artifact?: ReviewArtifact) => artifact &&
     (assets[artifact.path] || (artifact.poster && assets[artifact.poster]) || "");
-  const advance = (excludingKey?: string, skipCurrent = false, keepOpenForUndo = false) => {
+  const advance = (excludingKey?: string, skipCurrent = false) => {
     if (skipCurrent && selectedKey) skippedThisPass.current.add(selectedKey);
     const index = items.findIndex((item) => keyOf(item) === selectedKey);
     const ordered = index < 0 ? items : [...items.slice(index + 1), ...items.slice(0, index)];
@@ -409,7 +419,6 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       !skippedThisPass.current.has(keyOf(item)) &&
       !(Number(snoozedLocally[keyOf(item)]) > Date.now()));
     if (next) setSelectedKey(keyOf(next));
-    else if (keepOpenForUndo) setSelectedKey("");
     else onClose();
   };
 
@@ -482,7 +491,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       // A response may deliberately leave "For user" enabled. Do not ask for
       // the same answer again in this Inbox pass.
       hideLocally(reviewTask, 60 * 60 * 1000);
-      advance(keyOf(reviewTask), false, true);
+      advance(keyOf(reviewTask));
       void refresh();
     } catch (cause) {
       setError(`Could not save this task: ${String(cause)}`);
