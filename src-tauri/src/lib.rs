@@ -148,7 +148,8 @@ fn task_execution_modes(path: Option<String>) -> Result<std::collections::BTreeM
     let board = store.load(&root).map_err(|e| e.to_string())?;
     let mut modes = std::collections::BTreeMap::new();
     for task in board.tasks.into_iter().filter(|t| !t.archived &&
-        matches!(t.kind, TaskKind::Task | TaskKind::Recurring) && t.column == task_core::AI_READY_COLUMN_ID) {
+        matches!(t.kind, TaskKind::Task | TaskKind::Recurring) && board.config.columns.iter()
+            .any(|column| column.id == t.column && column.ai_ready && !column.advisory && !column.terminal)) {
         modes.insert(task.id.clone(), store.execution_intent(&root, &task.id).map_err(|e| e.to_string())?);
     }
     Ok(modes)

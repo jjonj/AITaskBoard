@@ -583,8 +583,8 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     return () => { cancelled = true; };
   }, [boardPath, editor?.mode, editor?.original?.id]);
   const editorQueueChoice = !executionTouched && editor && (
-    (editor.mode === "create" && editor.draft.column === "ai-ready" &&
-      snapshot?.config.columns.some(col => col.id === "ai-ready" && col.auto_queue)) ||
+    (editor.mode === "create" &&
+      snapshot?.config.columns.some(col => col.id === editor.draft.column && col.ai_ready && col.auto_queue)) ||
     (editor.draft.attention.includes("priority") &&
       !editor.original?.attention.includes("priority"))
   ) ? "queue" : executionChoice;
@@ -1718,7 +1718,8 @@ Details: ${queueRecoveryWarning}`;
   };
 
   const queueEligible = (task: Task) =>
-    task.column === "ai-ready" &&
+    !!snapshot?.config.columns.some(column => column.id === task.column && column.ai_ready &&
+      !column.advisory && !column.terminal) &&
     (task.kind === "task" || task.kind === "recurring") &&
     !task.archived && !task.completed && !task.claimed_by &&
     readinessOf(task) === "ready" &&
@@ -1737,10 +1738,10 @@ Details: ${queueRecoveryWarning}`;
   });
 
   const toggleColumnQueue = (columnId: string) => run(async () => {
-    if (columnId !== "ai-ready" || !snapshot) return;
+    if (!snapshot) return;
     const current = await loadBoard(boardPath);
     const column = current.config.columns.find(item => item.id === columnId);
-    if (!column) throw new Error("AI Ready column is unavailable.");
+    if (!column?.ai_ready || column.advisory || column.terminal) return;
     const next = !column.auto_queue;
     await saveBoardConfig({ ...current.config, columns: current.config.columns.map(item =>
       item.id === columnId ? { ...item, auto_queue: next } : item) }, boardPath);
@@ -2569,6 +2570,7 @@ Details: ${queueRecoveryWarning}`;
             ...item,
             ai_ready: !item.ai_ready && !item.advisory,
             advisory: item.ai_ready ? true : false,
+            auto_queue: item.ai_ready ? false : item.auto_queue,
           } : item,
         ),
       },
@@ -3333,10 +3335,10 @@ Details: ${queueRecoveryWarning}`;
                   onPointerDown={(event) => event.stopPropagation()}
                   onMouseDown={(event) => event.stopPropagation()}
                 >
-                  {column.id === "ai-ready" && <button type="button"
+                  {column.ai_ready && !column.advisory && !column.terminal && <button type="button"
                     className={`queue-intent-toggle column-queue-toggle${column.auto_queue ? " queued" : ""}${columnQueueMixed ? " mixed" : ""}`}
-                    title={`${column.auto_queue ? "Disable" : "Enable"} AI Ready auto-queue for current and future eligible tasks · ${queuedColumnCount}/${eligibleColumnQueue.length} queued`}
-                    aria-label={`${column.auto_queue ? "Disable" : "Enable"} AI Ready auto-queue`}
+                    title={`${column.auto_queue ? "Disable" : "Enable"} ${column.name} auto-queue for current and future eligible tasks · ${queuedColumnCount}/${eligibleColumnQueue.length} queued`}
+                    aria-label={`${column.auto_queue ? "Disable" : "Enable"} ${column.name} auto-queue`}
                     aria-pressed={!!column.auto_queue}
                     disabled={busy}
                     onClick={() => void toggleColumnQueue(column.id)}><QueueArrows /></button>}

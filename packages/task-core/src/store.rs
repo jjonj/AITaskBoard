@@ -1207,10 +1207,13 @@ fn pending_human_request(task: &Task) -> bool {
         || task.attention.contains(&TaskAttention::NeedsUser)
 }
 
+fn queue_enabled_column(config: &BoardConfig, column: &str) -> bool {
+    config.columns.iter().any(|item| item.id == column &&
+        item.ai_ready && !item.advisory && !item.terminal && item.id != DRAFT_COLUMN_ID)
+}
+
 fn is_todo(config: &BoardConfig, column: &str) -> bool {
-    column != IN_PROGRESS_COLUMN_ID && column != DRAFT_COLUMN_ID
-        && config.columns.iter().any(|item| item.id == column
-            && !item.terminal && !item.advisory && item.ai_ready)
+    column != IN_PROGRESS_COLUMN_ID && queue_enabled_column(config, column)
 }
 
 fn return_column(config: &BoardConfig, original: Option<&str>) -> String {
@@ -2720,8 +2723,7 @@ fn reset_released_queue_lifecycle(text: &str, task: &Task) -> Result<String, Tas
 pub fn queue_task_ready(snapshot: &BoardSnapshot, task: &Task) -> bool {
     !task.archived && task.completed.is_none() && task.claimed_by.is_none() &&
         matches!(task.kind, TaskKind::Task | TaskKind::Recurring) &&
-        task.column == AI_READY_COLUMN_ID &&
-        is_todo(&snapshot.config, &task.column) &&
+        queue_enabled_column(&snapshot.config, &task.column) &&
         !is_task_blocked(task) && !pending_human_request(task) &&
         ensure_dependencies_complete_for(&snapshot.tasks, &task.depends_on).is_ok()
 }
@@ -2736,7 +2738,7 @@ fn queue_policy_text(
     };
     if task.archived || task.completed.is_some() || task.claimed_by.is_some() ||
         !matches!(task.kind, TaskKind::Task | TaskKind::Recurring) ||
-        task.column != AI_READY_COLUMN_ID || !is_todo(&snapshot.config, &task.column) ||
+        !queue_enabled_column(&snapshot.config, &task.column) ||
         task.attention.iter().any(|a| matches!(a, TaskAttention::Blocked | TaskAttention::NeedsUser | TaskAttention::Question)) ||
         task.question.as_ref().is_some_and(|q| q.answer.is_none()) ||
         task.review_status.as_deref() == Some("open") {

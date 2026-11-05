@@ -729,7 +729,7 @@ fn run_task_queue(store: &FsTaskStore, root: &Path, command: &TaskQueueCommand) 
                     "dependencies": task.depends_on,
                     "readiness": ready,
                     "readinessReason": if ready { Value::Null } else {
-                        json!("Task is claimed, blocked, outside AI Ready, waiting on dependencies, or not due")
+                        json!("Task is claimed, blocked, outside a green AI Ready column, waiting on dependencies, or not due")
                     },
                     "claimed": task.claimed_by.is_some(),
                     "claimedBy": task.claimed_by,
