@@ -2778,6 +2778,22 @@ body.column-dragging * {
 /* MISC-0025: batch task entry uses the existing TaskBoard modal palette. */
 .task-dump-modal { width: min(900px, 94vw); }
 .task-dump-help { color: #a5adb7; font-size: 12px; margin: 0 0 12px; }
+.task-dump-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.task-modal .task-dump-options label {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: #aeb9c6;
+  font-size: 12px;
+}
+.task-modal .task-dump-options select,
+.task-modal .task-dump-options input { width: 100%; min-width: 0; }
 .task-modal textarea.task-dump-input {
   min-height: 210px;
   max-height: 44vh;

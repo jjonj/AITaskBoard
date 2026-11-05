@@ -532,6 +532,9 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const [taskDumpOpen, setTaskDumpOpen] = useState(false);
   const [taskDumpText, setTaskDumpText] = useState("");
   const [taskDumpPriorities, setTaskDumpPriorities] = useState<Record<number, boolean>>({});
+  const [taskDumpColumn, setTaskDumpColumn] = useState("");
+  const [taskDumpEpic, setTaskDumpEpic] = useState("");
+  const [taskDumpNewEpicTitle, setTaskDumpNewEpicTitle] = useState("");
   const taskDumpRows = useMemo<TaskDumpRow[]>(() =>
     taskDumpText.split(/\r?\n/).map((text, line) => ({ line, text: text.trim() }))
       .filter((row) => row.text.length > 0), [taskDumpText]);
@@ -1493,6 +1496,9 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     setReviewOpen(false);
     setTaskDumpText(text);
     setTaskDumpPriorities({});
+    setTaskDumpColumn(defaultCreateColumn() ?? "");
+    setTaskDumpEpic("");
+    setTaskDumpNewEpicTitle("");
     setError("");
     setTaskDumpOpen(true);
   };
@@ -1515,18 +1521,41 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
 
   const generateTaskDump = async () => {
     if (busy || !snapshot || !taskDumpRows.length) return;
-    const target = defaultCreateColumn();
-    if (!target) { setError("Create an active task column before generating tasks."); return; }
+    if (!columns.some((column) => column.id === taskDumpColumn)) {
+      setError("Select a valid destination column before generating tasks.");
+      return;
+    }
+    if (taskDumpEpic === "__new__" && !taskDumpNewEpicTitle.trim()) {
+      setError("Enter a title for the shared epic.");
+      return;
+    }
+    if (taskDumpEpic && taskDumpEpic !== "__new__" &&
+        !activeTasks.some((task) => task.id === taskDumpEpic && task.kind === "epic")) {
+      setError("The selected epic is no longer available.");
+      return;
+    }
     const rows = [...taskDumpRows];
     const before = snapshot;
     const created: Task[] = [];
+    let createdEpic: Task | null = null;
+    let epicId = taskDumpEpic || null;
     setBusy(true);
     setError("");
     try {
+      if (taskDumpEpic === "__new__") {
+        // Create the container once, then retain its ID if any child fails.
+        // Retrying a partial dump must never create a duplicate epic.
+        createdEpic = await createTask({
+          ...emptyDraft(taskDumpColumn), kind: "epic", title: taskDumpNewEpicTitle.trim(),
+        }, boardPath);
+        epicId = createdEpic.id;
+        setTaskDumpEpic(epicId);
+        setTaskDumpNewEpicTitle("");
+      }
       for (const row of rows) {
         const parts = splitTaskDumpText(row.text);
         const draft = {
-          ...emptyDraft(target),
+          ...emptyDraft(taskDumpColumn, epicId),
           title: parts.title,
           description: parts.description,
           attention: taskDumpPriorities[row.line] ? ["priority" as const] : [],
@@ -1535,7 +1564,8 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       }
       const after = await loadBoard(boardPath);
       applySnapshot(after);
-      flashTaskActivity(created.map((task) => ({ id: task.id, kind: "created" as const })));
+      flashTaskActivity([...(createdEpic ? [createdEpic] : []), ...created]
+        .map((task) => ({ id: task.id, kind: "created" as const })));
       pushUndo({ kind: "board", label: "generate task dump", before, after });
       setTaskDumpOpen(false);
       setTaskDumpText("");
@@ -1551,8 +1581,9 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       try {
         const after = await loadBoard(boardPath);
         applySnapshot(after);
-        if (created.length) {
-          flashTaskActivity(created.map((task) => ({ id: task.id, kind: "created" as const })));
+        if (created.length || createdEpic) {
+          flashTaskActivity([...(createdEpic ? [createdEpic] : []), ...created]
+            .map((task) => ({ id: task.id, kind: "created" as const })));
           pushUndo({ kind: "board", label: "partial task dump", before, after });
         }
       } catch { /* Keep the original error and remaining lines. */ }
@@ -3965,6 +3996,33 @@ Details: ${queueRecoveryWarning}`;
                 onClick={() => setTaskDumpOpen(false)} disabled={busy}>×</button>
             </div>
             <p className="task-dump-help">Enter one task per line. Check priority beside any line before generating.</p>
+            <div className="task-dump-options">
+              <label>Column
+                <select value={taskDumpColumn} disabled={busy}
+                  onChange={(event) => setTaskDumpColumn(event.currentTarget.value)}>
+                  {columns.map((column) => (
+                    <option key={column.id} value={column.id}>{column.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label>Shared epic (optional)
+                <select value={taskDumpEpic} disabled={busy}
+                  onChange={(event) => setTaskDumpEpic(event.currentTarget.value)}>
+                  <option value="">No epic</option>
+                  <option value="__new__">+ Create new epic</option>
+                  {activeTasks.filter((task) => task.kind === "epic")
+                    .sort((a, b) => a.title.localeCompare(b.title))
+                    .map((task) => (
+                      <option key={task.id} value={task.id}>{task.id} — {task.title}</option>
+                    ))}
+                </select>
+              </label>
+              {taskDumpEpic === "__new__" && <label>New epic title
+                <input type="text" value={taskDumpNewEpicTitle} disabled={busy}
+                  placeholder="Name this group"
+                  onChange={(event) => setTaskDumpNewEpicTitle(event.currentTarget.value)} />
+              </label>}
+            </div>
             <textarea className="task-dump-input" aria-label="Task Dump input" autoFocus
               value={taskDumpText} disabled={busy}
               placeholder={"Fix pathfinding on rivers\nImprove minimap readability\nAdd more detailed combat logs"}
@@ -3990,7 +4048,9 @@ Details: ${queueRecoveryWarning}`;
               <div className="spacer" />
               <button type="button" className="button secondary" disabled={busy}
                 onClick={() => setTaskDumpOpen(false)}>Cancel</button>
-              <button type="button" className="button primary" disabled={busy || !taskDumpRows.length}
+              <button type="button" className="button primary"
+                disabled={busy || !taskDumpRows.length || !columns.some((column) => column.id === taskDumpColumn) ||
+                  (taskDumpEpic === "__new__" && !taskDumpNewEpicTitle.trim())}
                 onClick={() => void generateTaskDump()}>{busy ? "Generating…" : "Generate"}</button>
             </div>
           </section>
