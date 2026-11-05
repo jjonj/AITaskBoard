@@ -100,6 +100,8 @@ fn next_task_id(root: &Path, snapshot: &BoardSnapshot, kind: TaskKind) -> String
     }
 }
 
+fn is_false(value: &bool) -> bool { !*value }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TaskMeta {
     #[serde(default)]
@@ -129,6 +131,11 @@ struct TaskMeta {
     icon: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     claimed_by: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    agent_interacted: bool,
+    // Existing T3 claim lineage predates the durable interaction flag.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    originating_t3_sessions: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     live: Option<crate::TaskLive>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -943,6 +950,7 @@ impl FsTaskStore {
             category: draft.category,
             icon: draft.icon,
             claimed_by: None,
+            agent_interacted: false,
             live: None,
             attention: draft.attention,
             question: draft.question,
@@ -1003,6 +1011,22 @@ impl FsTaskStore {
         }
         Ok(report)
     }
+    /// Record an explicit agent task read (CLI `task show`). Board listings and
+    /// desktop previews are not reads: they must not lock every visible task.
+    /// Repeated reads are no-ops, avoiding unnecessary revision churn.
+    pub fn record_agent_read(&self, root: &Path, id: &str) -> Result<Task, TaskStoreError> {
+        let _lock = acquire_lock(root)?;
+        let path = find_task_path(root, id)?;
+        let existing = fs::read_to_string(&path)?;
+        let mut task = parse_task(&path, path.starts_with(root.join(ARCHIVE_DIR)), &existing)?;
+        if task.agent_interacted { return Ok(task); }
+        task.agent_interacted = true;
+        let rendered = render_task(&task, Some(&existing))?;
+        write_text_atomic(&path, &rendered)?;
+        task.revision = revision(&rendered);
+        Ok(task)
+    }
+
     /// `update` with an explicit actor. Human edits can never author or change
     /// `blocked_reason`; agent edits must supply one when entering Blocked.
     pub fn update_as(&self, root: &Path, task: Task, actor: MutationActor) -> Result<Task, TaskStoreError> {
@@ -1026,6 +1050,15 @@ impl FsTaskStore {
         task.archived = path.starts_with(root.join(ARCHIVE_DIR));
         task.path = path.to_string_lossy().to_string();
         let previous = parse_task(&path, task.archived, &existing)?;
+        // Once an agent has interacted, only appended timeline notes may alter
+        // Description. Check inside the locked transaction to reject stale edits.
+        if actor == MutationActor::Human && previous.agent_interacted &&
+            initial_description(&task.description) != initial_description(&previous.description) {
+            return Err(TaskStoreError::Invalid(format!(
+                "{} description is locked after agent interaction; use Note to AI", task.id)));
+        }
+        task.agent_interacted = previous.agent_interacted || previous.claimed_by.is_some()
+            || actor == MutationActor::Agent;
         // A user opening and explicitly saving an auto-draft adopts it as a
         // normal Draft. Never expire a draft the human intentionally retained.
         if actor == MutationActor::Human && previous.notes.contains("<!-- taskboard:auto-draft:") {
@@ -1361,6 +1394,7 @@ impl FsTaskStore {
         task.column = IN_PROGRESS_COLUMN_ID.into();
         let token = uuid::Uuid::new_v4().to_string();
         task.claimed_by = Some(agent.to_owned());
+        task.agent_interacted = true;
         let rendered = stamp_activity(&render_with_claim_token(&task, &existing, Some(&token))?,
             Some(&origin), true)?;
         write_text_atomic(&path, &rendered)?;
@@ -1554,6 +1588,7 @@ impl TaskStore for FsTaskStore {
         };
         task.column = IN_PROGRESS_COLUMN_ID.into();
         task.claimed_by = Some(agent.to_string());
+        task.agent_interacted = true;
         let text = stamp_activity(&render_with_claim_token(&task, &existing, None)?, Some(&origin), true)?;
         write_text_atomic(&path, &text)?;
         task.revision = revision(&text);
@@ -2260,6 +2295,14 @@ fn apply_blocked_state(previous: Option<&Task>, task: &mut Task, actor: Mutation
     Ok(())
 }
 
+// Compare only the original description; timestamped Note to AI updates stay appendable.
+fn initial_description(description: &str) -> &str {
+    let description = description.trim();
+    if description.starts_with("<!-- taskboard:update:") { return ""; }
+    description.split_once("\n\n<!-- taskboard:update:")
+        .map_or(description, |(initial, _)| initial).trim_end()
+}
+
 /// Appends one Description timeline block in the format of
 /// `src/descriptionTimeline.ts`.
 fn append_description_update(description: &str, kind: &str, text: &str) -> String {
@@ -2643,6 +2686,8 @@ fn parse_task(path: &Path, archived: bool, text: &str) -> Result<Task, TaskStore
     let (yaml, body) = split_frontmatter(text)?;
     let meta: TaskMeta =
         serde_yaml::from_str(&yaml).map_err(|e| TaskStoreError::Parse(e.to_string()))?;
+    let agent_interacted = meta.agent_interacted || meta.claimed_by.is_some()
+        || !meta.originating_t3_sessions.is_empty();
     let (description, acceptance_criteria, ai_notes, user_notes, notes) = parse_sections(&body);
     Ok(Task {
         schema: meta.schema,
@@ -2663,6 +2708,7 @@ fn parse_task(path: &Path, archived: bool, text: &str) -> Result<Task, TaskStore
         category: meta.category,
         icon: meta.icon,
         claimed_by: meta.claimed_by,
+        agent_interacted,
         live: meta.live,
         attention: meta.attention,
         question: meta.question,
@@ -2805,6 +2851,8 @@ fn render_task(task: &Task, existing: Option<&str>) -> Result<String, TaskStoreE
         category: task.category.clone(),
         icon: task.icon.clone(),
         claimed_by: task.claimed_by.clone(),
+        agent_interacted: task.agent_interacted || task.claimed_by.is_some(),
+        originating_t3_sessions: Vec::new(), // Retained from existing frontmatter.
         live: task.live.clone(),
         attention: task.attention.clone(),
         question: task.question.clone(),
@@ -2831,6 +2879,7 @@ fn render_task(task: &Task, existing: Option<&str>) -> Result<String, TaskStoreE
         mapping.remove(serde_yaml::Value::String("category".into()));
         mapping.remove(serde_yaml::Value::String("icon".into()));
         mapping.remove(serde_yaml::Value::String("claimed_by".into()));
+        mapping.remove(serde_yaml::Value::String("agent_interacted".into()));
         mapping.remove(serde_yaml::Value::String("live".into()));
         mapping.remove(serde_yaml::Value::String("attention".into()));
         mapping.remove(serde_yaml::Value::String("question".into()));

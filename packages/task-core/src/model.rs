@@ -130,6 +130,9 @@ pub struct Task {
     pub icon: Option<String>,
     #[serde(default)]
     pub claimed_by: Option<String>,
+    /// Remains true after an agent claim or write, even if the claim is released.
+    #[serde(default)]
+    pub agent_interacted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live: Option<TaskLive>,
     #[serde(default)]

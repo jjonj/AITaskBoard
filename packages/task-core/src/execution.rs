@@ -200,6 +200,7 @@ impl FsTaskStore {
         };
         task.column = IN_PROGRESS_COLUMN_ID.into();
         task.claimed_by = Some(format!("t3:{session_id}"));
+        task.agent_interacted = true;
         let rendered = stamp_activity(&render_with_claim_token(&task, &existing, None)?, Some(&origin), true)?;
         let (yaml, body) = split_frontmatter(&rendered)?;
         mapping = serde_yaml::from_str(&yaml).map_err(|error| TaskStoreError::Parse(error.to_string()))?;

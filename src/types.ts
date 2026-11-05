@@ -59,6 +59,8 @@ export type Task = {
   category: string | null;
   icon: TaskIcon | null;
   claimed_by: string | null;
+  /** Persistent record of prior agent work; never inferred from the current column. */
+  agent_interacted?: boolean;
   live?: TaskLive | null;
   attention: TaskAttention[];
   question: TaskQuestion | null;

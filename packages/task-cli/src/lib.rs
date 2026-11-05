@@ -929,7 +929,15 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
             Ok(json!({ "tasks": tasks, "advisories": board_advisories(&snapshot) }))
         }
         TaskCommand::Show(args) => {
-            let snapshot = load_checked(store, root)?;
+            let mut snapshot = load_checked(store, root)?;
+            let selected = resolve_task(&snapshot, &args.target, true)?;
+            let unread_id = (!selected.agent_interacted).then(|| selected.id.clone());
+            if let Some(id) = unread_id {
+                let touched = store.record_agent_read(root, &id).map_err(map_store_error)?;
+                if let Some(task) = snapshot.tasks.iter_mut().find(|task| task.id == id) {
+                    *task = touched;
+                }
+            }
             let task = resolve_task(&snapshot, &args.target, true)?;
             let children: Vec<&Task> = snapshot.tasks.iter()
                 .filter(|candidate| candidate.parent.as_deref() == Some(task.id.as_str()))

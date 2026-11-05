@@ -4415,10 +4415,7 @@ Details: ${queueRecoveryWarning}`;
             <DescriptionTimeline
               key={editor.original?.id ?? "new-task"}
               description={editor.draft.description}
-              readOnlyDescription={editor.mode === "edit" && !!editor.original && (
-                editor.original.column === "in-progress" || editor.original.column === "blocked" ||
-                columns.some((column) => column.id === editor.original!.column && column.terminal)
-              )}
+              readOnlyDescription={editor.mode === "edit" && !!editor.original?.agent_interacted}
               legacyAiNotes={editor.draft.ai_notes}
               descriptionMinRows={editor.mode === "create" ? 7 : 3}
               descriptionMaxHeight={editor.mode === "create" ? 480 : 360}

@@ -32,7 +32,7 @@ type Props = {
   /** Task creation uses the space normally occupied by the Note to AI composer. */
   descriptionMinRows?: number;
   descriptionMaxHeight?: number;
-  /** Execution-stage descriptions are immutable; users can still add Note to AI updates. */
+  /** An agent has read or worked on this task; use Note to AI instead of editing its original description. */
   readOnlyDescription?: boolean;
 };
 
@@ -71,7 +71,7 @@ export function DescriptionTimeline({
   return (
     <section className="description-timeline">
       <div className="description-timeline-heading">
-        <strong>Description</strong>
+        <strong title={readOnlyDescription ? "An agent has read or claimed this task. Use Note to AI for changes." : undefined}>Description</strong>
         {updates.length > 0 && (
           <span>{updates.length} update{updates.length === 1 ? "" : "s"}</span>
         )}
