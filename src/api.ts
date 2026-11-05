@@ -30,7 +30,7 @@ export type ClaimHealth = {
 export type AgentNotice = { id: string; taskId: string; owner: string; revision: string;
   event: string; createdAtMs: number; state: string; reason?: string | null; };
 export const taskEnqueueAgentNotice = (path: string, id: string, owner: string, revision: string, event: string) =>
-  invoke<AgentNotice>("task_enqueue_agent_notice", {path, id, owner, revision, event});
+  retryBoardBusy(() => invoke<AgentNotice>("task_enqueue_agent_notice", {path, id, owner, revision, event}));
 export type StaleBlocker = { id: string; title: string; reason: string;
   lastActivityAt: string; ageDays: number; signature: string; };
 export type AgentPolicy = { resumeWindowHours: number; wakeRecentIdle: boolean;
@@ -62,7 +62,7 @@ export const taskClaimHealth = (path?: string) =>
   invoke<Record<string, ClaimHealth>>("task_claim_health", {path});
 
 export const loadBoard = (path?: string) =>
-  invoke<BoardSnapshot>("load_board", { path });
+  retryBoardBusy(() => invoke<BoardSnapshot>("load_board", { path }));
 
 export type UserQueueProjectIds = { path: string; eligibleIds: string[]; error: string | null };
 export const userQueueProjectIds = (paths: string[]) =>
@@ -72,14 +72,27 @@ export type BoardChangeToken = { path: string; token: string | null };
 export const boardChangeTokens = (paths: string[]) =>
   invoke<BoardChangeToken[]>("board_change_tokens", { paths });
 
+// Only a known lock-acquisition failure is retried. It occurs before any
+// mutation; real revision conflicts and ambiguous I/O are never replayed.
+async function retryBoardBusy<T>(operation: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try { return await operation(); }
+    catch (error) {
+      if (!/write conflict: board is busy/i.test(String(error))) throw error;
+      if (attempt === 5) throw new Error("TaskBoard could not complete the operation yet. Your changes are preserved; please retry.");
+      await new Promise<void>(resolve => setTimeout(resolve, Math.min(250 * (attempt + 1), 1250)));
+    }
+  }
+}
+
 export type TaskIdReservation = { id: string; token: string };
 export const reserveTaskId = (kind: TaskDraft["kind"], path?: string) =>
-  invoke<TaskIdReservation>("reserve_task_id", { path, kind });
+  retryBoardBusy(() => invoke<TaskIdReservation>("reserve_task_id", { path, kind }));
 export const releaseTaskId = (reservation: TaskIdReservation, path?: string) =>
-  invoke<void>("release_task_id", { path, reservation });
+  retryBoardBusy(() => invoke<void>("release_task_id", { path, reservation }));
 
 export const createTask = (draft: TaskDraft, path?: string) =>
-  invoke<Task>("create_task", { path, draft });
+  retryBoardBusy(() => invoke<Task>("create_task", { path, draft }));
 
 export type ExecutionMode = "backlog" | "queue";
 export type ExecutionIntent = {
@@ -93,11 +106,11 @@ export type ExecutionIntent = {
   revision: string;
 };
 export const taskExecutionIntent = (id: string, path?: string) =>
-  invoke<ExecutionIntent>("task_execution_intent", { path, id });
+  retryBoardBusy(() => invoke<ExecutionIntent>("task_execution_intent", { path, id }));
 export const taskExecutionModes = (path?: string) =>
-  invoke<Record<string, ExecutionIntent>>("task_execution_modes", { path });
+  retryBoardBusy(() => invoke<Record<string, ExecutionIntent>>("task_execution_modes", { path }));
 export const taskSetExecutionMode = (id: string, expectedRevision: string, mode: ExecutionMode, path?: string) =>
-  invoke<ExecutionIntent>("task_set_execution_mode", { path, id, expectedRevision, mode });
+  retryBoardBusy(() => invoke<ExecutionIntent>("task_set_execution_mode", { path, id, expectedRevision, mode }));
 export const taskRequestStartNow = (id: string, expectedRevision: string, path?: string) =>
   invoke<ExecutionIntent>("task_request_start_now", { path, id, expectedRevision });
 
@@ -152,7 +165,7 @@ export type QueueReconciliation = {
 export const taskQueueReconcile = (path?: string) =>
   invoke<QueueReconciliation>("task_queue_reconcile", { path });
 export const taskLiveWithMe = (id: string, expectedRevision: string, withMe: boolean, path?: string) =>
-  invoke<Task>("task_live_with_me", { path, id, expectedRevision, withMe });
+  retryBoardBusy(() => invoke<Task>("task_live_with_me", { path, id, expectedRevision, withMe }));
 
 export type LocalImagePreview = { dataUrl: string; mime: string; name: string };
 export const readLocalImage = (path: string) =>
@@ -164,7 +177,7 @@ export const readTaskImage = (relativePath: string, path?: string) =>
   invoke<string>("read_task_image", { path, relativePath });
 
 export const updateTask = (task: Task, path?: string) =>
-  invoke<Task>("update_task", { path, task });
+  retryBoardBusy(() => invoke<Task>("update_task", { path, task }));
 
 export const archiveTask = (id: string, path?: string) =>
   invoke<Task>("archive_task", { path, id });

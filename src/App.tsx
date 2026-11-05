@@ -449,6 +449,9 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   // One throttled refresh per board: backend shares a 30s T3 inventory
   // between claim telemetry and durable notification reconciliation.
   useEffect(() => {
+    // Background maintenance should not compete with a task editor's writes.
+    // Durable notices resume automatically when the editor closes.
+    if (editor) return;
     let active = true;
     let inFlight = false;
     let lastStarted = 0;
@@ -457,7 +460,9 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       lastStarted = Date.now();
       inFlight = true;
       void taskReconcileAgentNotices(boardPath)
-        .catch(err => { if (active) setError(`Agent notices remain pending: ${String(err)}`); })
+        // Agent notices are durable. A transient board lock is not a UI error;
+        // the next background refresh can reconcile them without interrupting edits.
+        .catch(() => undefined)
         .then(() => taskClaimHealth(boardPath))
         .then(data => { if (active) setClaimHealth(data); })
         .catch(() => { if (active) setClaimHealth({}); })
@@ -467,7 +472,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     const timer = window.setInterval(refresh, 30_000);
     window.addEventListener("focus", refresh);
     return () => { active = false; window.clearInterval(timer); window.removeEventListener("focus", refresh); };
-  }, [boardPath]);
+  }, [boardPath, !!editor]);
   const [notifyAgentOverride, setNotifyAgentOverride] = useState<boolean | null>(null);
   const substantiveClaimedEdit = editor?.mode === "edit" && !!editor.original?.claimed_by &&
     editor.original.column === "in-progress" && (
@@ -1864,7 +1869,8 @@ Details: ${queueRecoveryWarning}`;
         if (showNotifyAgent && notifyAgent && saved.claimed_by && saved.column === "in-progress") {
           try {
             await taskEnqueueAgentNotice(boardPath, saved.id, saved.claimed_by, saved.revision, "requirements-change");
-            void taskReconcileAgentNotices(boardPath).catch(() => null);
+            // The durable outbox is picked up by the background reconciler.
+            // Do not race the rest of this save with an eager board-wide refresh.
           } catch (error) {
             // The task edit is already durable. Do not roll it back or pretend no change happened.
             notifyWarning = `Task saved, but notification was not recorded: ${String(error)}`;
