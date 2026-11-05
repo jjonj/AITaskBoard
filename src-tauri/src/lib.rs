@@ -39,13 +39,14 @@ fn load_board(path: Option<String>) -> Result<BoardSnapshot, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Lightweight project-tab inbox source: return exact eligible IDs, not a
-/// misleading count that cannot reflect renderer-local snoozes.
+/// Lightweight project-tab inbox source: return both human-response and open
+/// review IDs, so renderer-local snoozes can be applied before showing a badge.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UserQueueProjectIds {
     path: String,
     eligible_ids: Vec<String>,
+    review_ids: Vec<String>,
     error: Option<String>,
 }
 
@@ -76,9 +77,12 @@ async fn user_queue_project_ids(paths: Vec<String>) -> Vec<UserQueueProjectIds> 
                          terminal.contains(dep.column.as_str()))
                     }))
                 }).map(|task| task.id.clone()).collect();
-                UserQueueProjectIds { path, eligible_ids: ids, error: None }
+                let review_ids = board.tasks.iter()
+                    .filter(|task| !task.archived && task.review_status.as_deref() == Some("open"))
+                    .map(|task| task.id.clone()).collect();
+                UserQueueProjectIds { path, eligible_ids: ids, review_ids, error: None }
             }
-            Err(err) => UserQueueProjectIds { path, eligible_ids: vec![],
+            Err(err) => UserQueueProjectIds { path, eligible_ids: vec![], review_ids: vec![],
                 error: Some(err.to_string()) },
         }
     }).collect()).await.unwrap_or_default()

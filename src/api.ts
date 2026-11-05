@@ -64,7 +64,7 @@ export const taskClaimHealth = (path?: string) =>
 export const loadBoard = (path?: string) =>
   retryBoardBusy(() => invoke<BoardSnapshot>("load_board", { path }));
 
-export type UserQueueProjectIds = { path: string; eligibleIds: string[]; error: string | null };
+export type UserQueueProjectIds = { path: string; eligibleIds: string[]; reviewIds: string[]; error: string | null };
 export const userQueueProjectIds = (paths: string[]) =>
   invoke<UserQueueProjectIds[]>("user_queue_project_ids", { paths });
 

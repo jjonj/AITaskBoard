@@ -107,7 +107,7 @@ export function ProjectTabs({ Board }: Props) {
   const draggedTab = useRef<string | null>(null);
   const [dropTab, setDropTab] = useState<string | null>(null);
   const [changedProjects, setChangedProjects] = useState<Record<string, boolean>>({});
-  const [queueIdsByPath, setQueueIdsByPath] = useState<Record<string, string[]>>({});
+  const [inboxIdsByPath, setInboxIdsByPath] = useState<Record<string, { eligibleIds: string[]; reviewIds: string[] }>>({});
   const knownBoardTokens = useRef<Record<string, string>>({});
   const manualRefreshPending = useRef(false);
   const [refreshingAll, setRefreshingAll] = useState(false);
@@ -210,11 +210,11 @@ export function ProjectTabs({ Board }: Props) {
       try {
         const rows = await userQueueProjectIds(paths);
         if (cancelled) return;
-        setQueueIdsByPath((current) => {
+        setInboxIdsByPath((current) => {
           const next = { ...current };
           for (const row of rows) {
             // Offline boards have an unknown count, not an invented zero.
-            if (!row.error) next[row.path] = row.eligibleIds;
+            if (!row.error) next[row.path] = { eligibleIds: row.eligibleIds, reviewIds: row.reviewIds };
             else delete next[row.path];
           }
           return next;
@@ -236,16 +236,21 @@ export function ProjectTabs({ Board }: Props) {
     };
   }, [catalog?.projects]);
 
-  const visibleQueueCount = (project: ProjectTab): number => {
-    const ids = queueIdsByPath[project.path] ?? [];
+  const visibleInboxCount = (project: ProjectTab): number => {
+    const { eligibleIds = [], reviewIds = [] } = inboxIdsByPath[project.path] ?? {};
     const key = project.id === "wartribes"
       ? "taskboard.userQueueSnoozes"
       : `taskboard.project.${project.id}.userQueueSnoozes`;
-    let snoozes: Record<string, number> = {};
-    try { snoozes = JSON.parse(window.localStorage.getItem(key) || "{}"); }
+    let userSnoozes: Record<string, number> = {};
+    let inboxSnoozes: Record<string, number> = {};
+    try { userSnoozes = JSON.parse(window.localStorage.getItem(key) || "{}"); }
     catch { /* A corrupted local snooze entry must not hide tasks. */ }
+    try { inboxSnoozes = JSON.parse(window.localStorage.getItem("taskboard.inboxSnoozes") || "{}"); }
+    catch { /* A corrupted Inbox snooze entry must not hide reviews. */ }
     const now = Date.now();
-    return ids.filter((id) => !(Number(snoozes[id]) > now)).length;
+    const notSnoozedInInbox = (id: string) => !(Number(inboxSnoozes[`${project.path}|${id}`]) > now);
+    return reviewIds.filter(notSnoozedInInbox).length +
+      eligibleIds.filter((id) => notSnoozedInInbox(id) && !(Number(userSnoozes[id]) > now)).length;
   };
 
   // The active board owns its snapshot and mutation locks. Ask it to refresh
@@ -616,9 +621,9 @@ export function ProjectTabs({ Board }: Props) {
               disabled={working || locked || !!dialogMode}
               onClick={() => void switchTo(project.id)}
             >{project.name}
-              {visibleQueueCount(project) > 0 && <span className="project-tab-user-count"
-                aria-label={`${visibleQueueCount(project)} tasks in the user inbox`}
-                title={`${visibleQueueCount(project)} tasks waiting for you`}>{visibleQueueCount(project)}</span>}
+              {visibleInboxCount(project) > 0 && <span className="project-tab-user-count"
+                aria-label={`${visibleInboxCount(project)} tasks in the user inbox`}
+                title={`${visibleInboxCount(project)} tasks waiting for you`}>{visibleInboxCount(project)}</span>}
             </button>
             <button type="button" className="project-tab-settings"
               aria-label={`Edit ${project.name} settings`}
