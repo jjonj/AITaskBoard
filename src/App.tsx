@@ -606,6 +606,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const [userQueueSnoozes, setUserQueueSnoozes] = useState<UserQueueSnoozes>(() => loadUserQueueSnoozes(snoozesKey));
   const [keyboardSelectedTaskId, setKeyboardSelectedTaskId] = useState<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
+  const [dragSourceColumn, setDragSourceColumn] = useState<string | null>(null);
   const [dragColumnId, setDragColumnId] = useState<string | null>(null);
   const [columnDragPreview, setColumnDragPreview] = useState<{
     id: string;
@@ -2164,12 +2165,11 @@ Details: ${queueRecoveryWarning}`;
     }));
   };
 
-  // Epic columns are derived from their tasks (see derived_epic_column in task-core),
-  // so dragging an epic moves its whole open work stream: every unfinished
-  // descendant task follows. Agent-claimed tasks stay put so running work isn't
-  // disrupted. One Undo restores everything.
-  const moveEpicTo = async (epicId: string, column: string) => {
-    if (!snapshot) return;
+  // An epic can span multiple columns. Dragging its real card or a proxy
+  // moves only descendant cards in the column where the drag began, leaving
+  // other columns intact. Claimed cards stay put; one Undo restores the batch.
+  const moveEpicTo = async (epicId: string, sourceColumn: string, column: string) => {
+    if (!snapshot || sourceColumn === column) return;
     const leaves: Task[] = [];
     const queue = [epicId];
     const seen = new Set<string>();
@@ -2179,14 +2179,14 @@ Details: ${queueRecoveryWarning}`;
         if (child.parent !== parent || seen.has(child.id)) continue;
         seen.add(child.id);
         if (child.kind === "epic") queue.push(child.id);
-        else if (!child.archived && !child.completed) leaves.push(child);
+        else if (!child.archived && child.column === sourceColumn) leaves.push(child);
       }
     }
     const target = columns.find((item) => item.id === column);
-    const movable = leaves.filter((task) => task.column !== column && !task.claimed_by);
-    const skipped = leaves.filter((task) => task.claimed_by && task.column !== column);
+    const movable = leaves.filter((task) => !task.claimed_by);
+    const skipped = leaves.filter((task) => !!task.claimed_by);
     if (!leaves.length) {
-      setError(`${epicId} has no open tasks yet. An epic sits in the column of its tasks, so add a task to it first.`);
+      setError(`${epicId} has no tasks in this column to move.`);
       return;
     }
     if (!movable.length) {
@@ -2214,7 +2214,7 @@ Details: ${queueRecoveryWarning}`;
         }, boardPath);
       }
       const after = await loadBoard(boardPath);
-      pushUndo({ kind: "board", label: `move epic ${epicId}`, before, after });
+      pushUndo({ kind: "board", label: `move ${epicId} from ${sourceColumn} to ${column}`, before, after });
       applySnapshot(after);
       flashTaskActivity([epicId, ...movable.map((task) => task.id)].map((id) => ({ id, kind: "moved" as const })));
       if (skipped.length) setError(`Moved ${movable.length} task(s). Left ${skipped.map((task) => task.id).join(", ")} in place (claimed by an agent).`);
@@ -2271,10 +2271,11 @@ Details: ${queueRecoveryWarning}`;
   const beginCardDrag = (
     event: React.MouseEvent<HTMLElement>,
     task: Task,
+    sourceColumn: string,
   ) => {
     if (event.button !== 0) return;
-    // Epics drag too (moving their work stream); a plain click on an epic is
-    // left to the card's onClick (single = inspect, double = collapse).
+    // Both the real epic card and each cross-column proxy drag only their
+    // own column's tasks; a plain click keeps its inspect/jump behavior.
     const isEpic = task.kind === "epic";
     event.preventDefault();
 
@@ -2295,6 +2296,7 @@ Details: ${queueRecoveryWarning}`;
       window.removeEventListener("pointerup", handlePointerUp, true);
       window.removeEventListener("blur", cleanup);
       setDragId(null);
+      setDragSourceColumn(null);
       setCardDragPreview(null);
       setCardDropTargetId(null);
       document.body.classList.remove("card-dragging");
@@ -2324,6 +2326,7 @@ Details: ${queueRecoveryWarning}`;
           setHoverTask(null);
         });
         setDragId(task.id);
+        setDragSourceColumn(sourceColumn);
         setCardDragPreview({
           id: task.id,
           title: task.title,
@@ -2376,7 +2379,7 @@ Details: ${queueRecoveryWarning}`;
       if (isEpic) {
         suppressEpicClickUntil.current = Date.now() + 300;
         const column = taskTarget?.column ?? columnTarget;
-        if (column) void moveEpicTo(task.id, column);
+        if (column) void moveEpicTo(task.id, sourceColumn, column);
         return;
       }
 
@@ -3416,17 +3419,17 @@ Details: ${queueRecoveryWarning}`;
                       <button
                         type="button"
                         key={`epic-proxy-${epic.id}-${rowIndex}`}
-                        className={`epic-proxy${highlightedEpicId === epic.id ? " epic-proxy-active" : ""}`}
+                        className={`epic-proxy${highlightedEpicId === epic.id ? " epic-proxy-active" : ""}${dragId === epic.id && dragSourceColumn === column.id ? " drag-source" : ""}`}
                         data-epic-proxy={epic.id}
-                        title={`Proxy for ${epic.id}: ${epic.title}. Original in ${realColumn?.name ?? epic.column}. Hover to highlight the original; click to jump to it.`}
+                        title={`${epic.id}: ${epic.title}. Drag to move only this column's cards. Click to jump to the original in ${realColumn?.name ?? epic.column}.`}
                         aria-label={`Epic proxy ${epic.id}: ${epic.title}. Click to jump to the real epic.`}
                         onPointerDown={(event) => event.stopPropagation()}
-                        onMouseDown={(event) => event.stopPropagation()}
+                        onMouseDown={(event) => { event.stopPropagation(); beginCardDrag(event, epic, column.id); }}
                         onMouseEnter={() => { setHoverTask(null); setHighlightedEpicId(epic.id); }}
                         onMouseLeave={() => setHighlightedEpicId((current) => current === epic.id ? null : current)}
                         onFocus={() => setHighlightedEpicId(epic.id)}
                         onBlur={() => setHighlightedEpicId((current) => current === epic.id ? null : current)}
-                        onClick={() => jumpToOriginalEpic(epic)}
+                        onClick={() => { if (Date.now() >= suppressEpicClickUntil.current) jumpToOriginalEpic(epic); }}
                       >
                         <span className="epic-proxy-id">{epic.id}</span>
                         <span className="epic-proxy-title"><TitleMarkup title={epic.title} /></span>
@@ -3438,7 +3441,7 @@ Details: ${queueRecoveryWarning}`;
                   const depth = depthOf(task);
                   return (
                     <article
-                      className={`task-card ${keyboardSelectedTaskId === task.id ? "keyboard-selected" : ""} ${task.kind === "epic" ? "epic-card" : isForUser(task) ? "for-user-card" : task.kind === "recurring" ? "recurring-card" : ""} ${task.attention.includes("priority") ? "priority-card" : ""} ${highlightedEpicId === task.id ? "epic-proxy-highlight" : ""} ${dragId === task.id ? "drag-source" : ""} ${
+                      className={`task-card ${keyboardSelectedTaskId === task.id ? "keyboard-selected" : ""} ${task.kind === "epic" ? "epic-card" : isForUser(task) ? "for-user-card" : task.kind === "recurring" ? "recurring-card" : ""} ${task.attention.includes("priority") ? "priority-card" : ""} ${highlightedEpicId === task.id ? "epic-proxy-highlight" : ""} ${dragId === task.id && dragSourceColumn === column.id ? "drag-source" : ""} ${
                         cardDropTargetId === task.id ? (task.kind === "epic" ? "drop-parent-target" : "drop-after-target") : ""
                       } ${
                         taskActivity[task.id]
@@ -3448,7 +3451,7 @@ Details: ${queueRecoveryWarning}`;
                       key={task.id}
                       data-task-id={task.id}
                       style={{ marginLeft: Math.min(depth, 4) * 12 }}
-                      onMouseDown={(event) => { setKeyboardSelectedTaskId(task.id); beginCardDrag(event, task); }}
+                      onMouseDown={(event) => { setKeyboardSelectedTaskId(task.id); beginCardDrag(event, task, column.id); }}
                       onClick={() => {
                         if (task.kind !== "epic" || Date.now() < suppressEpicClickUntil.current) return;
                         if (epicSingleClickTimer.current) clearTimeout(epicSingleClickTimer.current);
@@ -3663,7 +3666,7 @@ Details: ${queueRecoveryWarning}`;
             {hoverTask.task.category && <span>{hoverTask.task.category}</span>}
             {hoverTask.task.parent && <span>Subtask of {hoverTask.task.parent}</span>}
             {hoverTask.task.claimed_by && <span title={claimTooltip(hoverTask.task)}>{claimTooltip(hoverTask.task)}</span>}
-            {hoverTask.task.kind === "epic" && <span>Coordination only  -  drag to move all its open tasks</span>}
+            {hoverTask.task.kind === "epic" && <span>Coordination only  -  drag to move tasks in this column</span>}
             {hoverTask.task.kind === "task" && !isForUser(hoverTask.task) && <span>Readiness: {readinessOf(hoverTask.task)}</span>}
             {isForUser(hoverTask.task) && <span>FOR USER — awaiting user input.</span>}
           </div>

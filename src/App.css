@@ -1792,9 +1792,8 @@ body.column-dragging * {
   padding: 2px 4px;
   white-space: nowrap;
 }
-/* Cross-column epic references: visually subordinate to real epic cards.
-   These compact identity-only buttons have no task ID and cannot be moved,
-   claimed, edited or used as another task in dependency calculations. */
+/* Cross-column epic references: drag a proxy to move only its own
+   column's descendants, without moving or editing the real epic record. */
 .epic-proxy {
   box-sizing: border-box;
   width: 100%;
@@ -1823,6 +1822,7 @@ body.column-dragging * {
   box-shadow: 0 0 0 1px rgba(200,154,255,.16), 0 0 11px rgba(168,103,236,.19);
 }
 .epic-proxy:focus-visible { outline: 2px solid #e0b8ff; outline-offset: 2px; }
+.epic-proxy.drag-source { opacity: .28; }
 .epic-proxy-id { font-size: 9px; font-weight: 780; flex: 0 0 auto; }
 .epic-proxy-title {
   font-size: 10px;
