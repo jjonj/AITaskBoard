@@ -273,6 +273,39 @@ impl FsTaskStore {
         persist(&path, &mapping, &body)
     }
 
+    /// Requeue an already-released worker only after its exact old T3 session
+    /// is confirmed inactive. Do not alter claims or replace active workers.
+    pub fn requeue_released_worker(
+        &self, root: &Path, id: &str, queue_request: &str, request_id: &str,
+        session_id: &str, reason: &str,
+    ) -> Result<ExecutionIntent, TaskStoreError> {
+        let _lock = acquire_lock(root)?;
+        let snapshot = self.load_unlocked(root)?;
+        let path = find_task_path(root, id)?;
+        let (text, mut mapping, body) = load(&path)?;
+        let previous = intent(&mapping, &text)?;
+        if previous.mode != ExecutionMode::Queue ||
+            previous.queue_request.as_deref() != Some(queue_request) ||
+            previous.queue_reservation_id.as_deref() != Some(request_id) ||
+            previous.queue_session_id.as_deref() != Some(session_id) ||
+            previous.queue_state != Some(QueueState::Working) {
+            return Err(TaskStoreError::Conflict(format!("{id} released worker identity changed")));
+        }
+        let task = parse_task(&path, false, &text)?;
+        if task.claimed_by.is_some() || !queue_task_ready(&snapshot, &task) ||
+            !recurring_due(&task) || task.completed.is_some() {
+            return Err(TaskStoreError::Conflict(format!("{id} has an active claim or is no longer ready")));
+        }
+        ensure_dependencies_complete(&snapshot, &task)?;
+        mapping.insert(key("queue_state"), serde_yaml::to_value(QueueState::Queued)
+            .map_err(|error| TaskStoreError::Parse(error.to_string()))?);
+        mapping.remove(key("queue_reservation_id"));
+        mapping.remove(key("queue_reservation_expires_at"));
+        mapping.remove(key("queue_session_id"));
+        mapping.insert(key("queue_error"), serde_yaml::Value::String(reason.chars().take(500).collect()));
+        persist(&path, &mapping, &body)
+    }
+
     /// Retry only after T3 has positively rejected the exact start before creating a session.
     pub fn requeue_failed_start(
         &self, root: &Path, id: &str, queue_request: &str, request_id: &str, reason: &str,

@@ -84,6 +84,8 @@ enum TaskQueueCommand {
     /// Retire a long-stalled Starting reservation after a complete T3 registry scan
     /// proves there is no live session that could own its exact request.
     Abandon(TaskQueueAbandonArgs),
+    /// Retry a released AI Ready task after T3 verifies its old guest is inactive.
+    RequeueReleased(TaskQueueRequeueReleasedArgs),
     /// Release a reservation only after a definitive T3 not-created receipt.
     Failed(TaskQueueFailedArgs),
     /// Human Start now preempts a queue item only before it enters Starting.
@@ -131,6 +133,17 @@ struct TaskQueueAbandonArgs {
     #[arg(long)] reason: String,
     #[arg(long = "verified-no-live-session", required = true, action = clap::ArgAction::SetTrue)]
     verified_no_live_session: bool,
+}
+
+#[derive(Args)]
+struct TaskQueueRequeueReleasedArgs {
+    target: String,
+    #[arg(long)] queue_request: String,
+    #[arg(long)] request_id: String,
+    #[arg(long)] session_id: String,
+    #[arg(long)] reason: String,
+    #[arg(long = "verified-old-session-inactive", required = true, action = clap::ArgAction::SetTrue)]
+    verified_old_session_inactive: bool,
 }
 
 #[derive(Args)]
@@ -811,6 +824,15 @@ fn run_task_queue(store: &FsTaskStore, root: &Path, command: &TaskQueueCommand) 
             }
             let result = store.requeue_failed_start(root, &args.target,
                 &args.queue_request, &args.request_id, &args.reason).map_err(map_store_error)?;
+            Ok(json!({"status":"queued","taskId":args.target,"intent":result}))
+        }
+        TaskQueueCommand::RequeueReleased(args) => {
+            if !args.verified_old_session_inactive {
+                return Err(CliError::new("confirmation_required", "An exact T3 session inspection must prove the previous released worker inactive"));
+            }
+            let result = store.requeue_released_worker(root, &args.target,
+                &args.queue_request, &args.request_id, &args.session_id, &args.reason)
+                .map_err(map_store_error)?;
             Ok(json!({"status":"queued","taskId":args.target,"intent":result}))
         }
         TaskQueueCommand::Failed(args) => {
