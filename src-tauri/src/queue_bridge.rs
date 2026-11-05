@@ -112,10 +112,17 @@ pub(crate) async fn sync(path: PathBuf, id: String) -> Result<QueueSyncStatus, S
     // OpenRig: that would allow two independent schedulers to start the task.
     // Existing OpenRig attempts/receipts retain their original owner until
     // terminal reconciliation, so an UNKNOWN registration is never duplicated.
-    if execution.mode == ExecutionMode::Queue && dispatchable &&
+    if execution.mode == ExecutionMode::Queue && !finished &&
+        matches!(task.kind, TaskKind::Task | TaskKind::Recurring) &&
         execution.queue_attempt.is_none() && execution.queue_receipt.is_none() {
-        return Ok(status("queued", qid,
-            Some("T3 local queue; starts only while Keep T3 Busy is enabled and capacity permits".into())));
+        // Queue is durable intent, not an assertion of current executability.
+        // Waiting/dependent/claimed tasks are normal: T3 evaluates readiness
+        // before admission and must not dispatch until they become eligible.
+        return Ok(status("queued", qid, Some(if dispatchable {
+            "Queued for T3 capacity-based admission"
+        } else {
+            "Queued for later; T3 will wait until task is executable"
+        }.into())));
     }
     if !matches!(task.kind, TaskKind::Task|TaskKind::Recurring) || finished || execution.mode == ExecutionMode::Backlog || (!dispatchable && execution.queue_attempt.is_some()) {
         if let (Some(qitem), Some(request), Some(attempt)) = (qid.as_deref(),request,execution.queue_attempt.as_deref()) {
@@ -163,7 +170,9 @@ pub(crate) async fn sync(path: PathBuf, id: String) -> Result<QueueSyncStatus, S
         return Ok(status("not_queued",qid,None));
     }
     if !dispatchable {
-        return Ok(status("unavailable",qid,Some("Task not executable: dependencies, claim, blocker or column must be cleared before dispatch".into())));
+        // Legacy queue attempts retain exact receipt reconciliation above.
+        // Ineligibility alone is not an operator-facing error.
+        return Ok(status("unavailable",qid,Some("Waiting for task eligibility".into())));
     }
     let request = match request {
         Some(request) => request,

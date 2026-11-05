@@ -3787,3 +3787,16 @@ body.card-dragging .project-tab-wrapper:not(.selected):hover {
   .review-human-workspace .review-user-question { padding: 12px; }
   .review-human-workspace .review-user-question > strong { font-size: 13px; }
 }
+
+/* Genuine queue receipt failures only: compact, actionable and unobtrusive. */
+.queue-attention-banner {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; min-width: 0; padding: 6px 13px;
+  background: #312b25; border-bottom: 1px solid #685743;
+  color: #ecd6b9; font-size: 11px;
+}
+.queue-attention-banner > span { min-width: 0; overflow: hidden;
+  white-space: nowrap; text-overflow: ellipsis; }
+.queue-attention-banner > span > strong { margin-right: 8px; }
+.queue-attention-banner .button { flex: none; min-height: 28px;
+  padding: 4px 10px; font-size: 11px; }

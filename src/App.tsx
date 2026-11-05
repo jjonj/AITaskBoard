@@ -353,6 +353,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     return () => { alive = false; window.clearInterval(poll); };
   }, [boardPath]);
   const [queueRecoveryWarning, setQueueRecoveryWarning] = useState("");
+  const [queueRecoveryAgentBusy, setQueueRecoveryAgentBusy] = useState(false);
   const [queueSyncStatuses, setQueueSyncStatuses] = useState<Record<string, { status: string; reason: string | null }>>({});
   const [queueReconciliationOffline, setQueueReconciliationOffline] = useState(false);
   useEffect(() => {
@@ -372,17 +373,19 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
         setQueueSyncStatuses(Object.fromEntries(result.items.map(item =>
           [item.id, { status: item.status, reason: item.reason ?? null }])));
         const unresolved = result.items.filter(item =>
-          !["registered", "queued", "terminal", "canceled", "not_queued"].includes(item.status));
+          ["unknown", "conflict", "rejected"].includes(item.status));
         setQueueRecoveryWarning([
           ...unresolved.slice(0, 3).map(item =>
             `${item.id}: ${item.status} — ${item.reason ?? "inspect exact OpenRig receipt"}`),
           ...(unresolved.length > 3 ? [`${unresolved.length - 3} additional unreconciled Queue intents`] : []),
-          ...(result.truncated ? ["More queued tasks remain; reopen/focus this board to reconcile the next batch"] : []),
+          // Truncated batches and temporarily ineligible queued work are normal.
         ].join(" · "));
-      }).catch(reason => {
+      }).catch(() => {
         if (active) {
+          // A transient lock or unavailable queue bridge does not invalidate
+          // durable Queue intent. Reconcile on the next focus without a banner.
           setQueueReconciliationOffline(true);
-          setQueueRecoveryWarning(`Queue reconciliation unavailable: ${String(reason)}`);
+          setQueueRecoveryWarning("");
         }
       }).finally(() => { busy = false; });
     };
@@ -543,10 +546,20 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   useEffect(() => {
     if (!snapshot) return;
     let cancelled = false;
-    void taskExecutionModes(boardPath).then(modes => {
-      if (!cancelled) setExecutionModes(modes);
-    }).catch(err => { if (!cancelled) setError(`Queue state unavailable: ${errorText(err)}`); });
-    return () => { cancelled = true; };
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let attempts = 0;
+    const load = () => {
+      void taskExecutionModes(boardPath).then(modes => {
+        if (!cancelled) setExecutionModes(modes);
+      }).catch(() => {
+        // Markdown writers briefly hold the lock. Retain last-known modes
+        // and retry; this is not an actionable error for the user.
+        if (!cancelled && attempts++ < 4)
+          retry = setTimeout(load, Math.min(2000 * attempts, 8000));
+      });
+    };
+    load();
+    return () => { cancelled = true; if (retry) clearTimeout(retry); };
   }, [boardPath, snapshot]);
   const [withMeSelected, setWithMeSelected] = useState(false);
   const [executionLoading, setExecutionLoading] = useState(false);
@@ -1561,6 +1574,32 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     applySnapshot(after);
   });
 
+  const spawnQueueRecoveryAgent = async () => {
+    if (queueRecoveryAgentBusy || !queueRecoveryWarning) return;
+    setQueueRecoveryAgentBusy(true);
+    const miscRoot = "B:\\GDrive\\SharedWithPhone\\Obsidian\\jjj\\Misc\\Tasks";
+    try {
+      // Reuse the user's existing diagnostics task rather than creating a
+      // duplicate each time a queue receipt genuinely needs intervention.
+      try {
+        const misc = await loadBoard(miscRoot);
+        const task = misc.tasks.find(item => item.id === "MISC-0119");
+        if (task) {
+          const diagnostic = `Queue integrity issue (${new Date().toISOString()})
+Board: ${boardPath}
+Details: ${queueRecoveryWarning}`;
+          await updateTask({ ...task, user_notes: [task.user_notes, diagnostic].filter(Boolean).join("\n\n") }, miscRoot);
+        }
+      } catch { /* The worker can inspect the original task and live queue even if its note is busy. */ }
+      await openTaskSession("MISC-0119", miscRoot, true);
+      setQueueRecoveryWarning("");
+    } catch (reason) {
+      setError(`Could not start queue-recovery agent: ${errorText(reason)}`);
+    } finally {
+      setQueueRecoveryAgentBusy(false);
+    }
+  };
+
   const addEditorFilePaths = async (rawPaths: string[]) => {
     const paths = [...new Set(rawPaths.map(path => path.trim()).filter(Boolean))];
     if (!paths.length) return;
@@ -1659,15 +1698,14 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       JSON.stringify(editor.draft.question) !== JSON.stringify(editor.original.question)));
 
   const syncQueueWarning = async (id: string): Promise<string | null> => {
-    // A TaskBoard save is already durable. Never make an OpenRig outage appear
-    // to roll it back; report the independent queue result explicitly.
+    // Local task updates are authoritative. Only uncertain receipts or
+    // identity conflicts require investigation, not normal offline retries.
     try {
       const result = await taskSyncQueue(id, boardPath);
-      if (["not_queued", "queued", "registered", "terminal", "canceled"].includes(result.status)) return null;
-      return `${id} saved locally; queue ${result.status}: ${result.reason || result.qitemId || "reconcile this task"}`;
-    } catch (error) {
-      return `${id} saved locally, but queue sync is unavailable: ${errorText(error)}`;
-    }
+      if (["unknown", "conflict", "rejected"].includes(result.status))
+        setQueueRecoveryWarning(`${id}: ${result.status} — ${result.reason || "receipt needs investigation"}`);
+    } catch { /* The durable queue intent survives an unavailable bridge. */ }
+    return null;
   };
 
   const queueEligible = (task: Task) =>
@@ -1710,10 +1748,11 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       } catch (err) { conflicts.push(`${task.id}: ${errorText(err)}`); }
     }
     applySnapshot(await loadBoard(boardPath));
-    if (conflicts.length) setError(`Column preference saved. ${conflicts.length} task(s) require Queue reconciliation: ${conflicts.slice(0, 3).join(" · ")}`);
-    else {
-      void taskQueueReconcile(boardPath).then(() => refresh(boardPath, true)).catch(err =>
-        setQueueRecoveryWarning(`Queue reconciliation unavailable: ${errorText(err)}`));
+    // An agent may update one of these tasks concurrently; column auto-queue
+    // policy is already persisted, and subsequent refreshes reconcile it.
+    if (!conflicts.length) {
+      void taskQueueReconcile(boardPath).then(() => refresh(boardPath, true)).catch(() =>
+        setQueueReconciliationOffline(true));
     }
   });
 
@@ -3173,7 +3212,14 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       </header>
 
       {error && <div className="error-banner">{error}</div>}
-      {queueRecoveryWarning && <div className="warning-banner" role="status">Queue reconciliation: {queueRecoveryWarning}</div>}
+      {queueRecoveryWarning && <div className="queue-attention-banner" role="alert">
+        <span><strong>Queue needs attention</strong> <span title={queueRecoveryWarning}>{queueRecoveryWarning}</span></span>
+        <button type="button" className="button secondary" disabled={queueRecoveryAgentBusy}
+          onClick={() => void spawnQueueRecoveryAgent()}
+          title="Open a task-bound worker to investigate this genuine Queue integrity issue">
+          {queueRecoveryAgentBusy ? "Opening agent…" : "Spawn agent"}
+        </button>
+      </div>}
       {!!snapshot.warnings.length && (
         <div className="warning-banner">{snapshot.warnings.join(" • ")}</div>
       )}
