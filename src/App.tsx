@@ -2574,26 +2574,27 @@ Details: ${queueRecoveryWarning}`;
     };
 
     const handleUp = (upEvent: MouseEvent) => {
-      const targetColumn = dragging
-        ? document
-            .elementFromPoint(upEvent.clientX, upEvent.clientY)
-            ?.closest<HTMLElement>("[data-column-id]")
-        : null;
-      const targetId = targetColumn?.dataset.columnId;
-      const targetRect = targetColumn?.getBoundingClientRect();
+      const board = boardRef.current;
+      const boardRect = board?.getBoundingClientRect();
+      // Use insertion slots rather than elementFromPoint: the gaps between columns
+      // are valid drop locations, and the dragged column itself is not a target.
+      const withinBoard = boardRect &&
+        upEvent.clientX >= boardRect.left && upEvent.clientX <= boardRect.right &&
+        upEvent.clientY >= boardRect.top && upEvent.clientY <= boardRect.bottom;
+      const destinations = withinBoard
+        ? Array.from(board!.querySelectorAll<HTMLElement>("[data-column-id]"))
+            .filter((element) => element.dataset.columnId !== column.id)
+            .map((element) => ({ id: element.dataset.columnId!, rect: element.getBoundingClientRect() }))
+            .sort((a, b) => a.rect.left - b.rect.left)
+        : [];
+      const nextColumn = destinations.find(
+        ({ rect }) => upEvent.clientX < rect.left + rect.width / 2,
+      );
+      const destination = nextColumn ?? destinations[destinations.length - 1];
       cleanup();
 
-      if (
-        dragging &&
-        targetId &&
-        targetId !== column.id &&
-        targetRect
-      ) {
-        reorderColumn(
-          column.id,
-          targetId,
-          upEvent.clientX > targetRect.left + targetRect.width / 2,
-        );
+      if (dragging && destination) {
+        reorderColumn(column.id, destination.id, !nextColumn);
       }
     };
 
