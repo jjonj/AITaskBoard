@@ -3560,7 +3560,7 @@ Details: ${queueRecoveryWarning}`;
                           onPointerDown={event => event.stopPropagation()}
                           onMouseDown={event => event.stopPropagation()}
                           onClick={event => { event.stopPropagation(); void toggleTaskQueue(task); }}><QueueArrows /></button>}
-                        {task.kind === "task" && !isForUser(task) && (
+                        {task.kind === "task" && !isForUser(task) && readinessOf(task) !== "ready" && (
                           <span className={`readiness-badge ${readinessOf(task)}`}
                             title={readinessOf(task) === "waiting" ? awaitingUserAnswer(task) ? "Waiting for your answer" : `Waiting for ${waitingFor(task).join(", ")}` : readinessOf(task) === "ready" ? "Ready to start" : "Blocked"}
                             aria-label={readinessOf(task) === "ready" ? "Ready to start" : readinessOf(task) === "waiting" ? awaitingUserAnswer(task) ? "Waiting for your answer" : `Waiting for ${waitingFor(task).join(", ")}` : "Blocked"}>
@@ -3571,9 +3571,6 @@ Details: ${queueRecoveryWarning}`;
                           <div className="task-attention-icons">
                             {task.attention.includes("question") && (
                               <span className="attention-icon question" title="Question">?</span>
-                            )}
-                            {task.attention.includes("user-note") && (
-                              <span className="attention-icon user-note" title="User note for AI">✎</span>
                             )}
                             {task.attention.includes("blocked") && (
                               <span className="attention-icon blocked" title="Blocked">×</span>
