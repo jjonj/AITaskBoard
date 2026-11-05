@@ -1762,9 +1762,11 @@ Details: ${queueRecoveryWarning}`;
     return null;
   };
 
+  const queueableColumn = (columnId: string, config: BoardConfig | undefined = snapshot?.config) =>
+    !!config && config.columns.some(column => column.id === columnId && column.ai_ready &&
+      !column.advisory && !column.terminal && column.id !== "draft");
   const queueEligible = (task: Task) =>
-    !!snapshot?.config.columns.some(column => column.id === task.column && column.ai_ready &&
-      !column.advisory && !column.terminal) &&
+    !!snapshot && queueableColumn(task.column) &&
     (task.kind === "task" || task.kind === "recurring") &&
     !task.archived && !task.completed && !task.claimed_by &&
     readinessOf(task) === "ready" &&
@@ -1786,7 +1788,7 @@ Details: ${queueRecoveryWarning}`;
     if (!snapshot) return;
     const current = await loadBoard(boardPath);
     const column = current.config.columns.find(item => item.id === columnId);
-    if (!column?.ai_ready || column.advisory || column.terminal) return;
+    if (!column || !queueableColumn(columnId, current.config)) return;
     const next = !column.auto_queue;
     await saveBoardConfig({ ...current.config, columns: current.config.columns.map(item =>
       item.id === columnId ? { ...item, auto_queue: next } : item) }, boardPath);
@@ -1794,7 +1796,8 @@ Details: ${queueRecoveryWarning}`;
     // even if a later individual queue CAS encounters an uncertain receipt.
     const afterPolicy = await loadBoard(boardPath);
     const conflicts: string[] = [];
-    for (const task of afterPolicy.tasks.filter(queueEligible)) {
+    for (const task of afterPolicy.tasks.filter(task =>
+      task.column === columnId && queueEligible(task))) {
       try {
         const mode = await taskExecutionIntent(task.id, boardPath);
         if (mode.mode !== (next ? "queue" : "backlog")) {
@@ -1808,6 +1811,8 @@ Details: ${queueRecoveryWarning}`;
     if (!conflicts.length) {
       void taskQueueReconcile(boardPath).then(() => refresh(boardPath, true)).catch(() =>
         setQueueReconciliationOffline(true));
+    } else {
+      setError(`${column.name} auto-queue saved, but ${conflicts.length} task(s) could not be updated: ${conflicts.join("; ")}`);
     }
   });
 
@@ -3409,7 +3414,7 @@ Details: ${queueRecoveryWarning}`;
                   onPointerDown={(event) => event.stopPropagation()}
                   onMouseDown={(event) => event.stopPropagation()}
                 >
-                  {column.ai_ready && !column.advisory && !column.terminal && <button type="button"
+                  {queueableColumn(column.id) && <button type="button"
                     className={`queue-intent-toggle column-queue-toggle${column.auto_queue ? " queued" : ""}${columnQueueMixed ? " mixed" : ""}`}
                     title={`${column.auto_queue ? "Disable" : "Enable"} ${column.name} auto-queue for current and future eligible tasks · ${queuedColumnCount}/${eligibleColumnQueue.length} queued`}
                     aria-label={`${column.auto_queue ? "Disable" : "Enable"} ${column.name} auto-queue`}
@@ -4584,7 +4589,7 @@ Details: ${queueRecoveryWarning}`;
             </>)}
 
             <div className="modal-actions">
-              {!isAdvisoryEditor && editor.draft.column === "ai-ready" && !editor.original?.claimed_by && !editor.original?.completed &&
+              {!isAdvisoryEditor && !!snapshot && queueableColumn(editor.draft.column) && !editor.original?.claimed_by && !editor.original?.completed &&
                 (editor.draft.kind === "task" || editor.draft.kind === "recurring") &&
                 !editor.draft.attention.some(flag => ["blocked", "needs-user", "question"].includes(flag)) &&
                 editor.draft.depends_on.every(id => isComplete(id)) &&
