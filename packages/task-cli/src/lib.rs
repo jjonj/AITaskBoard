@@ -81,6 +81,9 @@ enum TaskQueueCommand {
     Working(TaskQueueWorkingArgs),
     /// Return a never-bootstrapped worker to Queue after its exact T3 session has closed.
     Reclaim(TaskQueueReclaimArgs),
+    /// Retire a long-stalled Starting reservation after a complete T3 registry scan
+    /// proves there is no live session that could own its exact request.
+    Abandon(TaskQueueAbandonArgs),
     /// Release a reservation only after a definitive T3 not-created receipt.
     Failed(TaskQueueFailedArgs),
     /// Human Start now preempts a queue item only before it enters Starting.
@@ -118,6 +121,16 @@ struct TaskQueueReclaimArgs {
     #[arg(long)] reason: String,
     #[arg(long = "confirmed-session-closed", required = true, action = clap::ArgAction::SetTrue)]
     confirmed_session_closed: bool,
+}
+
+#[derive(Args)]
+struct TaskQueueAbandonArgs {
+    target: String,
+    #[arg(long)] queue_request: String,
+    #[arg(long)] request_id: String,
+    #[arg(long)] reason: String,
+    #[arg(long = "verified-no-live-session", required = true, action = clap::ArgAction::SetTrue)]
+    verified_no_live_session: bool,
 }
 
 #[derive(Args)]
@@ -790,6 +803,14 @@ fn run_task_queue(store: &FsTaskStore, root: &Path, command: &TaskQueueCommand) 
             let result = store.reclaim_closed_queue_worker(root, &args.target,
                 &args.queue_request, &args.request_id, &args.session_id, &args.reason)
                 .map_err(map_store_error)?;
+            Ok(json!({"status":"queued","taskId":args.target,"intent":result}))
+        }
+        TaskQueueCommand::Abandon(args) => {
+            if !args.verified_no_live_session {
+                return Err(CliError::new("confirmation_required", "Only a complete live T3 registry with no matching spawn or task session may retire this Starting request"));
+            }
+            let result = store.requeue_failed_start(root, &args.target,
+                &args.queue_request, &args.request_id, &args.reason).map_err(map_store_error)?;
             Ok(json!({"status":"queued","taskId":args.target,"intent":result}))
         }
         TaskQueueCommand::Failed(args) => {
