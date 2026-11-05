@@ -217,6 +217,62 @@ impl FsTaskStore {
         Ok(intent(&mapping, &final_text)?)
     }
 
+    /// Retire a queue worker only after T3 has durably closed the exact guest.
+    /// The caller must verify that it never bootstrapped or performed work.
+    pub fn reclaim_closed_queue_worker(
+        &self, root: &Path, id: &str, queue_request: &str, request_id: &str,
+        session_id: &str, reason: &str,
+    ) -> Result<ExecutionIntent, TaskStoreError> {
+        if uuid::Uuid::parse_str(session_id).is_err() {
+            return Err(TaskStoreError::Invalid("T3 session ID must be a UUID".into()));
+        }
+        let _lock = acquire_lock(root)?;
+        let snapshot = self.load_unlocked(root)?;
+        let path = find_task_path(root, id)?;
+        let existing = fs::read_to_string(&path)?;
+        let mut task = parse_task(&path, false, &existing)?;
+        let (text, original_mapping, _) = load(&path)?;
+        let previous = intent(&original_mapping, &text)?;
+        if previous.mode != ExecutionMode::Queue ||
+            previous.queue_request.as_deref() != Some(queue_request) ||
+            previous.queue_reservation_id.as_deref() != Some(request_id) ||
+            previous.queue_session_id.as_deref() != Some(session_id) ||
+            previous.queue_state != Some(QueueState::Working) {
+            return Err(TaskStoreError::Conflict(format!("{id} queue worker identity changed")));
+        }
+        if task.archived || task.completed.is_some() ||
+            snapshot.config.columns.iter().any(|column| column.terminal && column.id == task.column) {
+            return Err(TaskStoreError::Conflict(format!("{id} is already terminal")));
+        }
+        let owner = format!("t3:{session_id}");
+        if task.claimed_by.as_deref().is_some_and(|claim| claim != owner.as_str()) ||
+            (task.claimed_by.is_none() && !queue_task_ready(&snapshot, &task)) {
+            return Err(TaskStoreError::Conflict(format!("{id} ownership/readiness changed")));
+        }
+        let had_claim = task.claimed_by.is_some();
+        if had_claim {
+            if claim_metadata(&existing, "claim_token")?.is_some() {
+                return Err(TaskStoreError::Conflict(format!("{id} has a managed claim token")));
+            }
+            release_to_original(&mut task, &snapshot.config, &existing)?;
+        }
+        let rendered = if had_claim {
+            stamp_activity(&render_with_claim_token(&task, &existing, None)?, None, true)?
+        } else {
+            existing.clone()
+        };
+        let (yaml, body) = split_frontmatter(&rendered)?;
+        let mut mapping: serde_yaml::Mapping = serde_yaml::from_str(&yaml)
+            .map_err(|error| TaskStoreError::Parse(error.to_string()))?;
+        mapping.insert(key("queue_state"), serde_yaml::to_value(QueueState::Queued)
+            .map_err(|error| TaskStoreError::Parse(error.to_string()))?);
+        mapping.remove(key("queue_reservation_id"));
+        mapping.remove(key("queue_reservation_expires_at"));
+        mapping.remove(key("queue_session_id"));
+        mapping.insert(key("queue_error"), serde_yaml::Value::String(reason.chars().take(500).collect()));
+        persist(&path, &mapping, &body)
+    }
+
     /// Retry only after T3 has positively rejected the exact start before creating a session.
     pub fn requeue_failed_start(
         &self, root: &Path, id: &str, queue_request: &str, request_id: &str, reason: &str,

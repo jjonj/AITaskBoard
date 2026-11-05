@@ -79,6 +79,8 @@ enum TaskQueueCommand {
     Reserve(TaskQueueReserveArgs),
     Starting(TaskQueueReservationArgs),
     Working(TaskQueueWorkingArgs),
+    /// Return a never-bootstrapped worker to Queue after its exact T3 session has closed.
+    Reclaim(TaskQueueReclaimArgs),
     /// Release a reservation only after a definitive T3 not-created receipt.
     Failed(TaskQueueFailedArgs),
     /// Human Start now preempts a queue item only before it enters Starting.
@@ -105,6 +107,17 @@ struct TaskQueueWorkingArgs {
     #[arg(long)] queue_request: String,
     #[arg(long)] request_id: String,
     #[arg(long)] session_id: String,
+}
+
+#[derive(Args)]
+struct TaskQueueReclaimArgs {
+    target: String,
+    #[arg(long)] queue_request: String,
+    #[arg(long)] request_id: String,
+    #[arg(long)] session_id: String,
+    #[arg(long)] reason: String,
+    #[arg(long = "confirmed-session-closed", required = true, action = clap::ArgAction::SetTrue)]
+    confirmed_session_closed: bool,
 }
 
 #[derive(Args)]
@@ -769,6 +782,15 @@ fn run_task_queue(store: &FsTaskStore, root: &Path, command: &TaskQueueCommand) 
             let result = store.claim_queue_working(root, &args.target, &args.queue_request,
                 &args.request_id, &args.session_id).map_err(map_store_error)?;
             Ok(json!({"status":"working","taskId":args.target,"sessionId":args.session_id,"intent":result}))
+        }
+        TaskQueueCommand::Reclaim(args) => {
+            if !args.confirmed_session_closed {
+                return Err(CliError::new("confirmation_required", "T3 must confirm the exact abandoned session is durably closed"));
+            }
+            let result = store.reclaim_closed_queue_worker(root, &args.target,
+                &args.queue_request, &args.request_id, &args.session_id, &args.reason)
+                .map_err(map_store_error)?;
+            Ok(json!({"status":"queued","taskId":args.target,"intent":result}))
         }
         TaskQueueCommand::Failed(args) => {
             if !args.confirmed_not_created {
