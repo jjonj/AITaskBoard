@@ -83,6 +83,33 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   const videoRef = useRef<HTMLVideoElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const reviewTask = items.find((item) => keyOf(item) === selectedKey);
+  const toggleInboxPriority = async (item: QueueItem) => {
+    if (saving) return;
+    setSaving(true);
+    setError("");
+    try {
+      // Only change the Priority flag on the latest revision. Do not resolve
+      // the question, discard typed feedback, or change the task's column.
+      const snapshot = await loadBoard(item.path);
+      const current = snapshot.tasks.find(task => task.id === item.task.id);
+      if (!current) throw new Error("Task no longer exists.");
+      const prioritized = current.attention.includes("priority");
+      const saved = await updateTask({
+        ...current,
+        attention: prioritized
+          ? current.attention.filter(flag => flag !== "priority")
+          : [...current.attention, "priority"],
+      }, item.path);
+      setItems(previous => previous.map(entry =>
+        keyOf(entry) === keyOf(item) ? { ...entry, task: saved } : entry));
+      onUserTaskUpdated?.();
+      await refresh();
+    } catch (cause) {
+      setError("Unable to update Priority: " + String(cause));
+    } finally {
+      setSaving(false);
+    }
+  };
   const openReviewTaskSession = async (item: QueueItem) => {
     if (openingTaskSession) return;
     setOpeningTaskSession(true);
@@ -801,6 +828,8 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       onOpenTask={reviewTask.path === project.path && onOpenUserTask ? () => onOpenUserTask(reviewTask.task) : undefined}
       onOpenSession={() => void openReviewTaskSession(reviewTask)}
       sessionOpening={openingTaskSession}
+      onTogglePriority={() => void toggleInboxPriority(reviewTask)}
+      priorityBusy={saving}
       allBoards={allBoards}
       showResolved={showResolved}
       onAllBoards={setAllBoards}
@@ -882,7 +911,9 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
               </span>
             )}
             <span className="review-queue-copy">
-              <small>{item.project} · {item.task.id}</small>
+              <small className="inbox-queue-breadcrumb">{item.project} · {item.task.id}
+                {item.task.attention.includes("priority") && <span className="inbox-priority-mark" title="Priority">! Priority</span>}
+              </small>
               <strong>{item.task.title}</strong>
               <span className="review-queue-meta">
                 <em className={`review-queue-mode review-queue-mode-${queueModes[keyOf(item)] ||
@@ -915,10 +946,21 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
           <div className="review-human-stage">
             <header className="review-heading">
               <div>
-                <small>{reviewTask.project} · {reviewTask.task.id}</small>
-                <h2>{reviewTask.task.title}</h2>
+                <small className="inbox-task-heading-kicker">{reviewTask.project} · {reviewTask.task.id} · TASK</small>
+                <h2 className="inbox-task-heading-title" title={reviewTask.task.title}>{reviewTask.task.title}</h2>
               </div>
               <div className="flex items-center gap-2">
+                <button type="button" className={"inbox-priority-button" +
+                  (reviewTask.task.attention.includes("priority") ? " is-priority" : "")}
+                  aria-pressed={reviewTask.task.attention.includes("priority")}
+                  aria-label={reviewTask.task.attention.includes("priority")
+                    ? "Remove Priority from " + reviewTask.task.id
+                    : "Mark " + reviewTask.task.id + " as Priority"}
+                  title={reviewTask.task.attention.includes("priority")
+                    ? "Priority enabled · click to remove" : "Mark Priority so agents handle this task sooner"}
+                  disabled={saving} onClick={() => void toggleInboxPriority(reviewTask)}>
+                  <span aria-hidden="true">!</span> {reviewTask.task.attention.includes("priority") ? "Priority" : "Prioritize"}
+                </button>
                 {(reviewTask.task.claimed_by || reviewTask.task.live?.with_me) && (
                   <button type="button" className="button secondary"
                     aria-label={`Open session for ${reviewTask.task.id}`}
@@ -945,7 +987,18 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
                     <div className="review-user-question">
                       <InboxRichText task={reviewTask.task} text={reviewTask.task.question.prompt}
                         onError={setError} className="inbox-question-markdown" />
-                      {!!reviewTask.task.question.options?.length && <div className="review-user-choice"
+                      {!!reviewTask.task.question.options?.length &&
+                        // For final verification, Done and Needs changes in
+                        // the question are the same actions as the footer.
+                        // Never make the user select one and then click it again.
+                        !(reviewTask.task.question.options.length === 2 &&
+                          (reviewTask.task.question.request_type === "verification" ||
+                            reviewTask.task.column === "done") &&
+                          reviewTask.task.question.options.some(option =>
+                            /^(done|approve|approved|accept|accepted)$/i.test(option.trim())) &&
+                          reviewTask.task.question.options.some(option =>
+                            /^(needs changes|request changes|reopen|reject|rejected)$/i.test(option.trim()))) &&
+                        <div className="review-user-choice"
                         role="group" aria-label="Choose your answer">
                         {reviewTask.task.question.options.map((value) =>
                           <button type="button" key={value}

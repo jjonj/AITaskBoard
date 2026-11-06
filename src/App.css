@@ -3886,3 +3886,102 @@ body.card-dragging .project-tab-wrapper:not(.selected):hover {
 
 .inbox-context-update { margin-top: 9px; padding-top: 8px; border-top: 1px dashed #3e5463; }
 .inbox-context-update > strong { font-size: 10px; color: #9bb8ca; }
+
+/* Inbox clarity: a task's title is the stable context for its question.
+   Human verification choices duplicated by footer actions are hidden in JSX. */
+.review-human-stage .review-heading {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: #101820f5;
+  border-bottom: 1px solid #34485b;
+  margin: -3px -4px 9px;
+  padding: 8px 48px 12px 10px;
+  backdrop-filter: blur(7px);
+}
+.review-human-stage .review-heading > div:first-child {
+  border-left: 3px solid #6daed3;
+  padding-left: 12px;
+}
+.inbox-task-heading-kicker {
+  color: #89bdda;
+  font-size: 11px;
+  letter-spacing: .035em;
+  font-weight: 650;
+}
+.review-human-stage .review-heading h2.inbox-task-heading-title {
+  max-width: none;
+  margin: 5px 0 0;
+  font-size: clamp(17px, 1.6vw, 21px);
+  font-weight: 800;
+  color: #f4f8fd;
+  line-height: 1.28;
+  overflow-wrap: anywhere;
+}
+.inbox-priority-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  flex: none;
+  border: 1px solid #566371;
+  border-radius: 6px;
+  background: #1e2a35;
+  color: #b6c5d0;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.1;
+  min-height: 29px;
+  padding: 5px 9px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.inbox-priority-button > span {
+  display: inline-grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  font-weight: 900;
+}
+.inbox-priority-button.is-priority {
+  border-color: #b8904b;
+  background: #493c23;
+  color: #f7d68d;
+}
+.inbox-priority-button:hover:not(:disabled) { border-color: #e1c27b; }
+.inbox-priority-button:disabled { opacity: .6; cursor: progress; }
+.review-visual-title strong {
+  max-width: min(650px, 35vw);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  white-space: normal;
+  font-size: 16px;
+  line-height: 1.2;
+  font-weight: 800;
+  color: #f1f7fc;
+}
+.review-visual-header > .inbox-priority-button { margin-left: 4px; }
+@media (max-width: 1180px) {
+  .review-visual-header > .inbox-priority-button {
+    padding: 5px;
+    font-size: 0;
+  }
+  .review-visual-header > .inbox-priority-button > span { font-size: 11px; }
+  .review-visual-title strong { max-width: min(440px, 31vw); font-size: 14px; }
+}
+@media (max-width: 790px) {
+  .review-human-stage .review-heading { padding-right: 43px; }
+  .review-visual-title strong { max-width: 170px; font-size: 12px; }
+}
+
+.inbox-queue-breadcrumb { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.inbox-priority-mark {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 1px 4px; border-radius: 3px;
+  color: #f4d394; background: #463820; border: 1px solid #906e34;
+  font-size: 9px; font-weight: 800; white-space: nowrap;
+}

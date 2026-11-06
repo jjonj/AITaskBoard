@@ -17,6 +17,8 @@ type Props = {
   onOpenTask?: () => void;
   onOpenSession: () => void;
   sessionOpening: boolean;
+  onTogglePriority: () => void;
+  priorityBusy: boolean;
   allBoards: boolean;
   showResolved: boolean;
   onAllBoards: (value: boolean) => void;
@@ -64,7 +66,7 @@ const isWeb = (artifact: ReviewArtifact) => artifact.kind === "html" || artifact
  */
 export function VisualReviewInspector(props: Props) {
   const {
-    review, round, history, items, selectedKey, onSelectTask, onClose, onOpenTask, onOpenSession, sessionOpening, allBoards, showResolved,
+    review, round, history, items, selectedKey, onSelectTask, onClose, onOpenTask, onOpenSession, sessionOpening, onTogglePriority, priorityBusy, allBoards, showResolved,
     onAllBoards, onShowResolved, playable, activeIndex, onFocusArtifact, onChooseArtifact,
     choice, ranking, pins, setPins, pinning, onTogglePin, addPin, renderArtifact,
     posterOf, iframeWidth, onIframeWidth, note, setNote, saving,
@@ -179,6 +181,16 @@ export function VisualReviewInspector(props: Props) {
         <div className="review-visual-title"><small>{review.project} · {review.task.id} · Round {round.number}</small>
           <strong title={review.task.title}>{review.task.title}</strong></div>
         <span className={`inbox-task-column-chip column-${review.task.column}`}>{review.task.column}</span>
+        <button type="button" className={"inbox-priority-button" +
+          (review.task.attention.includes("priority") ? " is-priority" : "")}
+          aria-pressed={review.task.attention.includes("priority")}
+          aria-label={review.task.attention.includes("priority")
+            ? "Remove Priority from " + review.task.id : "Mark " + review.task.id + " as Priority"}
+          title={review.task.attention.includes("priority")
+            ? "Priority enabled · click to remove" : "Mark Priority so agents handle this task sooner"}
+          disabled={priorityBusy} onClick={onTogglePriority}>
+          <span aria-hidden="true">!</span> {review.task.attention.includes("priority") ? "Priority" : "Prioritize"}
+        </button>
         <span className="review-visual-mode">{round.mode.toUpperCase()}</span>
         <div className="review-visual-header-actions">
           {onOpenTask && <button type="button" className="button secondary" onClick={onOpenTask} title="Inspect the full task and return to Inbox on closing">Full task ↗</button>}
