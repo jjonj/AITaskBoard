@@ -30,6 +30,11 @@ const suggestedName = (path: string) => {
 
 export function ProjectTabs({ Board }: Props) {
   const [catalog, setCatalog] = useState<ProjectCatalog | null>(null);
+  useEffect(() => {
+    // Show the shell promptly while the cloud-backed board loads.
+    const timer = window.setTimeout(() => void showMainWindow().catch(() => undefined), 120);
+    return () => window.clearTimeout(timer);
+  }, []);
   const [startupReview, setStartupReview] = useState<{ path: string; taskId: string } | null>(null);
   const [startupTask, setStartupTask] = useState<{ path: string; taskId: string; requestKey: number } | null>(null);
   useEffect(() => {
@@ -144,7 +149,7 @@ export function ProjectTabs({ Board }: Props) {
       }
     };
     void refresh();
-    const interval = window.setInterval(() => void refresh(), 2000);
+    const interval = window.setInterval(() => void refresh(), 10000);
     window.addEventListener("focus", refresh);
     return () => {
       mounted = false;
@@ -187,7 +192,7 @@ export function ProjectTabs({ Board }: Props) {
       finally { pending = false; }
     };
     void scan();
-    const timer = window.setInterval(() => void scan(), 8000);
+    const timer = window.setInterval(() => void scan(), 15000);
     window.addEventListener("focus", scan);
     return () => {
       cancelled = true;
@@ -223,7 +228,7 @@ export function ProjectTabs({ Board }: Props) {
       finally { inflight = false; }
     };
     void update();
-    const timer = window.setInterval(() => void update(), 12000);
+    const timer = window.setInterval(() => void update(), 45000);
     window.addEventListener("focus", update);
     window.addEventListener("taskboard:refresh-board", update);
     window.addEventListener("taskboard:queue-changed", update);

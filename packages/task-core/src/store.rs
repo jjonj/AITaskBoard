@@ -339,6 +339,10 @@ impl FsTaskStore {
         collect_tasks(&root.join(ARCHIVE_DIR), true, &mut tasks, &mut warnings)?;
         tasks.sort_by(|a, b| a.id.cmp(&b.id));
 
+        // Validate all links against one index rather than repeatedly scanning
+        // the entire board for every linked task (large boards have 1,000+ cards).
+        let mut task_index = HashMap::with_capacity(tasks.len());
+        for task in &tasks { task_index.entry(task.id.as_str()).or_insert(task); }
         let mut ids = HashSet::new();
         for task in &tasks {
             if !ids.insert(task.id.clone()) {
@@ -347,7 +351,7 @@ impl FsTaskStore {
             if !task.archived && !config.columns.iter().any(|c| c.id == task.column) {
                 warnings.push(format!("{} uses unknown column {}", task.id, task.column));
             }
-            if let Err(error) = validate_links(&tasks, Some(&task.id), task.kind, &task.depends_on, &task.related_to) {
+            if let Err(error) = validate_links_with_index(&task_index, Some(&task.id), task.kind, &task.depends_on, &task.related_to) {
                 warnings.push(format!("{}: {}", task.id, error));
             }
             if task.kind == TaskKind::Epic && task.claimed_by.is_some() {
@@ -2049,6 +2053,12 @@ fn load_cross_project_task(reference: &str) -> Result<Task, TaskStoreError> {
 }
 
 fn validate_links(tasks: &[Task], own_id: Option<&str>, kind: TaskKind, hard: &[String], related: &[String]) -> Result<(), TaskStoreError> {
+    let mut index = HashMap::with_capacity(tasks.len());
+    for task in tasks { index.entry(task.id.as_str()).or_insert(task); }
+    validate_links_with_index(&index, own_id, kind, hard, related)
+}
+
+fn validate_links_with_index(index: &HashMap<&str, &Task>, own_id: Option<&str>, kind: TaskKind, hard: &[String], related: &[String]) -> Result<(), TaskStoreError> {
     if kind == TaskKind::Epic && !hard.is_empty() {
         return Err(TaskStoreError::Invalid("epics cannot have hard dependencies; add them to subtasks".into()));
     }
@@ -2077,7 +2087,7 @@ fn validate_links(tasks: &[Task], own_id: Option<&str>, kind: TaskKind, hard: &[
                 }
                 continue;
             }
-            let target = tasks.iter().find(|t| t.id == *id).ok_or_else(|| TaskStoreError::Invalid(format!("link references unknown task {id}")))?;
+            let target = index.get(id.as_str()).ok_or_else(|| TaskStoreError::Invalid(format!("link references unknown task {id}")))?;
             if std::ptr::eq(links, hard) && target.kind == TaskKind::Epic {
                 return Err(TaskStoreError::Invalid(format!("hard dependency {id} is an epic; depend on a specific executable subtask instead")));
             }
@@ -2085,20 +2095,20 @@ fn validate_links(tasks: &[Task], own_id: Option<&str>, kind: TaskKind, hard: &[
     }
     if let Some(id) = own_id {
         for target in hard {
-            if depends_transitively(tasks, target, id) {
+            if depends_transitively(index, target, id) {
                 return Err(TaskStoreError::Invalid(format!("dependency cycle: {id} -> {target} -> ... -> {id}")));
             }
         }
     }
     Ok(())
 }
-fn depends_transitively(tasks: &[Task], start: &str, target: &str) -> bool {
+fn depends_transitively(index: &HashMap<&str, &Task>, start: &str, target: &str) -> bool {
     let mut pending = vec![start.to_string()];
     let mut seen = HashSet::new();
     while let Some(id) = pending.pop() {
         if id == target { return true; }
         if !seen.insert(id.clone()) { continue; }
-        if let Some(t) = tasks.iter().find(|t| t.id == id) {
+        if let Some(t) = index.get(id.as_str()) {
             pending.extend(t.depends_on.iter().cloned());
         }
     }

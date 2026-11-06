@@ -140,8 +140,13 @@ fn same_path(a: &str, b: &str) -> bool {
     normalized_path(a) == normalized_path(b)
 }
 
+// The inactive-board sweep calls this synchronously from its own worker.
+pub(crate) fn list_projects_sync() -> Result<ProjectCatalog, String> { load() }
+
 #[tauri::command]
-pub fn list_projects() -> Result<ProjectCatalog, String> { load() }
+pub async fn list_projects() -> Result<ProjectCatalog, String> {
+    tauri::async_runtime::spawn_blocking(load).await.map_err(|e| e.to_string())?
+}
 
 // The user's Obsidian vault is the one canonical TaskBoard storage location.
 // Source folders are metadata and can live anywhere on disk.

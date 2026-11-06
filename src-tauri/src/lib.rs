@@ -33,10 +33,12 @@ fn default_board_path() -> String {
 }
 
 #[tauri::command]
-fn load_board(path: Option<String>) -> Result<BoardSnapshot, String> {
-    FsTaskStore::default()
-        .load(&root(path))
-        .map_err(|e| e.to_string())
+async fn load_board(path: Option<String>) -> Result<BoardSnapshot, String> {
+    // Scanning/parsing cloud-backed Markdown and reconciling a board can be slow.
+    // Never block the Tauri command/UI thread while a board opens or refreshes.
+    tauri::async_runtime::spawn_blocking(move || {
+        FsTaskStore::default().load(&root(path)).map_err(|e| e.to_string())
+    }).await.map_err(|e| e.to_string())?
 }
 
 /// Lightweight project-tab inbox source: return both human-response and open
@@ -575,6 +577,9 @@ fn open_task_session(path: Option<String>, id: String, implement: Option<bool>) 
 
 #[tauri::command]
 fn show_main_window(window: tauri::WebviewWindow) -> Result<(), String> {
+    // Both the prompt shell and the populated board may request visibility.
+    // Avoid pulling focus away from another app when the slower read finishes.
+    if window.is_visible().map_err(|e| e.to_string())? { return Ok(()); }
     window.show().map_err(|e| e.to_string())?;
     window.set_focus().map_err(|e| e.to_string())?;
     Ok(())
@@ -601,7 +606,7 @@ fn sweep_registered_review_boards() {
 /// The core owns the per-board lock, so active edits are never overwritten.
 fn sweep_inactive_taskboards() {
     let mut roots = std::collections::HashMap::<String, PathBuf>::new();
-    if let Ok(catalog) = projects::list_projects() {
+    if let Ok(catalog) = projects::list_projects_sync() {
         for project in catalog.projects {
             roots.insert(project.path.to_ascii_lowercase(), PathBuf::from(project.path));
         }
@@ -679,13 +684,18 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            std::thread::spawn(|| loop {
-                sweep_registered_review_boards();
-                std::thread::sleep(std::time::Duration::from_secs(6 * 60 * 60));
+            std::thread::spawn(|| {
+                // Defer cloud-drive maintenance until the first board is visible.
+                std::thread::sleep(std::time::Duration::from_secs(90));
+                loop {
+                    sweep_registered_review_boards();
+                    std::thread::sleep(std::time::Duration::from_secs(6 * 60 * 60));
+                }
             });
             std::thread::spawn(|| loop {
-                sweep_inactive_taskboards();
+                // Startup no longer competes with a vault-wide lock/read sweep.
                 std::thread::sleep(std::time::Duration::from_secs(60));
+                sweep_inactive_taskboards();
             });
             use tauri::Manager;
             if let Some(window) = app.get_webview_window("main") {
