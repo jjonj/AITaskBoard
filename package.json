@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "rebart": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Rebuild-TaskBoard.ps1",
+    "canonicalize": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Ensure-TaskBoardExecutable.ps1"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

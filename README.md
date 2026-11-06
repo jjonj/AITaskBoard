@@ -6,7 +6,7 @@ Default Wartribes board: `B:\GDrive\SharedWithPhone\Obsidian\jjj\Wartribes\Tasks
 
 ## Project tabs
 
-TaskBoard discovers existing `jjj\[ProjectName]\Tasks\_board.md` boards automatically, including boards created by agents. Tabs and board names refresh every two seconds and when the window regains focus; catalog changes from other windows are also picked up. Refresh waits while an editor, project dialog, drag, or operation is active and keeps the current project selected. Discovery reads metadata without changing task files or requiring registration in `projects.json`. Removing a tab remembers its path locally so discovery does not immediately restore it; adding that project again unhides it.
+TaskBoard discovers existing `jjj\[ProjectName]\Tasks\_board.md` boards automatically, including boards created by agents. Tabs and board names refresh every ten seconds and when the window regains focus; catalog changes from other windows are also picked up. Refresh waits while an editor, project dialog, drag, or operation is active and keeps the current project selected. Discovery reads metadata without changing task files or requiring registration in `projects.json`. Removing a tab remembers its path locally so discovery does not immediately restore it; adding that project again unhides it.
 
 TaskBoard opens with a tab strip for individual projects. Click **+ Project** and use **Browse…** to select a source/working folder; the project name is suggested from the folder name and can be edited. **+ Add folder** associates multiple directories (such as code and assets) with the same project. A project’s tasks are automatically created or reused in `B:\GDrive\SharedWithPhone\Obsidian\jjj\[ProjectName]\Tasks`—there is no board initialization checkbox. The gear icon on an existing tab edits its associated folders without touching task data or moving source files. The selected tab and folder associations persist across restarts in `%APPDATA%\TaskBoard\projects.json`. Each tab isolates task state, drafts, undo history, queues, snoozes, refresh and board preferences; tabs are locked while an editor or an operation is active. Removing a tab never deletes any tasks or directories. The original Wartribes tab, files, and user preferences are preserved.
 
@@ -18,7 +18,13 @@ Tasks can be edited directly in Obsidian. The editor presents **Description** as
 
 ## Human app
 
-Double-click `Open TaskBoard.cmd`, or launch `TaskBoard.exe` without arguments. The same `TaskBoard.exe` now also runs the agent CLI whenever arguments are supplied (`TaskBoard.exe --help`, `TaskBoard.exe --json task show WT-0158`); the desktop UI is launched only with no arguments.
+Double-click `Open TaskBoard.cmd`, or launch `TaskBoard.exe` without arguments. The same `TaskBoard.exe` also runs the agent CLI whenever arguments are supplied (`TaskBoard.exe --help`, `TaskBoard.exe --json task show WT-0158`); the desktop UI is launched only with no arguments.
+
+**Canonical executable:** The root `TaskBoard.exe` is a **Windows file symlink** to `src-tauri/target/release/taskboard.exe`, not an independently copied binary. Thus a successful standard `cargo build --release`, `npm run tauri build` or `tauri build --no-bundle` updates both paths automatically. Do not copy a binary over the root link; doing so may overwrite/remove the link. `Open TaskBoard.cmd` repairs a missing or stale link when the app is stopped, or fails clearly if the repair is blocked. Windows Developer Mode (or elevated symlink privilege) is required when initially creating the link.
+
+**Build and restart:** Run `npm run rebart` from this project. It closes running TaskBoard instances at either known executable path, builds the embedded production UI plus the release binary via Tauri, ensures the link, and launches `TaskBoard.exe`. Use `npm run canonicalize` to repair/check the link without building; close TaskBoard first if the root file is an old copy. Builds using a different target directory, renamed binary or a debug profile intentionally do **not** update the production release. The native EXE cannot reliably be rebuilt while that EXE is running on Windows; use `rebart` to stop it first.
+
+`npm run build` builds **only the frontend assets** and does not update either EXE. The agent-only CLI under `packages/task-cli/target` is a separate binary and is not covered by this executable link.
 
 Key interactions:
 - drag cards between columns;
@@ -85,7 +91,8 @@ npm run build
 cargo test --manifest-path packages/task-core/Cargo.toml
 cargo test --manifest-path packages/task-cli/Cargo.toml
 npm run tauri dev
-npm run tauri build
+npm run tauri build  # release EXE; root symlink follows automatically
+npm run rebart       # recommended: stop, production build, repair link, restart
 ```
 
 ## Human visual reviews

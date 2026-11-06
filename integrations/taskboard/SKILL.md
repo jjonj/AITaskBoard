@@ -17,6 +17,8 @@ TaskBoard supports multiple projects. Use the board associated with the user's r
 
 CLI: `D:\SSDProjects\Tools\TaskBoard\TaskBoard.exe` (same executable launches GUI when called without arguments; supports `--help`, `--root "<board Tasks folder>" --json task ...` directly). Alternative: `D:\SSDProjects\Tools\TaskBoard\taskboard.cmd`.
 
+When **rebuilding or restarting the TaskBoard desktop app itself**, use `npm run rebart` from `D:\SSDProjects\Tools\TaskBoard`. It stops both known production paths, runs a proper Tauri production build, repairs the canonical root `TaskBoard.exe` symlink to `src-tauri\target\release\taskboard.exe`, and relaunches the root path. Do not copy an EXE to the root path: that replaces/breaks the symlink. Direct Cargo release and Tauri release builds use the same target and therefore update both names automatically while the link exists, but `npm run build` builds only frontend assets and a debug or alternate-target build is not deployed. `npm run canonicalize` checks/repairs the link without rebuilding. See the repository README for details.
+
 For mutations, inspect each command's exit code and JSON before continuing, and verify the final state with `task show`. Do not hide errors with `| head` or run dependent writes after failure.
 
 Use the CLI instead of directly editing TaskBoard frontmatter when a semantic operation exists. For automation, pass `--json`.
