@@ -604,6 +604,9 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   ) ? "queue" : executionChoice;
   const [releasesOpen, setReleasesOpen] = useState(false);
   const [userQueueReview, setUserQueueReview] = useState<UserQueueReview | null>(null);
+  // A full editor opened from Inbox returns to the same feedback queue on Cancel or Save.
+  const [inboxEditorTaskId, setInboxEditorTaskId] = useState<string | null>(null);
+  const [inboxResumeId, setInboxResumeId] = useState<string | undefined>(undefined);
   const [queueExpanded, setQueueExpanded] = useState(false);
   const [followupQueueReturn, setFollowupQueueReturn] = useState<UserQueueReview | null>(null);
   const [userQueueSnoozes, setUserQueueSnoozes] = useState<UserQueueSnoozes>(() => loadUserQueueSnoozes(snoozesKey));
@@ -1393,6 +1396,13 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       const review = followupQueueReturn;
       setFollowupQueueReturn(null);
       advanceUserQueue(board, userQueueSnoozes, review);
+      return;
+    }
+    if (inboxEditorTaskId) {
+      setInboxResumeId(persisted ? "" : inboxEditorTaskId);
+      setInboxEditorTaskId(null);
+      setEditor(null);
+      setReviewOpen(true);
       return;
     }
     setUserQueueReview(null);
@@ -3623,7 +3633,9 @@ Details: ${queueRecoveryWarning}`;
 
       {reviewOpen && <div className="review-unified-backdrop" role="dialog" aria-modal="true"
           aria-label="Unified human feedback queue">
-          <ReviewView project={project} onClose={() => setReviewOpen(false)} initialTaskId={requestedReviewId}
+          <ReviewView project={project}
+            onClose={() => { setReviewOpen(false); setInboxResumeId(undefined); }}
+            initialTaskId={inboxResumeId === undefined ? requestedReviewId : inboxResumeId}
             userTasks={userQueueTasks}
             onUserTaskUpdated={(notice) => {
               if (notice) setReviewNotice(notice);
@@ -3638,12 +3650,9 @@ Details: ${queueRecoveryWarning}`;
               }
             }}
             onOpenUserTask={(task) => {
-              const ids = userQueueTasks.map((value) => value.id);
-              const index = ids.indexOf(task.id);
-              if (index < 0) return;
+              setInboxEditorTaskId(task.id);
               setReviewOpen(false);
-              setUserQueueReview({ ids, index });
-              openEdit(task, true);
+              openEdit(task);
             }} />
         </div>}
 

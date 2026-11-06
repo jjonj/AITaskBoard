@@ -3,6 +3,7 @@ import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import type { ReviewArtifact, ReviewPin, ReviewRound } from "./reviewApi";
 import type { Task } from "./types";
 import { InboxResponseFooter, reviewOutcomes } from "./InboxResponseFooter";
+import { InboxRichText } from "./InboxRichText";
 
 type Item = { path: string; project: string; task: Task };
 type Props = {
@@ -13,6 +14,7 @@ type Props = {
   selectedKey: string;
   onSelectTask: (key: string) => void;
   onClose: () => void;
+  onOpenTask?: () => void;
   onOpenSession: () => void;
   sessionOpening: boolean;
   allBoards: boolean;
@@ -62,7 +64,7 @@ const isWeb = (artifact: ReviewArtifact) => artifact.kind === "html" || artifact
  */
 export function VisualReviewInspector(props: Props) {
   const {
-    review, round, history, items, selectedKey, onSelectTask, onClose, onOpenSession, sessionOpening, allBoards, showResolved,
+    review, round, history, items, selectedKey, onSelectTask, onClose, onOpenTask, onOpenSession, sessionOpening, allBoards, showResolved,
     onAllBoards, onShowResolved, playable, activeIndex, onFocusArtifact, onChooseArtifact,
     choice, ranking, pins, setPins, pinning, onTogglePin, addPin, renderArtifact,
     posterOf, iframeWidth, onIframeWidth, note, setNote, saving,
@@ -129,15 +131,17 @@ export function VisualReviewInspector(props: Props) {
     return () => window.removeEventListener("keydown", onKey, true);
   }, [focus, onClose, onFocusArtifact, activeIndex, playable.length]);
 
-  const openOriginal = async () => {
-    if (!active) return;
+  const openOriginal = async (artifact?: ReviewArtifact) => {
+    if (!artifact) return;
     setOpenError("");
     try {
-      if (active.kind === "url") await openUrl(active.path);
-      else if (active.storage === "local" || active.storage === "synced") {
-        const source = active.kind === "html" && !/\.html?$/i.test(active.path)
-          ? active.path.replace(/[\\/]$/, "") + "/index.html" : active.path;
-        await openPath(source);
+      if (artifact.kind === "url") await openUrl(artifact.path);
+      else if (artifact.storage === "local" || artifact.storage === "synced") {
+        const source = artifact.kind === "html" && !/\.html?$/i.test(artifact.path)
+          ? artifact.path.replace(/[\\/]$/, "") + "/index.html" : artifact.path;
+        const path = /^(?:[a-z]:[\\/]|\/|\\\\)/i.test(source)
+          ? source : review.path.replace(/[\\/]$/, "") + "/" + source;
+        await openPath(path);
       } else throw new Error("No local file is available for this artifact.");
     } catch (reason) {
       setOpenError("Unable to open original: " + String(reason));
@@ -177,6 +181,7 @@ export function VisualReviewInspector(props: Props) {
         <span className={`inbox-task-column-chip column-${review.task.column}`}>{review.task.column}</span>
         <span className="review-visual-mode">{round.mode.toUpperCase()}</span>
         <div className="review-visual-header-actions">
+          {onOpenTask && <button type="button" className="button secondary" onClick={onOpenTask} title="Inspect the full task and return to Inbox on closing">Full task ↗</button>}
           {(review.task.claimed_by || review.task.live?.with_me) && (
             <button type="button" className="button secondary"
               aria-label={`Open session for ${review.task.id}`}
@@ -276,7 +281,7 @@ export function VisualReviewInspector(props: Props) {
                   <option value={390}>390px</option>
                 </select>}
                 <button type="button" className="button secondary"
-                  onClick={() => void openOriginal()} title="Open the original in its default application">
+                  onClick={() => void openOriginal(active)} title="Open the original in its default application">
                   ↗ Open original</button>
               </div>
               {compareMode === "single" ? imageStage :
@@ -353,7 +358,7 @@ export function VisualReviewInspector(props: Props) {
             <button type="button" className="button secondary" onClick={() => setFeedbackExpanded(false)}
               aria-label="Hide feedback">×</button></header>
           <div className="review-visual-feedback-content">
-            <p className="review-visual-judge">{round.judge}</p>
+            <InboxRichText task={review.task} text={round.judge} className="review-visual-judge" onError={setOpenError} />
 
             <label className="review-note">Overall note
               <textarea rows={6} value={note} disabled={resolved}
@@ -389,8 +394,10 @@ export function VisualReviewInspector(props: Props) {
             </details>}
             <details className="review-visual-references">
               <summary>References · {round.references.length + (round.previous ? 1 : 0)}</summary>
-              {round.previous && <p>Previous: {round.previous.label}</p>}
-              {round.references.map((reference) => <p key={reference.id}>{reference.label}</p>)}
+              {round.previous && <button className="inbox-resource-link" type="button"
+                onClick={() => void openOriginal(round.previous)}>Previous: {round.previous.label} ↗</button>}
+              {round.references.map((reference) => <button className="inbox-resource-link" type="button"
+                key={reference.id} onClick={() => void openOriginal(reference)}>{reference.label} ↗</button>)}
               {!round.previous && round.references.length === 0 && <p>No references supplied.</p>}
             </details>
           </div>

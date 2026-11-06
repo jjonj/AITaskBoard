@@ -8,6 +8,8 @@ import type { Task } from "./types";
 import { isUserQueueEligible } from "./userQueueEligibility";
 import { VisualReviewInspector } from "./VisualReviewInspector";
 import { InboxResponseFooter, reviewOutcomes } from "./InboxResponseFooter";
+import { InboxRichText } from "./InboxRichText";
+import { parseDescriptionTimeline } from "./descriptionTimeline";
 
 type QueueItem = { path: string; project: string; task: Task };
 // Only the most recent text-Inbox action is reversible. Its saved revision
@@ -796,6 +798,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       selectedKey={selectedKey}
       onSelectTask={setSelectedKey}
       onClose={onClose}
+      onOpenTask={reviewTask.path === project.path && onOpenUserTask ? () => onOpenUserTask(reviewTask.task) : undefined}
       onOpenSession={() => void openReviewTaskSession(reviewTask)}
       sessionOpening={openingTaskSession}
       allBoards={allBoards}
@@ -940,7 +943,8 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
                 <div className="review-user-fields">
                   {reviewTask.task.question?.prompt && (
                     <div className="review-user-question">
-                      <strong>{reviewTask.task.question.prompt}</strong>
+                      <InboxRichText task={reviewTask.task} text={reviewTask.task.question.prompt}
+                        onError={setError} className="inbox-question-markdown" />
                       {!!reviewTask.task.question.options?.length && <div className="review-user-choice"
                         role="group" aria-label="Choose your answer">
                         {reviewTask.task.question.options.map((value) =>
@@ -984,9 +988,24 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
                 <p>{reviewTask.task.question?.request_type === "verification" || reviewTask.task.column === "done"
                   ? "Done accepts the finished work. Needs changes sends it back for implementation."
                   : "Submit sends your answer to AI Ready. Done · Keep current closes the task without changes."}</p>
-                <details className="review-task-context">
-                  <summary>Task context</summary>
-                  <p>{reviewTask.task.description || "No additional context."}</p>
+                <details className="review-task-context" open>
+                  <summary>Task context & links</summary>
+                  <InboxRichText task={reviewTask.task}
+                    text={parseDescriptionTimeline(reviewTask.task.description).initial || "No additional context."}
+                    onError={setError} />
+                  {parseDescriptionTimeline(reviewTask.task.description).updates.slice(-3).map((entry, index) =>
+                    <div key={index} className="inbox-context-update">
+                      <strong>{entry.kind === "user-note" ? "Note to AI" : "Task update"}</strong>
+                      <InboxRichText task={reviewTask.task} text={entry.text} onError={setError} />
+                    </div>)}
+                  {!!reviewTask.task.user_notes.trim() && <>
+                    <strong>User notes</strong>
+                    <InboxRichText task={reviewTask.task} text={reviewTask.task.user_notes} onError={setError} />
+                  </>}
+                  {!!reviewTask.task.ai_notes.trim() && <>
+                    <strong>AI notes</strong>
+                    <InboxRichText task={reviewTask.task} text={reviewTask.task.ai_notes} onError={setError} />
+                  </>}
                 </details>
                 <details className="review-task-context">
                   <summary>Requirements {userCriteria.trim() && "· editable"}</summary>
@@ -999,7 +1018,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
                   <small>{reviewTask.task.category || "Uncategorized"}</small>
                   {reviewTask.path === project.path && (
                     <button className="button secondary" type="button"
-                      onClick={() => onOpenUserTask?.(reviewTask.task)}>Full editor ↗</button>
+                      onClick={() => onOpenUserTask?.(reviewTask.task)}>Open full task ↗</button>
                   )}
                 </div>
               </div>

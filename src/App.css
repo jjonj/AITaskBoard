@@ -3866,3 +3866,23 @@ body.card-dragging .project-tab-wrapper:not(.selected):hover {
 .queue-attention-banner > span > strong { margin-right: 8px; }
 .queue-attention-banner .button { flex: none; min-height: 28px;
   padding: 4px 10px; font-size: 11px; }
+
+/* Inbox references are deliberate actions: filesystem and T3 links open via native handlers. */
+.inbox-rich-text { min-width: 0; overflow-wrap: anywhere; line-height: 1.5; }
+.review-user-question .inbox-question-markdown { color: #f5ecde; font-size: 15px; font-weight: 630; }
+.review-task-context .inbox-rich-text { margin: 9px 0 0; max-height: 290px; overflow: auto; font-size: 11px; }
+.review-task-context .inbox-rich-text p { max-height: none; margin: 0 0 7px; overflow: visible; }
+.review-task-context > strong { display: block; margin-top: 12px; color: #b0cad7; font-size: 11px; }
+.inbox-resource-link { display: inline; padding: 0; border: 0; background: none; color: #90ceff;
+  font: inherit; text-align: inherit; text-decoration: underline; text-underline-offset: 2px;
+  overflow-wrap: anywhere; cursor: pointer; }
+.inbox-resource-link:hover, .inbox-resource-link:focus-visible { color: #d1ebff; }
+.inbox-resource-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.inbox-resource-chip { max-width: 100%; min-width: 0; border: 1px solid #477083;
+  background: #1c3744; border-radius: 5px; padding: 5px 8px; color: #aee0ee;
+  font: inherit; font-size: 11px; text-overflow: ellipsis; overflow: hidden;
+  white-space: nowrap; cursor: pointer; }
+.inbox-resource-chip:hover, .inbox-resource-chip:focus-visible { border-color: #8ec7d9; background: #285064; }
+
+.inbox-context-update { margin-top: 9px; padding-top: 8px; border-top: 1px dashed #3e5463; }
+.inbox-context-update > strong { font-size: 10px; color: #9bb8ca; }
