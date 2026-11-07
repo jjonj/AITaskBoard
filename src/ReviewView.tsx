@@ -693,7 +693,9 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   const labelOf = (id: string) => playable.find((artifact) => artifact.id === id)?.label || id;
   const awaitingNextRound = manifest?.status === "open" && !!round?.result;
   const resolved = manifest?.status === "resolved" || !!round?.result;
-  const pinning = (pinMode || round?.mode === "markup") && !resolved;
+  // Markup rounds still open in browse mode so scrolling/dragging an embedded
+  // preview cannot accidentally create pins. Pin (P) explicitly enters annotation mode.
+  const pinning = pinMode && !resolved;
   const isWeb = (artifact?: ReviewArtifact) => artifact?.kind === "html" || artifact?.kind === "url";
   const showStrip = playable.length > 1 || round?.mode === "pick" || round?.mode === "rank";
 
@@ -708,7 +710,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   };
 
   const addPin = (event: MouseEvent<HTMLDivElement>, artifact = activeArtifact) => {
-    if (!(pinMode || round?.mode === "markup") || !artifact || manifest?.status === "resolved") return;
+    if (!pinning || !artifact) return;
     const rect = event.currentTarget.getBoundingClientRect();
     const x = (event.clientX - rect.left) / rect.width;
     const y = (event.clientY - rect.top) / rect.height;
@@ -806,7 +808,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
               {showPoster ? "Try live URL" : "Show poster"}
             </button>
           )}
-          {(pinMode || round?.mode === "markup") && <div className="review-web-pin-surface" aria-label="Place review pin" />}
+          {pinning && <div className="review-web-pin-surface" aria-label="Place review pin" />}
         </div>
       );
     }
@@ -1169,7 +1171,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
                     round.mode === "rank" && ranking.includes(activeArtifact.id) && "ranked"].filter(Boolean).join(" ")}
                     role="region"
                     aria-label={`Candidate ${playable.indexOf(activeArtifact) + 1} of ${playable.length}: ${activeArtifact.label || activeArtifact.id}`}
-                    onClick={(event) => { if (pinMode || round.mode === "markup") addPin(event, activeArtifact); }}>
+                    onClick={(event) => { if (pinning) addPin(event, activeArtifact); }}>
                     {image(activeArtifact)}
                     {pinsFor(activeArtifact).map((pin) => <span className="review-pin" key={pins.indexOf(pin)}
                       style={{ left: `${pin.x * 100}%`, top: `${pin.y * 100}%` }}>{pins.indexOf(pin) + 1}</span>)}
