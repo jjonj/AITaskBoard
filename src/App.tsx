@@ -557,6 +557,8 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const [executionChoice, setExecutionChoice] = useState<ExecutionMode | "start_now">("backlog");
   const [executionTouched, setExecutionTouched] = useState(false);
   const [executionModes, setExecutionModes] = useState<Record<string, import("./api").ExecutionIntent>>({});
+  const pendingTaskStarts = useRef(new Set<string>());
+  const [startingTaskIds, setStartingTaskIds] = useState<string[]>([]);
   useEffect(() => {
     if (!snapshot) return;
     let cancelled = false;
@@ -1772,6 +1774,31 @@ Details: ${queueRecoveryWarning}`;
     return null;
   };
 
+  // Saving a task and waiting for T3 to start it are separate operations. The
+  // launch remains one-shot in T3; UNKNOWN delivery must be reconciled, not retried.
+  const startTaskSessionDetached = (id: string, path: string, implement: boolean) => {
+    const key = `${path}:${id}`;
+    if (pendingTaskStarts.current.has(key)) return;
+    pendingTaskStarts.current.add(key);
+    setStartingTaskIds(current => [...current, id]);
+    void (async () => {
+      try {
+        const receipt = await openTaskSession(id, path, implement);
+        if (implement && ["prompt_unknown", "unknown", "in_progress"].includes(String(receipt.status))) {
+          setError(`${id} T3 start: ${receipt.status}. Inspect its existing request before trying again.`);
+        } else if (implement && receipt.status !== "opened" && receipt.status !== "created") {
+          throw new Error(`T3 did not confirm opening the task session (${String(receipt.status)}).`);
+        }
+      } catch (err) {
+        setError(`${id} was saved, but its T3 launch needs attention: ${errorText(err)}`);
+      } finally {
+        pendingTaskStarts.current.delete(key);
+        setStartingTaskIds(current => current.filter(item => item !== id));
+        await refresh(path, true);
+      }
+    })();
+  };
+
   const queueableColumn = (columnId: string, config: BoardConfig | undefined = snapshot?.config) =>
     !!config && config.columns.some(column => column.id === columnId && column.ai_ready &&
       !column.advisory && !column.terminal && column.id !== "draft");
@@ -1910,6 +1937,7 @@ Details: ${queueRecoveryWarning}`;
       let savedTask: Task | null = null;
       let undoAction: string | null = null;
       let notifyWarning: string | null = null;
+      let startAfterSave: { id: string; implement: boolean } | null = null;
 
       if (editor.mode === "create") {
         if (!reservedTaskId) throw new Error("Task ID reservation is not ready yet.");
@@ -1946,31 +1974,19 @@ Details: ${queueRecoveryWarning}`;
         if (withMeSelected !== (savedTask.live?.with_me === true)) {
           savedTask = await taskLiveWithMe(savedTask.id, savedTask.revision, withMeSelected, boardPath);
         }
-        const current = await taskExecutionIntent(savedTask.id, boardPath);
-        if (executionChoice === "start_now" && withMeSelected) {
-          // Live Start opens/focuses the one T3 session, never registers a second
-          // background/foreground job for the same click.
-          await openTaskSession(savedTask.id, boardPath);
-        } else if (executionChoice === "start_now") {
-          // Explicit Start now bypasses the background capacity scheduler.
-          // T3's open-task path owns single-task locking and UNKNOWN reconciliation.
-          const receipt = await openTaskSession(savedTask.id, boardPath, true);
-          if (receipt.status === "prompt_unknown" ||
-              receipt.status === "unknown" ||
-              receipt.status === "in_progress") {
-            notifyWarning = `T3 start: ${receipt.status}. The original request remains reserved; inspect its receipt before attempting another spawn.`;
-          } else if (receipt.status !== "opened" && receipt.status !== "created") {
-            throw new Error(`T3 did not confirm opening the task session (${String(receipt.status)}).`);
-          }
-        } else if (executionTouched && executionChoice !== current.mode) {
-          await taskSetExecutionMode(savedTask.id, current.revision, executionChoice, boardPath);
+        if (executionChoice === "start_now") {
+          // The saved task is durable; do not hold the editor open while T3
+          // creates/opens a browser session or delivers its prompt.
+          startAfterSave = { id: savedTask.id, implement: !withMeSelected };
+        } else if (executionTouched) {
+          const current = await taskExecutionIntent(savedTask.id, boardPath);
+          if (executionChoice !== current.mode)
+            await taskSetExecutionMode(savedTask.id, current.revision, executionChoice, boardPath);
         }
-        // Core metadata writes change the revision outside the ordinary Task draft API.
-        after = await loadBoard(boardPath);
       }
       if (savedTask) showLinkedReviewOutcome(before, after, savedTask.id);
       if (undoAction) pushUndo({ kind: "board", label: undoAction, before, after });
-      const syncWarning = savedTask ? await syncQueueWarning(savedTask.id) : null;
+      const syncWarning = savedTask && !startAfterSave ? await syncQueueWarning(savedTask.id) : null;
       // The sync CAS may add a receipt, changing the revision: reload before
       // delivering the local board view, rather than leaving a stale edit draft.
       if (savedTask) after = await loadBoard(boardPath);
@@ -1981,6 +1997,7 @@ Details: ${queueRecoveryWarning}`;
         closeEditor(after, true);
       }
       if (notifyWarning || syncWarning) setError([notifyWarning, syncWarning].filter(Boolean).join(" · "));
+      if (startAfterSave) startTaskSessionDetached(startAfterSave.id, boardPath, startAfterSave.implement);
     });
 
   // Closing a task preserves edited fields; the follow-up starts in the same
@@ -3287,6 +3304,9 @@ Details: ${queueRecoveryWarning}`;
       </header>
 
       {error && <div className="error-banner">{error}</div>}
+      {startingTaskIds.length > 0 && <div className="warning-banner" role="status">
+        Starting {startingTaskIds.join(", ")} in T3 in the background. TaskBoard remains usable.
+      </div>}
       {autoSavedDraft && <div className="draft-saved-toast" role="status">
         <span className="draft-saved-toast-icon" aria-hidden="true">✓</span>
         <div className="draft-saved-toast-copy">

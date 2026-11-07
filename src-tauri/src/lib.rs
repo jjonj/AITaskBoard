@@ -515,8 +515,15 @@ fn task_handoff_bundle(path:String,id:String)->Result<task_core::HandoffPacket,S
 /// Open the canonical task's existing session, or ask T3's open-task action to
 /// create one. The new-session path requires T3-0142; never synthesize a
 /// duplicate session or silently treat a transport error as a failed start.
+// T3's CLI may wait for browser/session startup and prompt delivery. Never do
+// this blocking work on Tauri's command/UI thread.
 #[tauri::command]
-fn open_task_session(path: Option<String>, id: String, implement: Option<bool>) -> Result<serde_json::Value, String> {
+async fn open_task_session(path: Option<String>, id: String, implement: Option<bool>) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || open_task_session_blocking(path, id, implement))
+        .await.map_err(|e| format!("T3 session operation failed: {e}"))?
+}
+
+fn open_task_session_blocking(path: Option<String>, id: String, implement: Option<bool>) -> Result<serde_json::Value, String> {
     let path = root(path);
     let task = FsTaskStore::default().load(&path).map_err(|e| e.to_string())?
         .tasks.into_iter().find(|task| task.id == id && !task.archived)
