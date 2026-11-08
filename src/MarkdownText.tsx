@@ -1,5 +1,5 @@
 import { useState } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
@@ -8,7 +8,7 @@ export function MarkdownText({ text, className = "" }: { text: string; className
   return <div className={`markdown-content ${className}`}>
     <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={(url) =>
       /^wartribes-tour:\/\/[a-z][a-z0-9_]{0,63}\/?$/i.test(url) ? url :
-      /^wartribes-tour:/i.test(url) ? "" : url
+      /^wartribes-tour:/i.test(url) ? "" : defaultUrlTransform(url)
     } components={{
       a: ({ node: _node, ...props }) => /^wartribes-tour:\/\//i.test(props.href ?? "")
         ? <a {...props} href={props.href} onClick={(event) => {
