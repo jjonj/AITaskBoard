@@ -46,7 +46,8 @@ function sessionId(link: string) {
 }
 
 function isResourceLink(link: string) {
-  return /^https?:\/\//i.test(link) || /^file:\/\//i.test(link) ||
+  return /^wartribes-tour:\/\/[a-z][a-z0-9_]{0,63}\/?$/i.test(link) ||
+    /^https?:\/\//i.test(link) || /^file:\/\//i.test(link) ||
     /^(?:[a-z]:[\\/]|\\\\|\.{1,2}[\\/]|\/)/i.test(link) ||
     !!sessionId(link) || (!/^[a-z][a-z\d+.-]*:/i.test(link) && !link.startsWith("#"));
 }
@@ -58,7 +59,7 @@ async function openResource(link: string, task: Task) {
   if (session) {
     if (!("__TAURI_INTERNALS__" in window)) throw new Error("T3 session links require desktop TaskBoard.");
     await openClaimedT3Session(session);
-  } else if (/^https?:\/\//i.test(value)) {
+  } else if (/^(?:https?:\/\/|wartribes-tour:\/\/)/i.test(value)) {
     if ("__TAURI_INTERNALS__" in window) await openUrl(value);
     else window.open(value, "_blank", "noopener,noreferrer");
   } else {

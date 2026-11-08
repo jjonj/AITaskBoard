@@ -1,12 +1,22 @@
 import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 /** Read-only Markdown without raw HTML; task text stays editable as plain Markdown. */
 export function MarkdownText({ text, className = "" }: { text: string; className?: string }) {
   return <div className={`markdown-content ${className}`}>
-    <ReactMarkdown remarkPlugins={[remarkGfm]} components={{
-      a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noopener noreferrer" />,
+    <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={(url) =>
+      /^wartribes-tour:\/\/[a-z][a-z0-9_]{0,63}\/?$/i.test(url) ? url :
+      /^wartribes-tour:/i.test(url) ? "" : url
+    } components={{
+      a: ({ node: _node, ...props }) => /^wartribes-tour:\/\//i.test(props.href ?? "")
+        ? <a {...props} href={props.href} onClick={(event) => {
+            if (!("__TAURI_INTERNALS__" in window) || !props.href) return;
+            event.preventDefault();
+            void openUrl(props.href).catch(error => window.alert(String(error)));
+          }} />
+        : <a {...props} target="_blank" rel="noopener noreferrer" />,
     }}>{text}</ReactMarkdown>
   </div>;
 }
