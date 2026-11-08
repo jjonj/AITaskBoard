@@ -599,12 +599,13 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     }).finally(() => { if (!cancelled) setExecutionLoading(false); });
     return () => { cancelled = true; };
   }, [boardPath, editor?.mode, editor?.original?.id]);
-  const editorQueueChoice = !executionTouched && editor && (
-    (editor.mode === "create" &&
-      snapshot?.config.columns.some(col => col.id === editor.draft.column && col.ai_ready && col.auto_queue)) ||
-    (editor.draft.attention.includes("priority") &&
-      !editor.original?.attention.includes("priority"))
-  ) ? "queue" : executionChoice;
+  // Creating in an auto-queue column cannot opt out into Backlog. Keep Start now
+  // available, and fall back to Queue if the column changes after a Backlog choice.
+  const creatingInAutoQueueColumn = editor?.mode === "create" &&
+    snapshot?.config.columns.some(col => col.id === editor.draft.column && col.ai_ready && col.auto_queue) === true;
+  const editorQueueChoice = (creatingInAutoQueueColumn && executionChoice === "backlog") ||
+    (!executionTouched && editor && editor.draft.attention.includes("priority") &&
+      !editor.original?.attention.includes("priority")) ? "queue" : executionChoice;
   const [releasesOpen, setReleasesOpen] = useState(false);
   const [userQueueReview, setUserQueueReview] = useState<UserQueueReview | null>(null);
   // A full editor opened from Inbox returns to the same feedback queue on Cancel or Save.
@@ -1975,14 +1976,15 @@ Details: ${queueRecoveryWarning}`;
         if (withMeSelected !== (savedTask.live?.with_me === true)) {
           savedTask = await taskLiveWithMe(savedTask.id, savedTask.revision, withMeSelected, boardPath);
         }
-        if (executionChoice === "start_now") {
+        const selectedMode = editor.mode === "create" ? editorQueueChoice : executionChoice;
+        if (selectedMode === "start_now") {
           // The saved task is durable; do not hold the editor open while T3
           // creates/opens a browser session or delivers its prompt.
           startAfterSave = { id: savedTask.id, implement: !withMeSelected };
         } else if (executionTouched) {
           const current = await taskExecutionIntent(savedTask.id, boardPath);
-          if (executionChoice !== current.mode)
-            await taskSetExecutionMode(savedTask.id, current.revision, executionChoice, boardPath);
+          if (selectedMode !== current.mode)
+            await taskSetExecutionMode(savedTask.id, current.revision, selectedMode, boardPath);
         }
       }
       if (savedTask) showLinkedReviewOutcome(before, after, savedTask.id);
@@ -4624,7 +4626,9 @@ Details: ${queueRecoveryWarning}`;
                 !editor.draft.attention.some(flag => ["blocked", "needs-user", "question"].includes(flag)) &&
                 editor.draft.depends_on.every(id => isComplete(id)) &&
                 <div className="execution-mode-picker" role="group" aria-label="Execution mode">
-                {(["backlog", "queue", "start_now"] as const).map((mode) =>
+                {(["backlog", "queue", "start_now"] as const)
+                  .filter(mode => !creatingInAutoQueueColumn || mode !== "backlog")
+                  .map((mode) =>
                   <button type="button" key={mode} disabled={busy || executionLoading}
                     aria-pressed={editorQueueChoice === mode}
                     className={`execution-mode-option${editorQueueChoice === mode ? " active" : ""}`}
