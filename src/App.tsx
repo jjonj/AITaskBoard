@@ -1,4 +1,5 @@
 import { ToolbarIcon } from "./ToolbarIcons";
+import { useLoggedError } from "./errorLog";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -669,7 +670,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const [undoCount, setUndoCount] = useState(0);
   const [busy, setBusy] = useState(false);
   const [refreshFeedback, setRefreshFeedback] = useState<"idle" | "working" | "done">("idle");
-  const [error, setError] = useState("");
+  const [error, setError] = useLoggedError(boardPath);
 
   // Windows Explorer file drops are handled by Tauri rather than HTML5 DnD.
   // The native event includes absolute paths; no file contents are imported.

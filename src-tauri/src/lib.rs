@@ -7,6 +7,7 @@ mod stale_blockers;
 mod agent_policy;
 mod orphan_recovery;
 mod queue_bridge;
+mod error_log;
 
 use std::{fs, path::PathBuf, process::{Command, Stdio}, io::Write};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -712,6 +713,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            error_log::record_ui_error,
             startup_review,
             startup_task,
             projects::list_projects,
