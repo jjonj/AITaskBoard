@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { readTaskImage } from "./api";
+import { useLinkCopyMenu } from "./LinkCopyMenu";
 
 export type PendingClipboardImage = {
   dataUrl: string;
@@ -23,6 +24,7 @@ export const imageAttachmentPaths = (description: string): string[] =>
 export function TaskImageGallery({ description, boardPath, pending, onRemovePending }: Props) {
   const paths = useMemo(() => imageAttachmentPaths(description), [description]);
   const [savedImages, setSavedImages] = useState<Record<string, string>>({});
+  const { showCopyMenu, copyMenu } = useLinkCopyMenu();
   const pathKey = paths.join("\n");
 
   useEffect(() => {
@@ -51,7 +53,8 @@ export function TaskImageGallery({ description, boardPath, pending, onRemovePend
         {paths.map((path) => (
           <div className="task-image-thumb" key={path}>
             {savedImages[path] ? (
-              <a href={savedImages[path]} target="_blank" rel="noreferrer" title="Open full image">
+              <a href={savedImages[path]} target="_blank" rel="noreferrer" title="Open full image · right-click to copy file path"
+                onContextMenu={(event) => showCopyMenu(event, boardPath.replace(/[\\/]$/, "") + "/" + path)}>
                 <img src={savedImages[path]} alt="Task attachment" />
               </a>
             ) : (
@@ -68,6 +71,7 @@ export function TaskImageGallery({ description, boardPath, pending, onRemovePend
           </div>
         ))}
       </div>
+      {copyMenu}
     </section>
   );
 }

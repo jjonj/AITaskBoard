@@ -1,0 +1,40 @@
+.link-copy-menu {
+  position: fixed;
+  z-index: 200000;
+  width: 180px;
+  padding: 4px;
+  border: 1px solid #536577;
+  border-radius: 7px;
+  background: #192734;
+  box-shadow: 0 8px 28px #0009;
+}
+
+.link-copy-menu button {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #edf5fd;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.link-copy-menu button:hover, .link-copy-menu button:focus-visible {
+  background: #304a60;
+}
+
+.link-copy-notice {
+  position: fixed;
+  z-index: 200001;
+  right: 20px;
+  bottom: 20px;
+  padding: 9px 14px;
+  border: 1px solid #4a7182;
+  border-radius: 6px;
+  background: #1d3541;
+  color: #d9f6fa;
+  box-shadow: 0 5px 18px #0007;
+}

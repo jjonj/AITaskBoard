@@ -4,6 +4,7 @@ import type { ReviewArtifact, ReviewPin, ReviewRound } from "./reviewApi";
 import type { Task } from "./types";
 import { InboxResponseFooter, reviewOutcomes } from "./InboxResponseFooter";
 import { InboxRichText } from "./InboxRichText";
+import { useLinkCopyMenu } from "./LinkCopyMenu";
 
 type Item = { path: string; project: string; task: Task };
 type Props = {
@@ -81,6 +82,7 @@ export function VisualReviewInspector(props: Props) {
   const [opacity, setOpacity] = useState(50);
   const [zoom, setZoom] = useState(1);
   const [openError, setOpenError] = useState("");
+  const { showCopyMenu, copyMenu } = useLinkCopyMenu(setOpenError);
   const [moreOpen, setMoreOpen] = useState(false);
   const stripRef = useRef<HTMLDivElement>(null);
   const active = playable[Math.min(activeIndex, playable.length - 1)];
@@ -133,17 +135,21 @@ export function VisualReviewInspector(props: Props) {
     return () => window.removeEventListener("keydown", onKey, true);
   }, [focus, onClose, onFocusArtifact, activeIndex, playable.length]);
 
+  const originalAddress = (artifact: ReviewArtifact) => {
+    if (artifact.kind === "url") return artifact.path;
+    const source = artifact.kind === "html" && !/\.html?$/i.test(artifact.path)
+      ? artifact.path.replace(/[\\/]$/, "") + "/index.html" : artifact.path;
+    return /^(?:[a-z]:[\\/]|\/|\\\\)/i.test(source)
+      ? source : review.path.replace(/[\\/]$/, "") + "/" + source;
+  };
+
   const openOriginal = async (artifact?: ReviewArtifact) => {
     if (!artifact) return;
     setOpenError("");
     try {
       if (artifact.kind === "url") await openUrl(artifact.path);
       else if (artifact.storage === "local" || artifact.storage === "synced") {
-        const source = artifact.kind === "html" && !/\.html?$/i.test(artifact.path)
-          ? artifact.path.replace(/[\\/]$/, "") + "/index.html" : artifact.path;
-        const path = /^(?:[a-z]:[\\/]|\/|\\\\)/i.test(source)
-          ? source : review.path.replace(/[\\/]$/, "") + "/" + source;
-        await openPath(path);
+        await openPath(originalAddress(artifact));
       } else throw new Error("No local file is available for this artifact.");
     } catch (reason) {
       setOpenError("Unable to open original: " + String(reason));
@@ -293,7 +299,9 @@ export function VisualReviewInspector(props: Props) {
                   <option value={390}>390px</option>
                 </select>}
                 <button type="button" className="button secondary"
-                  onClick={() => void openOriginal(active)} title="Open the original in its default application">
+                  onClick={() => void openOriginal(active)}
+                  onContextMenu={(event) => showCopyMenu(event, originalAddress(active))}
+                  title="Open the original in its default application · right-click to copy link">
                   ↗ Open original</button>
               </div>
               {compareMode === "single" ? imageStage :
@@ -407,14 +415,17 @@ export function VisualReviewInspector(props: Props) {
             <details className="review-visual-references">
               <summary>References · {round.references.length + (round.previous ? 1 : 0)}</summary>
               {round.previous && <button className="inbox-resource-link" type="button"
-                onClick={() => void openOriginal(round.previous)}>Previous: {round.previous.label} ↗</button>}
+                onClick={() => void openOriginal(round.previous)}
+                onContextMenu={(event) => showCopyMenu(event, originalAddress(round.previous!))}>Previous: {round.previous.label} ↗</button>}
               {round.references.map((reference) => <button className="inbox-resource-link" type="button"
-                key={reference.id} onClick={() => void openOriginal(reference)}>{reference.label} ↗</button>)}
+                key={reference.id} onClick={() => void openOriginal(reference)}
+                onContextMenu={(event) => showCopyMenu(event, originalAddress(reference))}>{reference.label} ↗</button>)}
               {!round.previous && round.references.length === 0 && <p>No references supplied.</p>}
             </details>
           </div>
         </aside>}
       </div>
+      {copyMenu}
     </section>
   );
 }

@@ -3,6 +3,7 @@ import remarkGfm from "remark-gfm";
 import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import { openClaimedT3Session } from "./api";
 import type { Task } from "./types";
+import { useLinkCopyMenu } from "./LinkCopyMenu";
 
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const SESSION_LINK = new RegExp(`^(?:t3(?:-browser)?:|session:)(?:\\/\\/(?:session\\/)?)?(${UUID})\\/?$`, "i");
@@ -68,6 +69,13 @@ async function openResource(link: string, task: Task) {
   }
 }
 
+/** Clipboard gets the actual destination, not an attachment-relative Markdown fragment. */
+function copyableAddress(link: string, task: Task): string {
+  const value = decodeLink(link);
+  return /^(?:https?:\/\/|wartribes-tour:\/\/|t3(?:-browser)?:|session:)/i.test(value)
+    ? value : localInboxPath(value, task.path);
+}
+
 type Props = {
   task: Task;
   text: string;
@@ -77,6 +85,7 @@ type Props = {
 
 /** Linked Markdown and detected loose file/session references in human Inbox text. */
 export function InboxRichText({ task, text, className = "", onError }: Props) {
+  const { showCopyMenu, copyMenu } = useLinkCopyMenu(onError);
   const launch = (href: string) => {
     void openResource(href, task).catch((error) =>
       onError(`Could not open "${href}": ${String(error)}`));
@@ -86,19 +95,23 @@ export function InboxRichText({ task, text, className = "", onError }: Props) {
   return <div className={`markdown-content inbox-rich-text ${className}`}>
     <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={(url) => url} components={{
       a: ({ href, children }) => href && isResourceLink(decodeLink(href))
-        ? <button className="inbox-resource-link" type="button" title={decodeLink(href)}
-            onClick={() => launch(href)}>{children} ↗</button>
+        ? <button className="inbox-resource-link" type="button" title={decodeLink(href) + "\nRight-click to copy link"}
+            onClick={() => launch(href)}
+            onContextMenu={(event) => showCopyMenu(event, copyableAddress(href, task))}>{children} ↗</button>
         : <span>{children}</span>,
       img: ({ src, alt }) => src && isResourceLink(decodeLink(src))
-        ? <button className="inbox-resource-link" type="button" title={decodeLink(src)}
-            onClick={() => launch(src)}>▧ {alt || src.split(/[\\/]/).pop() || "Image"} ↗</button>
+        ? <button className="inbox-resource-link" type="button" title={decodeLink(src) + "\nRight-click to copy link"}
+            onClick={() => launch(src)}
+            onContextMenu={(event) => showCopyMenu(event, copyableAddress(src, task))}>▧ {alt || src.split(/[\\/]/).pop() || "Image"} ↗</button>
         : <span>{alt || "Image"}</span>,
     }}>{text}</ReactMarkdown>
     {looseLinks.length > 0 && <div className="inbox-resource-list" aria-label="Referenced resources">
       {looseLinks.map(link => <button className="inbox-resource-chip" type="button" key={link}
-        title={link} onClick={() => launch(link)}>
+        title={link + "\nRight-click to copy link"} onClick={() => launch(link)}
+        onContextMenu={(event) => showCopyMenu(event, copyableAddress(link, task))}>
         {sessionId(link) ? "◉ T3 session" : /\.html?(?:[?#]|$)/i.test(link) ? "▣ Presentation" : "▧ File"} · {link.replace(/\\/g, "/").split("/").pop()} ↗
       </button>)}
     </div>}
+    {copyMenu}
   </div>;
 }
