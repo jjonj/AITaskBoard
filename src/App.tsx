@@ -299,6 +299,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const hideWaitingKey = storageKey("hideDependencyWaitingTasks");
   const [snapshot, setSnapshot] = useState<BoardSnapshot | null>(null);
   const [query, setQuery] = useState("");
+  const [searchResultsOpen, setSearchResultsOpen] = useState(false);
   const [taskFilters, setTaskFilters] = useState<TaskFilterSelection>({
     icons: [], noIcon: false, columns: [], readiness: [], kinds: [], attention: [],
   });
@@ -642,6 +643,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     }
   });
   const boardRef = useRef<HTMLElement | null>(null);
+  const searchWrapRef = useRef<HTMLDivElement | null>(null);
   const filterControlRef = useRef<HTMLDivElement | null>(null);
   const moreMenuRef = useRef<HTMLDivElement | null>(null);
   const panRef = useRef({ active: false, startX: 0, scrollLeft: 0 });
@@ -3086,6 +3088,17 @@ Details: ${queueRecoveryWarning}`;
   }, [moreMenuOpen]);
 
   useEffect(() => {
+    if (!searchResultsOpen) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !searchWrapRef.current?.contains(event.target)) {
+        setSearchResultsOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    return () => document.removeEventListener("pointerdown", closeOutside);
+  }, [searchResultsOpen]);
+
+  useEffect(() => {
     if (!filterPanelOpen) return;
     const closeOutside = (event: PointerEvent) => {
       if (event.target instanceof Node && !filterControlRef.current?.contains(event.target)) {
@@ -3179,11 +3192,12 @@ Details: ${queueRecoveryWarning}`;
             ? capacityTelemetry.working : "?"}/{capacityTelemetry?.limit ?? "?"} agents
         </span>
         <div className="toolbar">
-          <div className="search-wrap">
+          <div className="search-wrap" ref={searchWrapRef}>
             <span>⌕</span>
             <input
               value={query}
-              onChange={(event) => setQuery(event.currentTarget.value)}
+              onFocus={() => setSearchResultsOpen(true)}
+              onChange={(event) => { setQuery(event.currentTarget.value); setSearchResultsOpen(true); }}
               placeholder="Search tasks"
               aria-label="Search tasks"
               title="Focus search (Ctrl+K)"
@@ -3191,7 +3205,7 @@ Details: ${queueRecoveryWarning}`;
             />
             {query && <button type="button" className="search-clear" aria-label="Clear task search"
               title="Clear filter (Esc)" onClick={() => setQuery("")}>×</button>}
-            {query.trim().length >= 3 && (visibleTasks.length > 0 || remoteSearchMatches.length > 0) &&
+            {searchResultsOpen && query.trim().length >= 3 && (visibleTasks.length > 0 || remoteSearchMatches.length > 0) &&
               <div className="search-results" role="group" aria-label="Search results">
                 {visibleTasks.slice(0, 5).map((task) => <button type="button" key={task.id}
                   onClick={() => { setQuery(""); openEdit(task); }}>
