@@ -564,8 +564,45 @@ fn validate_agent_block_reason(reason: Option<&str>) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Inbox prompts render Markdown; unlike http(s), plain custom-protocol URLs
+/// are not auto-linked. Reject them before a task or review is modified.
+fn validate_inbox_links(question: &str) -> Result<(), CliError> {
+    let bytes = question.as_bytes();
+    for (separator, _) in question.match_indices("://") {
+        let mut start = separator;
+        while start > 0 && (bytes[start - 1].is_ascii_alphanumeric()
+            || matches!(bytes[start - 1], b'+' | b'-' | b'.')) {
+            start -= 1;
+        }
+        if start == separator || !bytes[start].is_ascii_alphabetic() { continue; }
+        let scheme = &question[start..separator];
+        if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") { continue; }
+        let end = question[separator + 3..].find(|ch: char|
+            ch.is_whitespace() || matches!(ch, ')' | ']' | '>' | '<' | '"' | '\'' | '`'))
+            .map_or(question.len(), |offset| separator + 3 + offset);
+        let url = question[start..end].trim_end_matches([',', ';', '.', '!']);
+        // A real Markdown link needs a label, ]( before the URI, and ) after it.
+        // Backtick-wrapped examples are not clickable even if the syntax is present.
+        let before = &question[..start];
+        let linked = before.strip_suffix("](").and_then(|prefix| {
+            prefix.rfind('[').filter(|&open| !prefix[open + 1..].trim().is_empty())
+        }).is_some() && question[end..].starts_with(')')
+            && before.bytes().filter(|&byte| byte == b'`').count() % 2 == 0;
+        if !linked {
+            let label = if scheme.eq_ignore_ascii_case("wartribes-tour") {
+                "Watch in-game"
+            } else { "Open link" };
+            return Err(CliError::new("unclickable_inbox_link", format!(
+                "Plain custom-protocol URL `{url}` will NOT be clickable in TaskBoard Inbox. Use a Markdown link: [{label}]({url}). Do not wrap the link in backticks. The request was rejected without saving."
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Inbox questions must be short enough to understand and act on at a glance.
 fn validate_inbox_question(question: &str) -> Result<(), CliError> {
+    validate_inbox_links(question)?;
     let count = question.trim().chars().count();
     if count > 300 {
         return Err(CliError::new("question_too_long", format!(
@@ -1935,6 +1972,35 @@ mod tests {
 
 
 
+
+    #[test]
+    fn inbox_rejects_plain_custom_protocol_links_before_finishing() {
+        let bare = "Please run wartribes-tour://combat_stage1_visual and review the poses.";
+        let error = validate_inbox_question(bare).unwrap_err();
+        assert_eq!(error.code, "unclickable_inbox_link");
+        assert!(error.message.contains("[Watch in-game](wartribes-tour://combat_stage1_visual)"));
+        assert!(validate_inbox_question("Please run [Watch in-game](wartribes-tour://combat_stage1_visual) and review the poses.").is_ok());
+        assert_eq!(validate_inbox_question("`wartribes-tour://combat_stage1_visual`").unwrap_err().code,
+                   "unclickable_inbox_link");
+        assert_eq!(validate_inbox_question("[Working](wartribes-tour://ok) and wartribes-tour://broken")
+                   .unwrap_err().code, "unclickable_inbox_link");
+        assert_eq!(validate_inbox_question("Open taskboard://review/WT-0071")
+                   .unwrap_err().code, "unclickable_inbox_link");
+        assert!(validate_inbox_question("See https://example.com and [Open link](taskboard://review/WT-0071)").is_ok());
+
+        let root = temp_board("unclickable-tour");
+        let store = FsTaskStore::default();
+        store.ensure_board(&root, "Test").unwrap();
+        let task = store.create(&root, draft("Review poses")).unwrap();
+        let failure = run_task(&store, &root, &TaskCommand::Finish(TaskFinishArgs {
+            target: task.id.clone(), verification: "user".into(), instructions: Some(bare.into()),
+        })).unwrap_err();
+        assert_eq!(failure.code, "unclickable_inbox_link");
+        let unchanged = store.load(&root).unwrap().tasks.into_iter().find(|t| t.id == task.id).unwrap();
+        assert_eq!(unchanged.column, task.column);
+        assert!(unchanged.question.is_none());
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn for_user_only_cards_are_not_ai_claimable_or_completable() {
