@@ -327,8 +327,13 @@ impl FsTaskStore {
     }
 
     pub(crate) fn load_unlocked(&self, root: &Path) -> Result<BoardSnapshot, TaskStoreError> {
-        self.ensure_board(root, "TaskBoard")?;
-        let board_text = fs::read_to_string(root.join(BOARD_FILE))?;
+        // Only explicit project creation may initialize a board. A stale tab or
+        // CLI read of a removed path must not resurrect a generic TaskBoard.
+        let board_path = root.join(BOARD_FILE);
+        if !board_path.is_file() {
+            return Err(TaskStoreError::NotFound(board_path.display().to_string()));
+        }
+        let board_text = fs::read_to_string(board_path)?;
         let mut config = parse_board(&board_text)?;
         config.revision = revision(&board_text);
         validate_config(&config)?;
@@ -3207,4 +3212,17 @@ pub(crate) fn write_text_atomic(path: &Path, text: &str) -> Result<(), TaskStore
 fn is_replace_not_supported(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::PermissionDenied
         || matches!(error.raw_os_error(), Some(5 | 32 | 33))
+}
+
+#[cfg(test)]
+mod missing_board_tests {
+    use super::*;
+
+    #[test]
+    fn loading_missing_board_does_not_recreate_placeholder() {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path().join("Omnish").join("Tasks");
+        assert!(FsTaskStore::default().load(&root).is_err());
+        assert!(!root.exists(), "reading a stale board must not recreate its directory");
+    }
 }

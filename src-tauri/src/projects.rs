@@ -89,6 +89,12 @@ fn discover_boards(mut catalog: ProjectCatalog, vault: &Path) -> Result<ProjectC
         // A board may be midway through an external save. Retry next refresh.
         let Ok(board) = serde_yaml::from_str::<BoardName>(&yaml) else { continue; };
         if board.name.trim().is_empty() { continue; }
+        // CLI-created placeholder boards use this generic name. Never promote
+        // them into tabs unless the user explicitly registered the project.
+        if board.name.trim().eq_ignore_ascii_case("TaskBoard")
+            && !catalog.projects.iter().any(|project| same_path(&project.path, &path)) {
+            continue;
+        }
         if let Some(project) = catalog.projects.iter_mut().find(|project| same_path(&project.path, &path)) {
             project.name = board.name;
         } else {
@@ -458,6 +464,9 @@ mod tests {
         let metadata = root.join("_board.md");
         let initial = default_catalog();
         assert_eq!(discover_boards(initial.clone(), &vault).unwrap().projects.len(), 1);
+        fs::write(&metadata, "---\nname: TaskBoard\n---\n").unwrap();
+        assert_eq!(discover_boards(initial.clone(), &vault).unwrap().projects.len(), 1,
+            "generic placeholder boards must not be discovered");
         fs::write(&metadata, "---\nschema: 1\nname: Citizen\n---\n").unwrap();
         let first = discover_boards(initial, &vault).unwrap();
         assert_eq!(first.active_id, "wartribes");
