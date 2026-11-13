@@ -42,9 +42,7 @@ export function TaskImageGallery({ description, boardPath, pending, onRemovePend
     return () => { cancelled = true; };
   }, [boardPath, pathKey]);
 
-  if (!paths.length && !pending.length) {
-    return <p className="task-images-hint">Paste an image anywhere in this task editor (Ctrl+V) to attach it.</p>;
-  }
+  if (!paths.length && !pending.length) return null;
 
   return (
     <section className="task-image-gallery" aria-label="Task images">

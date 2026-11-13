@@ -4547,7 +4547,7 @@ Details: ${queueRecoveryWarning}`;
               <div className="attention-editor">
                 <span>Attention</span>
                 <div className="attention-editor-buttons">
-                  {(["question", "blocked", "priority", "prepare"] as TaskAttention[]).map((flag) => (
+                  {(["question", "blocked", "prepare", "priority"] as TaskAttention[]).map((flag) => (
                     (flag !== "prepare" || editor.mode === "create" || editor.draft.attention.includes("prepare")) && (
                     <button
                       type="button"
@@ -4555,9 +4555,13 @@ Details: ${queueRecoveryWarning}`;
                       className={`attention-toggle ${flag} ${
                         editor.draft.attention.includes(flag) ? "active" : ""
                       }`}
-                      disabled={flag === "prepare" && editor.mode === "create" && (!!prepRequestId || !reservedTaskId)}
-                      title={flag === "prepare" ? "Immediately open a research-only T3 agent. The saved task stays in Draft until clarified." : undefined}
+                      disabled={flag === "prepare" && editor.mode === "create"
+                        && !editor.draft.attention.includes("prepare") && !prepRequestId && !reservedTaskId}
+                      title={flag === "prepare"
+                        ? "Starts preparation immediately when first enabled. Unchecking removes the flag but does not cancel a session already started."
+                        : undefined}
                       onClick={() => flag === "prepare" && editor.mode === "create"
+                        && !editor.draft.attention.includes("prepare") && !prepRequestId
                         ? enableTaskPreparation() : toggleAttentionDraft(flag)}
                     >
                       {flag === "question" ? "? Question" : flag === "blocked" ? "× Blocked"
