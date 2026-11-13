@@ -91,6 +91,15 @@ export function appendDescriptionUpdates(
   return formatDescriptionTimeline(parsed.initial, updates);
 }
 
+// Locked descriptions cannot gain image links in their original brief.
+export function attachImagesToDescription(description: string, links: string[], locked: boolean): string {
+  if (!links.length) return description;
+  const images = links.join("\n\n");
+  if (locked) return appendDescriptionUpdates(description, [{ kind: "user-note", text: images }]);
+  const initial = parseDescriptionTimeline(description).initial;
+  return updateInitialDescription(description, [initial, images].filter(Boolean).join("\n\n"));
+}
+
 // Legacy NeedsUser remains readable but For user is the sole new human-only
 // status. Existing notes are safely moved into the task's Description history.
 export function prepareTaskDraftForSave(draft: TaskDraft, pendingUpdate: string, claimedBy?: string | null): TaskDraft {

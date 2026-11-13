@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   appendDescriptionUpdates,
+  attachImagesToDescription,
   parseDescriptionTimeline,
   prepareTaskDraftForSave,
   updateInitialDescription,
@@ -101,4 +102,20 @@ test("epic description updates are persisted without affecting epic coordination
   const saved = prepareTaskDraftForSave(draft, "Milestone updated", null);
   assert.equal(saved.user_notes, draft.user_notes);
   assert.deepEqual(parseDescriptionTimeline(saved.description).updates.map((entry) => entry.text), ["Milestone updated"]);
+});
+
+test("image pasted into a locked task becomes Note to AI without modifying the original brief", () => {
+  const image = "![Pasted image](../Attachments/MISC-0134/" + "a".repeat(64) + ".png)";
+  const before = appendDescriptionUpdates("Original brief", [{ kind: "update", text: "Agent progress" }], time);
+  const saved = attachImagesToDescription(before, [image], true);
+  const parsed = parseDescriptionTimeline(saved);
+  assert.equal(parsed.initial, "Original brief");
+  assert.deepEqual(parsed.updates.map(({ kind }) => kind), ["update", "user-note"]);
+  assert.equal(parsed.updates[1].text, image);
+  assert.equal(attachImagesToDescription(before, [], true), before);
+});
+
+test("image pasted into a task without an agent interaction can join the editable brief", () => {
+  const saved = attachImagesToDescription("Original brief", ["![image](example.png)"], false);
+  assert.equal(parseDescriptionTimeline(saved).initial, "Original brief\n\n![image](example.png)");
 });

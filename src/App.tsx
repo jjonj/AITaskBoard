@@ -13,7 +13,7 @@ import { MarkdownText, MarkdownPreviewToggle } from "./MarkdownText";
 import { TaskImageGallery, type PendingClipboardImage } from "./TaskImageGallery";
 import { ReviewView } from "./ReviewView";
 import { isUserQueueEligible } from "./userQueueEligibility";
-import { parseDescriptionTimeline, prepareTaskDraftForSave, updateInitialDescription } from "./descriptionTimeline";
+import { attachImagesToDescription, parseDescriptionTimeline, prepareTaskDraftForSave, updateInitialDescription } from "./descriptionTimeline";
 import { applyCardPlacements, orderCardsByDependencies } from "./dependencyLayout";
 import { withEpicProxyRows } from "./epicProxyRows";
 import { eligibleForAgeArchive } from "./archiveAge";
@@ -1803,11 +1803,12 @@ Details: ${queueRecoveryWarning}`;
       const savedPath = await saveTaskImage(id, encoded, image.mime, boardPath);
       links.push(`![Pasted image](../${savedPath})`);
     }
-    const initial = parseDescriptionTimeline(draft.description).initial;
+    const locked = editor?.original?.id === id && editor?.original?.agent_interacted === true;
     return {
       ...draft,
-      description: updateInitialDescription(draft.description,
-        [initial, ...links].filter(Boolean).join("\n\n")),
+      description: attachImagesToDescription(draft.description, links, locked),
+      attention: locked && !draft.attention.includes("user-note")
+        ? [...draft.attention, "user-note"] : draft.attention,
     };
   };
 
@@ -1985,7 +1986,7 @@ Details: ${queueRecoveryWarning}`;
         related_to: [...editor.draft.related_to],
         parent: editor.draft.kind === "epic" ? null : editor.draft.parent,
         icon: editor.draft.kind === "epic" ? null : editor.draft.icon,
-        attention: editor.draft.kind === "epic" ? [] : [...editor.draft.attention],
+        attention: editor.draft.kind === "epic" ? [] : [...prepared.attention],
         question: editor.draft.kind === "epic" ? null : prepared.question,
         acceptance_criteria: editor.draft.kind === "epic" ? [] : prepared.acceptance_criteria,
       };
