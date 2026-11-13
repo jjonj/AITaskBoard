@@ -37,6 +37,7 @@ fn run_node(script: &str, args: &[String], input: Option<&Value>) -> Result<Valu
 #[tauri::command]
 pub async fn start_task_preparation(
     path: String, id: String, request_id: String, title: String, description: String,
+    prepfile: bool,
 ) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         Uuid::parse_str(&request_id).map_err(|_| "Invalid preparation request ID")?;
@@ -63,6 +64,21 @@ pub async fn start_task_preparation(
              Do not overwrite human description/notes or invent answers. \
              Never mark the task Done: your role ends at implementation readiness."
         );
+        // The same T3 preparation session handles research, a skill-authored prepfile
+        // and the existing durable TaskBoard notes/queue release. No second agent is
+        // spawned here; TaskBoard dispatches implementation after preparation.
+        let prompt = if prepfile {
+            let output = format!(r"E:\_AgentScratch\Unassigned\Prepfile\Deliverables\prepfile-{request_id}.md");
+            format!("{prompt}\n\nPREPFILE WORKFLOW (user opted in at task creation):\n\
+                The task has already been saved. Wait for the idempotent TASK SAVED notification, then read and follow\n\
+                C:\\Users\\crovea\\.agents\\skills\\extra-skill-finder\\on-request\\prepfile\\SKILL.md.\n\
+                Depth: heavy. Use the skill's bundled build_context.py writer with --output set to exactly {output}.\n\
+                Prepare source-labelled evidence and requirements for the saved task {id}, including current task description\n\
+                and any attached images. Do not implement. Record the prepfile path, findings and user's answered design\n\
+                decisions in that task's AI Notes before releasing the TaskBoard Draft to its intended column.\n\
+                The TaskBoard queue will choose the implementation worker; do not spawn a separate implementer yourself.\n\
+                Do not create a duplicate TaskBoard task.")
+        } else { prompt };
         // The initial prompt may contain user notes: keep it out of process arguments.
         let scratch = Path::new(r"E:\_AgentScratch\Tasks\Misc\MISC-0137\Temporary");
         fs::create_dir_all(scratch).map_err(|e| format!("Cannot prepare T3 brief: {e}"))?;

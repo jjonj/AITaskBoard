@@ -452,6 +452,10 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   };
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [prepRequestId, setPrepRequestId] = useState<string | null>(null);
+  // Default OFF on first use, then retain the user's creation preference.
+  const [usePrepfileWorkflow, setUsePrepfileWorkflow] = useState(
+    () => localStorage.getItem("taskboard:new-task-prepfile:v1") === "true",
+  );
   const [prepStatus, setPrepStatus] = useState("");
   const [prepSessionId, setPrepSessionId] = useState<string | null>(null);
   const prepLaunchRef = useRef<Promise<unknown> | null>(null);
@@ -1975,8 +1979,11 @@ Details: ${queueRecoveryWarning}`;
       const savedPrepRequest = editor.mode === "edit" && editor.original?.column === "draft" &&
         editor.original.attention.includes("prepare")
         ? editor.original.notes.match(/taskboard:preparation-request:([a-f0-9-]{36})/)?.[1] ?? null : null;
-      const preparing = editor.draft.attention.includes("prepare")
-        ? editor.mode === "create" ? prepRequestId : savedPrepRequest : null;
+      const prepfileAfterSave = editor.mode === "create" && usePrepfileWorkflow &&
+        editor.draft.kind !== "epic" && !prepRequestId;
+      const preparing = prepfileAfterSave ? crypto.randomUUID() :
+        editor.draft.attention.includes("prepare")
+          ? editor.mode === "create" ? prepRequestId : savedPrepRequest : null;
       const priorTarget = editor.original?.notes.match(/taskboard:preparation-target:([^\s>]+)/)?.[1];
       const preparationTarget = prepared.column === "draft" ? priorTarget ?? defaultCreateColumn() ?? "draft" : prepared.column;
       let draft = { ...prepared,
@@ -1986,7 +1993,9 @@ Details: ${queueRecoveryWarning}`;
         related_to: [...editor.draft.related_to],
         parent: editor.draft.kind === "epic" ? null : editor.draft.parent,
         icon: editor.draft.kind === "epic" ? null : editor.draft.icon,
-        attention: editor.draft.kind === "epic" ? [] : [...prepared.attention],
+        attention: editor.draft.kind === "epic" ? [] :
+          prepfileAfterSave && !prepared.attention.includes("prepare")
+            ? [...prepared.attention, "prepare" as TaskAttention] : [...prepared.attention],
         question: editor.draft.kind === "epic" ? null : prepared.question,
         acceptance_criteria: editor.draft.kind === "epic" ? [] : prepared.acceptance_criteria,
       };
@@ -2025,6 +2034,14 @@ Details: ${queueRecoveryWarning}`;
         after = snapshotWithTask(before, saved);
         flashTaskActivity([{ id: saved.id, kind: "created" }]);
         undoAction = "create task";
+        if (preparing && prepfileAfterSave) {
+          // Spawn only once the task is durably saved. The existing preparation
+          // receipt and idempotent saved-task notice protect against retries.
+          prepLaunchRef.current = startTaskPreparation(
+            boardPath, saved.id, preparing, saved.title,
+            [saved.description, saved.user_notes].filter(Boolean).join("\n\n"), true,
+          );
+        }
         if (preparing) linkPreparationAfterSave(saved.id, boardPath, preparing);
       } else if (editor.original) {
         const saved = await updateWithDiskMerge(editor.original, { ...editor.original, ...draft });
@@ -2200,7 +2217,7 @@ Details: ${queueRecoveryWarning}`;
     setEditor({ ...editor, draft: { ...editor.draft,
       attention: [...editor.draft.attention, "prepare"] } });
     const launch = startTaskPreparation(boardPath, reservedTaskId.id, requestId,
-      editor.draft.title, [editor.draft.description, editor.draft.user_notes].filter(Boolean).join("\n\n"));
+      editor.draft.title, [editor.draft.description, editor.draft.user_notes].filter(Boolean).join("\n\n"), usePrepfileWorkflow);
     prepLaunchRef.current = launch;
     void launch.then((receipt) => {
       if (receipt.sessionId) setPrepSessionId(receipt.sessionId);
@@ -4579,6 +4596,17 @@ Details: ${queueRecoveryWarning}`;
                   ))}
                 </div>
               </div>
+              {editor.mode === "create" && (
+                <label className="preparation-launch-note" style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <input type="checkbox" checked={usePrepfileWorkflow} disabled={!!prepRequestId}
+                    onChange={(event) => {
+                      const selected = event.currentTarget.checked;
+                      setUsePrepfileWorkflow(selected);
+                      localStorage.setItem("taskboard:new-task-prepfile:v1", String(selected));
+                    }} />
+                  Use prepfile workflow on Save (research first; TaskBoard queues implementation when ready)
+                </label>
+              )}
               {editor.mode === "create" && prepRequestId && <div className="preparation-launch-note" role="status">
                 <span>{prepStatus} Save creates the task in Draft; the preparation agent releases it for implementation after clarification.</span>
                 {prepSessionId && <button type="button" onClick={() => void openClaimedT3Session(prepSessionId)
