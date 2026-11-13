@@ -9,6 +9,10 @@ use crate::WARTRIBES_BOARD;
 
 const OBSIDIAN_PROJECTS: &str = r"B:\GDrive\SharedWithPhone\Obsidian\jjj";
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectPriority { High, #[default] Normal, Low }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
@@ -19,6 +23,9 @@ pub struct Project {
     // Markdown always lives in `path`; never scan these directories for tasks.
     #[serde(default)]
     pub folders: Vec<String>,
+    // TaskBoard and T3 share the same local catalog to rank new work.
+    #[serde(default)]
+    pub priority: ProjectPriority,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +48,7 @@ fn default_catalog() -> ProjectCatalog {
             name: "Wartribes".into(),
             path: WARTRIBES_BOARD.into(),
             folders: Vec::new(),
+            priority: ProjectPriority::Normal,
         }],
     }
 }
@@ -101,7 +109,7 @@ fn discover_boards(mut catalog: ProjectCatalog, vault: &Path) -> Result<ProjectC
             let identity = normalized_path(&path);
             catalog.projects.push(Project {
                 id: format!("discovered:{identity}"), name: board.name,
-                path, folders: Vec::new(),
+                path, folders: Vec::new(), priority: ProjectPriority::Normal,
             });
         }
     }
@@ -211,6 +219,7 @@ pub fn add_project(name: String, folders: Vec<String>, task_prefix: String, epic
     catalog.projects.push(Project {
         id: id.clone(), name: name.trim().to_string(),
         path: root.to_string_lossy().to_string(), folders: normalized_folders,
+        priority: ProjectPriority::Normal,
     });
     catalog.hidden_paths.retain(|path| !same_path(path, &root.to_string_lossy()));
     catalog.active_id = id;
@@ -219,12 +228,13 @@ pub fn add_project(name: String, folders: Vec<String>, task_prefix: String, epic
 }
 
 #[tauri::command]
-pub fn set_project_folders(id: String, folders: Vec<String>) -> Result<ProjectCatalog, String> {
+pub fn set_project_folders(id: String, folders: Vec<String>, priority: ProjectPriority) -> Result<ProjectCatalog, String> {
     let normalized = normalize_folders(folders)?;
     let mut catalog = load()?;
     let project = catalog.projects.iter_mut().find(|p| p.id == id)
         .ok_or("Unknown project tab")?;
     project.folders = normalized;
+    project.priority = priority;
     save(&catalog)?;
     Ok(catalog)
 }
@@ -514,7 +524,8 @@ mod tests {
         assert_eq!(defaults.projects[0].path, WARTRIBES_BOARD);
         let mut two = defaults.clone();
         two.projects.push(Project { id: "other".into(), name: "Another board".into(),
-            path: r"D:\Projects\Another\Tasks".into(), folders: Vec::new() });
+            path: r"D:\Projects\Another\Tasks".into(), folders: Vec::new(),
+            priority: ProjectPriority::Normal });
         two.active_id = "other".into();
         save_at(&path, &two).expect("persist catalog");
         assert_eq!(load_at(&path).unwrap().active_id, "other");
@@ -538,6 +549,7 @@ mod tests {
         let loaded = load_at(&path).unwrap();
         assert!(loaded.projects[0].folders.is_empty());
         assert_eq!(loaded.projects[0].path, "B:/Old/Tasks");
+        assert_eq!(loaded.projects[0].priority, ProjectPriority::Normal);
         fs::remove_file(path).unwrap();
     }
 

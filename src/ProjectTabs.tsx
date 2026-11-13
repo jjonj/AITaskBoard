@@ -3,7 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { activateProject, addProject, boardChangeTokens, listProjects, loadBoard, moveTaskBetweenProjects, removeProject, reorderProjects, restoreProject, saveBoardConfig, setProjectFolders, showMainWindow, userQueueProjectIds } from "./api";
-import type { ProjectCatalog, ProjectTab } from "./api";
+import type { ProjectCatalog, ProjectPriority, ProjectTab } from "./api";
 import type { BoardConfig } from "./types";
 
 type Props = {
@@ -102,6 +102,7 @@ export function ProjectTabs({ Board }: Props) {
   const [name, setName] = useState("");
   const [nameEdited, setNameEdited] = useState(false);
   const [folders, setFolders] = useState<string[]>([""]);
+  const [priority, setPriority] = useState<ProjectPriority>("normal");
   const [taskPrefix, setTaskPrefix] = useState("WT");
   const [epicPrefix, setEpicPrefix] = useState("WTE");
   const [prefixEdited, setPrefixEdited] = useState(false);
@@ -443,6 +444,7 @@ export function ProjectTabs({ Board }: Props) {
     setEpicPrefix("PRJE");
     setPrefixEdited(false);
     setEditingBoardConfig(null);
+    setPriority("normal");
     setEditingId("");
     setError("");
     setDialogMode("create");
@@ -457,6 +459,7 @@ export function ProjectTabs({ Board }: Props) {
       // _board.md is the canonical prefix source for both CLI and desktop.
       const { config } = await loadBoard(project.path);
       setEditingBoardConfig(config);
+      setPriority(project.priority || "normal");
       setTaskPrefix(config.task_prefix || "WT");
       setEpicPrefix(config.epic_prefix || "WTE");
       setEditingId(project.id);
@@ -518,7 +521,7 @@ export function ProjectTabs({ Board }: Props) {
           if (!boardPath) throw new Error("Unknown project board");
           await saveBoardConfig({ ...editingBoardConfig, task_prefix: taskPrefix, epic_prefix: epicPrefix }, boardPath);
         }
-        updated = await setProjectFolders(editingId, selectedFolders);
+        updated = await setProjectFolders(editingId, selectedFolders, priority);
       }
       setCatalog(updated);
       setLocked(false);
@@ -632,7 +635,7 @@ export function ProjectTabs({ Board }: Props) {
             </button>
             <button type="button" className="project-tab-settings"
               aria-label={`Edit ${project.name} settings`}
-              title="Project folders and ID prefixes"
+              title="Project priority, folders and ID prefixes"
               disabled={working || locked || !!dialogMode}
               onClick={() => void startEditFolders(project)}>⚙</button>
 
@@ -669,6 +672,18 @@ export function ProjectTabs({ Board }: Props) {
             onMouseDown={(event) => event.stopPropagation()}>
             <h2 id="project-add-heading">{dialogMode === "create" ? "Add project" : `Project settings · ${name}`}</h2>
             <p>Associate one or more folders with this project. Your files stay where they are.</p>
+            {dialogMode === "folders" && (
+              <label>Automatic work priority
+                <select value={priority} disabled={working}
+                  onChange={(event) => setPriority(event.currentTarget.value as ProjectPriority)}
+                  style={{ padding: "10px 11px", border: "1px solid #496077", borderRadius: 7, background: "#101b28", color: "#f1f5fb", fontSize: 13 }}>
+                  <option value="high">High — prefer when choosing new work</option>
+                  <option value="normal">Normal — default</option>
+                  <option value="low">Low — pick after other priorities</option>
+                </select>
+                <span style={{ color: "#96a9bc", fontWeight: 400 }}>T3 Code uses this to pick queued tasks, while spreading parallel work across different projects.</span>
+              </label>
+            )}
             <div className="project-folder-entries">
               {folders.map((folder, index) => (
                 <label key={index}>Project folder {folders.length > 1 ? index + 1 : ""}
@@ -763,7 +778,7 @@ export function ProjectTabs({ Board }: Props) {
               <button type="button" className="button primary"
                 disabled={working || (dialogMode === "create" && !name.trim())}
                 onClick={() => void saveDialog()}>
-                {working ? "Saving…" : dialogMode === "create" ? "Add project" : "Save folders"}
+                {working ? "Saving…" : dialogMode === "create" ? "Add project" : "Save settings"}
               </button>
             </div>
           </section>
