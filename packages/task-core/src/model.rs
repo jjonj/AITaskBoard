@@ -53,6 +53,7 @@ pub enum TaskAttention {
     Blocked,
     Priority,
     Prepare,
+    Announce,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

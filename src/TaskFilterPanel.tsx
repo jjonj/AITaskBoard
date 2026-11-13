@@ -46,6 +46,7 @@ const attentionOptions: { value: TaskAttention; label: string }[] = [
   { value: "blocked", label: "Blocked flag" },
   { value: "priority", label: "Priority" },
   { value: "prepare", label: "Preparation" },
+  { value: "announce", label: "Announce" },
 ];
 
 export function TaskFilterPanel({ filters, columns, matchingCount, onChange, onClear, onClose }: Props) {

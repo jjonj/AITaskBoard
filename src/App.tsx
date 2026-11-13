@@ -3720,6 +3720,9 @@ Details: ${queueRecoveryWarning}`;
                             {task.attention.includes("prepare") && (
                               <span className="attention-icon prepare" title="Preparation requested — implementation waits until clarified" aria-label="Preparation">✦</span>
                             )}
+                            {task.attention.includes("announce") && (
+                              <span className="attention-icon announce" title="Announce column changes aloud" aria-label="Announce">♪</span>
+                            )}
                           </div>
                         )}
                         {task.claimed_by && (
@@ -4547,7 +4550,7 @@ Details: ${queueRecoveryWarning}`;
               <div className="attention-editor">
                 <span>Attention</span>
                 <div className="attention-editor-buttons">
-                  {(["question", "blocked", "prepare", "priority"] as TaskAttention[]).map((flag) => (
+                  {(["question", "blocked", "prepare", "announce", "priority"] as TaskAttention[]).map((flag) => (
                     (flag !== "prepare" || editor.mode === "create" || editor.draft.attention.includes("prepare")) && (
                     <button
                       type="button"
@@ -4565,7 +4568,7 @@ Details: ${queueRecoveryWarning}`;
                         ? enableTaskPreparation() : toggleAttentionDraft(flag)}
                     >
                       {flag === "question" ? "? Question" : flag === "blocked" ? "× Blocked"
-                        : flag === "priority" ? "! Priority" : "✦ Prepare"}
+                        : flag === "priority" ? "! Priority" : flag === "announce" ? "♪ Announce" : "✦ Prepare"}
                     </button>)
                   ))}
                 </div>

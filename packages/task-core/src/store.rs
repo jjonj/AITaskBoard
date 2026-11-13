@@ -3183,6 +3183,14 @@ fn write_new(path: &Path, text: &str) -> Result<(), TaskStoreError> {
 }
 
 pub(crate) fn write_text_atomic(path: &Path, text: &str) -> Result<(), TaskStoreError> {
+    // All TaskBoard writers (desktop, CLI, claims, queue and reviews) pass here.
+    // A move notification is based on the persisted before/after frontmatter,
+    // not on a UI drag or a requested column that might have been rejected.
+    let announcement = if path.extension().is_some_and(|ext| ext == "md") && text.contains("announce") {
+        fs::read_to_string(path).ok().and_then(|before| column_move_announcement(&before, text))
+    } else {
+        None
+    };
     let parent = path
         .parent()
         .ok_or_else(|| TaskStoreError::Invalid("target has no parent directory".into()))?;
@@ -3190,7 +3198,7 @@ pub(crate) fn write_text_atomic(path: &Path, text: &str) -> Result<(), TaskStore
     temp.write_all(text.as_bytes())?;
     temp.as_file().sync_all()?;
 
-    match temp.persist(path) {
+    let saved = match temp.persist(path) {
         Ok(_) => Ok(()),
         Err(error) if is_replace_not_supported(&error.error) => {
             // Some synced/mapped filesystems (notably the Google Drive Windows
@@ -3206,7 +3214,59 @@ pub(crate) fn write_text_atomic(path: &Path, text: &str) -> Result<(), TaskStore
             Ok(())
         }
         Err(error) => Err(TaskStoreError::Io(error.error)),
+    };
+    if saved.is_ok() {
+        if let Some(message) = announcement {
+            announce_column_move(&message);
+        }
     }
+    saved
+}
+
+/// Only the four frontmatter fields needed to identify a real announcement.
+#[derive(Deserialize)]
+struct AnnouncementTask {
+    id: String,
+    title: String,
+    column: String,
+    #[serde(default)] attention: Vec<TaskAttention>,
+}
+
+fn column_move_announcement(before: &str, after: &str) -> Option<String> {
+    let previous: AnnouncementTask = serde_yaml::from_str(&split_frontmatter(before).ok()?.0).ok()?;
+    let current: AnnouncementTask = serde_yaml::from_str(&split_frontmatter(after).ok()?.0).ok()?;
+    if previous.id != current.id || previous.column == current.column ||
+        !current.attention.contains(&TaskAttention::Announce) {
+        return None;
+    }
+    // AISpeak enforces a 20-word maximum. Cap only the descriptive suffix.
+    let column = current.column.replace('-', " ").replace('_', " ");
+    let introduction = format!("{} moved to {}.", current.id, column);
+    let remaining = 20usize.saturating_sub(introduction.split_whitespace().count());
+    let title = current.title.split_whitespace().take(remaining).collect::<Vec<_>>().join(" ");
+    Some(format!("{introduction} {title}").trim().to_owned())
+}
+
+fn announce_column_move(message: &str) {
+    // Speech is best-effort and never blocks or rolls back a successful move.
+    // The globally installed AISpeak wrapper detaches its own playback worker.
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let script = std::env::var_os("AISPEAK_PATH")
+            .unwrap_or_else(|| "B:\\GDrive\\Tools\\13AITools\\aispeak.py".into());
+        let result = std::process::Command::new("python")
+            .arg(script)
+            .arg("--silent")
+            .arg(message)
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .spawn();
+        if let Err(error) = result {
+            eprintln!("TaskBoard: could not launch aispeak.py: {error}");
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = message;
 }
 
 fn is_replace_not_supported(error: &std::io::Error) -> bool {
