@@ -1225,6 +1225,7 @@ body.card-dragging * {
 .attention-icon.needs-user{background:#203f59;color:#8fd1ff}
 .attention-icon.blocked{background:#4a2428;color:#ff9da5}
 .attention-icon.priority{background:#684e17;color:#ffe18d;border:1px solid #d3a849}
+.attention-icon.prepare{background:#1c3e3a;color:#93eee0;border:1px solid #2f8b7b}
 .attention-editor{flex:0 0 auto}
 .attention-editor>span{display:block;margin-bottom:4px;color:#a5adb7;font-size:11px;font-weight:650}
 .attention-editor-buttons{display:flex;gap:7px}
@@ -1233,6 +1234,9 @@ body.card-dragging * {
 .attention-toggle.needs-user.active{border-color:#315f80;background:#152838;color:#8fd1ff}
 .attention-toggle.blocked.active{border-color:#774047;background:#351d20;color:#ff9da5}
 .attention-toggle.priority.active{border-color:#ae852c;background:#392c13;color:#ffe18d}
+.attention-toggle.prepare.active{border-color:#3d9487;background:#16312d;color:#9ae9df}
+.preparation-launch-note{display:flex;align-items:center;gap:8px;margin:9px 0;padding:9px 11px;border:1px solid #2c655f;border-radius:7px;background:#102825;color:#9ed9d1;font-size:12px;flex-wrap:wrap}
+.preparation-launch-note button{border:1px solid #438c83;border-radius:5px;background:#1a4640;color:#c7fff5;padding:4px 8px;cursor:pointer}
 .question-editor,.question-panel,.answered-question{margin-bottom:10px;padding:10px 12px;border:1px solid #4d4330;border-radius:9px;background:#211d14}
 .question-panel-label{color:#d7ad50;font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}
 .question-panel h3{margin-top:5px;font-size:14px;line-height:1.4}

@@ -1736,9 +1736,10 @@ fn parse_attention_values(values: &[String]) -> Result<Vec<TaskAttention>, CliEr
             "user-note" | "usernote" | "user_note" => Ok(TaskAttention::UserNote),
             "blocked" => Ok(TaskAttention::Blocked),
             "priority" => Ok(TaskAttention::Priority),
+            "prepare" => Ok(TaskAttention::Prepare),
             other => Err(CliError::new(
                 "usage_error",
-                format!("unknown attention flag {other:?}; expected question, needs-user, user-note, blocked, or priority"),
+                format!("unknown attention flag {other:?}; expected question, needs-user, user-note, blocked, priority, or prepare"),
             )),
         }
     }).collect()

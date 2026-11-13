@@ -211,6 +211,12 @@ export const openClaimedT3Session = (claimedBy: string) =>
 export const openTaskSession = (id: string, path?: string, implement = false) =>
   invoke<Record<string, unknown>>("open_task_session", { path, id, implement });
 
+export type PreparationReceipt = { outcome: "delivered" | "created" | "unknown"; sessionId?: string | null };
+export const startTaskPreparation = (path: string, id: string, requestId: string, title: string, description: string) =>
+  invoke<PreparationReceipt>("start_task_preparation", { path, id, requestId, title, description });
+export const notifyTaskPreparationSaved = (path: string, id: string, requestId: string) =>
+  invoke<{ sessionId: string; delivery: Record<string, unknown> }>("notify_task_preparation_saved", { path, id, requestId });
+
 export const showMainWindow = () =>
   invoke<void>("show_main_window");
 

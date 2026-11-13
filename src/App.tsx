@@ -41,6 +41,9 @@ import {
   listProjects,
   openInObsidian,
   openTaskSession,
+  openClaimedT3Session,
+  startTaskPreparation,
+  notifyTaskPreparationSaved,
   taskLiveWithMe,
   restoreSnapshot,
   saveBoardConfig,
@@ -448,6 +451,13 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     return `Claimed: ${h.owner} · ${h.agentState} · task update ${age(h.taskActivityAt)} · T3 last working ${age(h.agentActivityAt)} · T3 observed ${age(h.verifiedAt)}`;
   };
   const [editor, setEditor] = useState<EditorState | null>(null);
+  const [prepRequestId, setPrepRequestId] = useState<string | null>(null);
+  const [prepStatus, setPrepStatus] = useState("");
+  const [prepSessionId, setPrepSessionId] = useState<string | null>(null);
+  const prepLaunchRef = useRef<Promise<unknown> | null>(null);
+  const prepNotified = useRef(new Set<string>());
+  const prepNoticeLastAttempt = useRef(new Map<string, number>());
+  const snapshotRef = useRef<BoardSnapshot | null>(null);
   // One throttled refresh per board: backend shares a 30s T3 inventory
   // between claim telemetry and durable notification reconciliation.
   useEffect(() => {
@@ -457,6 +467,27 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     let active = true;
     let inFlight = false;
     let lastStarted = 0;
+    const reconcileSavedPreparation = async () => {
+      const now = Date.now();
+      const candidate = snapshotRef.current?.tasks.find(task => {
+        if (task.archived || !task.attention.includes("prepare") ||
+            !task.notes.includes("taskboard:preparation-saved")) return false;
+        const requestId = task.notes.match(/taskboard:preparation-request:([a-f0-9-]{36})/)?.[1];
+        if (!requestId) return false;
+        const key = `${boardPath}#${task.id}#${requestId}`;
+        return !prepNotified.current.has(key) &&
+          now - (prepNoticeLastAttempt.current.get(key) ?? 0) >= 120_000;
+      });
+      if (!candidate) return;
+      const requestId = candidate.notes.match(/taskboard:preparation-request:([a-f0-9-]{36})/)?.[1];
+      if (!requestId) return;
+      const key = `${boardPath}#${candidate.id}#${requestId}`;
+      prepNoticeLastAttempt.current.set(key, now);
+      try {
+        await notifyTaskPreparationSaved(boardPath, candidate.id, requestId);
+        prepNotified.current.add(key);
+      } catch { /* T3 may be temporarily unavailable; retry only the saved notification. */ }
+    };
     const refresh = () => {
       if (inFlight || Date.now() - lastStarted < 30_000) return;
       lastStarted = Date.now();
@@ -468,6 +499,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
         .then(() => taskClaimHealth(boardPath))
         .then(data => { if (active) setClaimHealth(data); })
         .catch(() => { if (active) setClaimHealth({}); })
+        .then(() => reconcileSavedPreparation())
         .finally(() => { inFlight = false; });
     };
     refresh();
@@ -654,7 +686,6 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const lastUserInputAtRef = useRef(Date.now());
   const pointerIsDownRef = useRef(false);
   const refreshFeedbackTimerRef = useRef<number | null>(null);
-  const snapshotRef = useRef<BoardSnapshot | null>(null);
   const activityTimersRef = useRef(new Map<string, number>());
   const [taskActivity, setTaskActivity] = useState<Record<string, TaskActivityKind>>({});
   const [recentTaskActivity, setRecentTaskActivity] = useState<Record<string, RecentTaskActivity>>(() => loadRecentTaskActivity(recentKey));
@@ -1364,22 +1395,48 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     }, 90);
   };
 
+  const preparationNotes = (notes: string, requestId: string, target: string, saved = true) => [
+    notes.replace(/\s*<!-- taskboard:preparation-(?:request|target|saved)(?::[^>]*)?-->/g, "").trim(),
+    `<!-- taskboard:preparation-request:${requestId} -->`,
+    `<!-- taskboard:preparation-target:${target} -->`,
+    ...(saved ? ["<!-- taskboard:preparation-saved -->"] : []),
+  ].filter(Boolean).join("\n\n");
+
+  // T3 owns delivery and reconciliation; never repeat an uncertain agent spawn.
+  const linkPreparationAfterSave = (id: string, path: string, requestId: string) => {
+    prepNoticeLastAttempt.current.set(`${path}#${id}#${requestId}`, Date.now());
+    const launch = prepLaunchRef.current;
+    void (async () => {
+      try {
+        await launch?.catch(() => undefined);
+        await notifyTaskPreparationSaved(path, id, requestId);
+        prepNotified.current.add(`${path}#${id}#${requestId}`);
+      } catch (error) {
+        setError(`${id} saved in Draft, but the preparation session could not be notified: ${errorText(error)}. Reconcile the existing T3 session; do not launch a second agent.`);
+      }
+    })();
+  };
+
   const closeEditor = (board = snapshot, persisted = false) => {
     // A dismissed creation with meaningful contents becomes a short-lived
     // human draft, rather than vanishing without a Save click.
     if (!persisted && editor?.mode === "create" && !autosavingDraft.current &&
         (editor.draft.title.trim() || editor.draft.description.trim() ||
          editor.draft.user_notes.trim() || editor.draft.notes.trim() ||
-         editor.draft.acceptance_criteria.some((item) => item.trim()))) {
+         editor.draft.acceptance_criteria.some((item) => item.trim()) ||
+         editor.draft.attention.includes("prepare"))) {
       if (!reservedTaskId) { setError("Cannot save draft yet: task ID reservation is not ready."); return; }
       autosavingDraft.current = true;
       setBusy(true);
       const stamp = new Date().toISOString();
+      const preparing = editor.draft.attention.includes("prepare") && prepRequestId;
       const draft = {
         ...editor.draft,
         title: editor.draft.title.trim() || "Untitled draft",
         column: "draft",
-        notes: [editor.draft.notes, `<!-- taskboard:auto-draft:${stamp} -->`].filter(Boolean).join("\n"),
+        notes: [preparing
+          ? preparationNotes(editor.draft.notes, preparing, editor.draft.column, false)
+          : editor.draft.notes, `<!-- taskboard:auto-draft:${stamp} -->`].filter(Boolean).join("\n"),
         reserved_id: reservedTaskId.id,
         reservation_token: reservedTaskId.token,
       };
@@ -1389,6 +1446,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
         flashTaskActivity([{ id: saved.id, kind: "created" }]);
         closeEditor(latest, true);
         setAutoSavedDraft({ id: saved.id, title: saved.title });
+        // Closing is only an autosave, not permission to release the preparation task.
       }).catch((error) => setError(`Could not auto-save draft: ${errorText(error)}`))
         .finally(() => { autosavingDraft.current = false; setBusy(false); });
       return;
@@ -1420,6 +1478,10 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   }, [editor?.original?.id]);
 
   const openEdit = (task: Task, fromQueue = false) => {
+    setPrepRequestId(null);
+    setPrepStatus("");
+    setPrepSessionId(null);
+    prepLaunchRef.current = null;
     setNotifyAgentOverride(null);
     setQueueExpanded(false);
     imageDialogGeneration.current += 1;
@@ -1492,6 +1554,10 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     parent: string | null = null,
     category: string | null = null,
   ) => {
+    setPrepRequestId(null);
+    setPrepStatus("");
+    setPrepSessionId(null);
+    prepLaunchRef.current = null;
     imageDialogGeneration.current += 1;
     setPendingClipboardImages([]);
     const target = column ?? defaultCreateColumn();
@@ -1905,8 +1971,16 @@ Details: ${queueRecoveryWarning}`;
 
       const before = snapshot;
       const prepared = prepareTaskDraftForSave(editor.draft, "", editor.original?.claimed_by);
+      const savedPrepRequest = editor.mode === "edit" && editor.original?.column === "draft" &&
+        editor.original.attention.includes("prepare")
+        ? editor.original.notes.match(/taskboard:preparation-request:([a-f0-9-]{36})/)?.[1] ?? null : null;
+      const preparing = editor.draft.attention.includes("prepare")
+        ? editor.mode === "create" ? prepRequestId : savedPrepRequest : null;
+      const priorTarget = editor.original?.notes.match(/taskboard:preparation-target:([^\s>]+)/)?.[1];
+      const preparationTarget = prepared.column === "draft" ? priorTarget ?? defaultCreateColumn() ?? "draft" : prepared.column;
       let draft = { ...prepared,
-        column: markDone && editor.mode === "edit" && doneColumn ? doneColumn.id : prepared.column,
+        column: preparing ? "draft" : markDone && editor.mode === "edit" && doneColumn ? doneColumn.id : prepared.column,
+        notes: preparing ? preparationNotes(prepared.notes, preparing, preparationTarget) : prepared.notes,
         depends_on: editor.draft.kind === "epic" ? [] : [...editor.draft.depends_on],
         related_to: [...editor.draft.related_to],
         parent: editor.draft.kind === "epic" ? null : editor.draft.parent,
@@ -1950,6 +2024,7 @@ Details: ${queueRecoveryWarning}`;
         after = snapshotWithTask(before, saved);
         flashTaskActivity([{ id: saved.id, kind: "created" }]);
         undoAction = "create task";
+        if (preparing) linkPreparationAfterSave(saved.id, boardPath, preparing);
       } else if (editor.original) {
         const saved = await updateWithDiskMerge(editor.original, { ...editor.original, ...draft });
         savedTask = saved;
@@ -1970,11 +2045,12 @@ Details: ${queueRecoveryWarning}`;
         const kind = classifyTaskChange(editor.original, saved);
         if (kind) flashTaskActivity([{ id: saved.id, kind }]);
         undoAction = "edit task";
+        if (preparing) linkPreparationAfterSave(saved.id, boardPath, preparing);
       }
 
       // Persist execution intent only after the task exists. Each write is revision-checked;
       // a pending Start now ID is never retried or replaced after an uncertain result.
-      if (savedTask && !markDone && (savedTask.kind === "task" || savedTask.kind === "recurring")) {
+      if (savedTask && !markDone && !preparing && (savedTask.kind === "task" || savedTask.kind === "recurring")) {
         if (withMeSelected !== (savedTask.live?.with_me === true)) {
           savedTask = await taskLiveWithMe(savedTask.id, savedTask.revision, withMeSelected, boardPath);
         }
@@ -1991,7 +2067,7 @@ Details: ${queueRecoveryWarning}`;
       }
       if (savedTask) showLinkedReviewOutcome(before, after, savedTask.id);
       if (undoAction) pushUndo({ kind: "board", label: undoAction, before, after });
-      const syncWarning = savedTask && !startAfterSave ? await syncQueueWarning(savedTask.id) : null;
+      const syncWarning = savedTask && !startAfterSave && !preparing ? await syncQueueWarning(savedTask.id) : null;
       // The sync CAS may add a receipt, changing the revision: reload before
       // delivering the local board view, rather than leaving a stale edit draft.
       if (savedTask) after = await loadBoard(boardPath);
@@ -2094,6 +2170,7 @@ Details: ${queueRecoveryWarning}`;
 
   const chooseDraftKind = (kind: TaskDraft["kind"]) => {
     if (!editor) return;
+    if (prepRequestId) { setError("Preparation has started for this task ID. Save or close this draft before changing the task type."); return; }
     setEditor({
       ...editor,
       draft: {
@@ -2110,6 +2187,27 @@ Details: ${queueRecoveryWarning}`;
         attention: kind === "epic" ? [] : editor.draft.attention.filter((flag) => flag !== "needs-user"),
         question: kind === "epic" ? null : editor.draft.question,
       },
+    });
+  };
+
+  const enableTaskPreparation = () => {
+    if (!editor || editor.mode !== "create" || prepRequestId) return;
+    if (!reservedTaskId) { setError("Task ID is being reserved; try Preparation again."); return; }
+    const requestId = crypto.randomUUID();
+    setPrepRequestId(requestId);
+    setPrepStatus("Opening preparation agent in T3…");
+    setEditor({ ...editor, draft: { ...editor.draft,
+      attention: [...editor.draft.attention, "prepare"] } });
+    const launch = startTaskPreparation(boardPath, reservedTaskId.id, requestId,
+      editor.draft.title, [editor.draft.description, editor.draft.user_notes].filter(Boolean).join("\n\n"));
+    prepLaunchRef.current = launch;
+    void launch.then((receipt) => {
+      if (receipt.sessionId) setPrepSessionId(receipt.sessionId);
+      setPrepStatus(receipt.outcome === "delivered" ? "Preparation agent started — discuss requirements in its T3 chat."
+        : receipt.outcome === "created" ? "Preparation session created; initial prompt delivery is pending."
+        : "Preparation outcome uncertain. Reconcile its original session; do not spawn another.");
+    }).catch((error) => {
+      setPrepStatus(`Preparation launch not confirmed: ${errorText(error)}. Do not retry until the existing request is reconciled.`);
     });
   };
 
@@ -3631,6 +3729,9 @@ Details: ${queueRecoveryWarning}`;
                             {task.attention.includes("priority") && (
                               <span className="attention-icon priority" title="Priority — handle before ordinary ready tasks" aria-label="Priority">!</span>
                             )}
+                            {task.attention.includes("prepare") && (
+                              <span className="attention-icon prepare" title="Preparation requested — implementation waits until clarified" aria-label="Preparation">✦</span>
+                            )}
                           </div>
                         )}
                         {task.claimed_by && (
@@ -4458,20 +4559,30 @@ Details: ${queueRecoveryWarning}`;
               <div className="attention-editor">
                 <span>Attention</span>
                 <div className="attention-editor-buttons">
-                  {(["question", "blocked", "priority"] as TaskAttention[]).map((flag) => (
+                  {(["question", "blocked", "priority", "prepare"] as TaskAttention[]).map((flag) => (
+                    (flag !== "prepare" || editor.mode === "create" || editor.draft.attention.includes("prepare")) && (
                     <button
                       type="button"
                       key={flag}
                       className={`attention-toggle ${flag} ${
                         editor.draft.attention.includes(flag) ? "active" : ""
                       }`}
-                      onClick={() => toggleAttentionDraft(flag)}
+                      disabled={flag === "prepare" && editor.mode === "create" && (!!prepRequestId || !reservedTaskId)}
+                      title={flag === "prepare" ? "Immediately open a research-only T3 agent. The saved task stays in Draft until clarified." : undefined}
+                      onClick={() => flag === "prepare" && editor.mode === "create"
+                        ? enableTaskPreparation() : toggleAttentionDraft(flag)}
                     >
-                      {flag === "question" ? "? Question" : flag === "blocked" ? "× Blocked" : "! Priority"}
-                    </button>
+                      {flag === "question" ? "? Question" : flag === "blocked" ? "× Blocked"
+                        : flag === "priority" ? "! Priority" : "✦ Prepare"}
+                    </button>)
                   ))}
                 </div>
               </div>
+              {editor.mode === "create" && prepRequestId && <div className="preparation-launch-note" role="status">
+                <span>{prepStatus} Save creates the task in Draft; the preparation agent releases it for implementation after clarification.</span>
+                {prepSessionId && <button type="button" onClick={() => void openClaimedT3Session(prepSessionId)
+                  .catch((error) => setError(`Cannot open preparation chat: ${errorText(error)}`))}>Open preparation chat</button>}
+              </div>}
             </div>}
 
             {editor.draft.kind !== "epic" && editor.draft.attention.includes("question") &&

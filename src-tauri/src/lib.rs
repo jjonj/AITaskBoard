@@ -5,6 +5,7 @@ mod claim_health;
 mod agent_notices;
 mod stale_blockers;
 mod agent_policy;
+mod preparation;
 mod orphan_recovery;
 mod queue_bridge;
 mod error_log;
@@ -775,6 +776,8 @@ pub fn run() {
             task_open_origin_session,
             task_handoff_bundle,
             open_task_session,
+            preparation::start_task_preparation,
+            preparation::notify_task_preparation_saved,
             show_main_window
         ])
         .run(tauri::generate_context!())
