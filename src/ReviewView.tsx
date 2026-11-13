@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type MouseEvent } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { archiveTask, listProjects, loadBoard, openTaskSession, readLocalImage, saveTaskImage, taskSyncQueue, updateTask, type ProjectTab } from "./api";
 import { reviewAsset, reviewReconsider, reviewResolve, reviewShow,
   type ReviewArtifact, type ReviewManifest, type ReviewPin } from "./reviewApi";
@@ -25,6 +26,54 @@ type Props = {
   onSnoozeUserTask?: (task: Task, path: string, until: number) => void;
 };
 const keyOf = (item: QueueItem) => `${item.path}|${item.task.id}`;
+
+/** Review HTML is displayed with an opaque iframe origin; relative image URLs
+ * therefore need to be resolved via the existing bounded review_asset command.
+ * The bridge also asks the desktop host to open links that sandbox navigation
+ * cannot launch (notably wartribes-tour://). */
+const HTML_REVIEW_BRIDGE = `
+(() => {
+  const loaded = new Map(), pending = new Set();
+  const relative = ref => ref && !/^(?:[a-z][a-z0-9+.-]*:|\\/|#)/i.test(ref);
+  function resolveImages() {
+    for (const img of document.querySelectorAll('img[src]')) {
+      const ref = img.getAttribute('src');
+      if (!relative(ref)) continue;
+      if (loaded.has(ref)) { img.src = loaded.get(ref); continue; }
+      if (!pending.has(ref)) {
+        pending.add(ref);
+        parent.postMessage({ type: 'taskboard-review-asset-request', ref }, '*');
+      }
+    }
+  }
+  new MutationObserver(resolveImages).observe(document.documentElement,
+    { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
+  addEventListener('DOMContentLoaded', resolveImages);
+  addEventListener('message', event => {
+    if (event.source !== parent || event.data?.type !== 'taskboard-review-asset-response') return;
+    const { ref, dataUrl } = event.data;
+    if (typeof ref !== 'string' || typeof dataUrl !== 'string' ||
+        !dataUrl.startsWith('data:image/')) return;
+    loaded.set(ref, dataUrl);
+    pending.delete(ref);
+    resolveImages();
+  });
+  addEventListener('click', event => {
+    const anchor = event.target instanceof Element && event.target.closest('a[href]');
+    const href = anchor?.getAttribute('href') || '';
+    if (!/^(?:https?:\\/\\/|wartribes-tour:\\/\\/)/i.test(href)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    parent.postMessage({ type: 'taskboard-review-open-url', url: href }, '*');
+  }, true);
+})();
+`;
+
+function htmlIndexPath(path: string) {
+  const normalized = path.replace(/\\/g, "/");
+  return /\.html?$/i.test(normalized)
+    ? normalized : normalized.replace(/\/$/, "") + "/index.html";
+}
 const REVIEW_SNOOZES_KEY = "taskboard.inboxSnoozes";
 const loadReviewSnoozes = (): Record<string, number> => {
   try {
@@ -56,6 +105,9 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   const [showPoster, setShowPoster] = useState(false);
   const scrollOffset = useRef({ x: 0, y: 0 });
   const embedFrameRef = useRef<HTMLIFrameElement>(null);
+  const htmlFrameRef = useRef<HTMLIFrameElement>(null);
+  const htmlAssetFolderRef = useRef("");
+  const htmlAssetBoardRef = useRef("");
   const embedTimeRef = useRef<number | null>(null);
   const [embedPlayback, setEmbedPlayback] = useState<{ duration: number; playing: boolean; t: number } | null>(null);
   const [choice, setChoice] = useState("");
@@ -338,8 +390,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
     // Parse inert HTML, replace local relative assets with data URIs, then load
     // the resulting document ONLY inside a sandboxed opaque-origin iframe.
     const compile = async (artifact: ReviewArtifact): Promise<[string, string]> => {
-      const absolute = artifact.path.split(String.fromCharCode(92)).join("/");
-      const index = /\.html?$/i.test(absolute) ? absolute : (absolute.endsWith("/") ? absolute.slice(0, -1) : absolute) + "/index.html";
+      const index = htmlIndexPath(artifact.path);
       const source = await reviewAsset(index, reviewTask.path);
       const raw = source.split(",")[1] ?? "";
       const html = new TextDecoder().decode(Uint8Array.from(atob(raw), (ch) => ch.charCodeAt(0)));
@@ -365,8 +416,8 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
         }
       }
       const bridge = doc.createElement("script");
-      bridge.textContent = 'addEventListener("scroll",function(){parent.postMessage({type:"taskboard-review-scroll",x:scrollX,y:scrollY},"*")},true);';
-      doc.body.appendChild(bridge);
+      bridge.textContent = HTML_REVIEW_BRIDGE + '\naddEventListener("scroll",function(){parent.postMessage({type:"taskboard-review-scroll",x:scrollX,y:scrollY},"*")},true);';
+      doc.head.prepend(bridge);
       return [artifact.path, "<!doctype html>\n" + doc.documentElement.outerHTML];
     };
     void Promise.all(round.artifacts.filter((artifact) => artifact.kind === "html")
@@ -379,6 +430,32 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
 
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
+      if (event.source === htmlFrameRef.current?.contentWindow) {
+        if (event.data?.type === "taskboard-review-open-url") {
+          const url = event.data.url;
+          if (typeof url === "string" && /^(?:https?:\/\/|wartribes-tour:\/\/)/i.test(url)) {
+            void ("__TAURI_INTERNALS__" in window ? openUrl(url)
+              : Promise.resolve(window.open(url, "_blank", "noopener,noreferrer")))
+              .catch((cause) => setError("Could not open review link: " + String(cause)));
+          }
+          return;
+        }
+        if (event.data?.type === "taskboard-review-asset-request") {
+          const ref = event.data.ref;
+          const base = htmlAssetFolderRef.current;
+          const file = typeof ref === "string" ? ref.split(/[?#]/)[0] : "";
+          // The native review_asset command remains the authority for allowed paths.
+          if (!base || !file || file.length > 512 || /^(?:[a-z][a-z0-9+.-]*:|\/)/i.test(file) ||
+              !/\.(?:png|jpe?g|webp|gif|svg|ico)$/i.test(file)) return;
+          const frame = htmlFrameRef.current.contentWindow;
+          const board = htmlAssetBoardRef.current;
+          void reviewAsset(base + "/" + file, board).then((dataUrl) => {
+            if (htmlFrameRef.current?.contentWindow === frame && htmlAssetFolderRef.current === base)
+              frame?.postMessage({ type: "taskboard-review-asset-response", ref, dataUrl }, "*");
+          }).catch(() => { /* A missing media file stays visibly broken in the preview. */ });
+          return;
+        }
+      }
       if (event.data?.type === "taskboard-review-scroll") {
         const x = Number(event.data.x), y = Number(event.data.y);
         if (Number.isFinite(x) && Number.isFinite(y))
@@ -404,6 +481,9 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
 
   const playable = round?.artifacts ?? [];
   const activeArtifact = playable[mediaIndex] ?? playable[0];
+  const htmlFile = activeArtifact?.kind === "html" ? htmlIndexPath(activeArtifact.path) : "";
+  htmlAssetFolderRef.current = htmlFile.slice(0, htmlFile.lastIndexOf("/"));
+  htmlAssetBoardRef.current = reviewTask?.path ?? "";
   useEffect(() => {
     embedTimeRef.current = null;
     setEmbedPlayback(null);
@@ -776,7 +856,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       const posterSrc = artifact.poster ? assets[artifact.poster] : "";
       const html = htmlDocuments[artifact.path];
       const iframe = artifact.kind === "html"
-        ? (html ? <iframe title={artifact.label} srcDoc={html}
+        ? (html ? <iframe ref={htmlFrameRef} title={artifact.label} srcDoc={html}
             style={{ width: iframeWidth || "100%", maxWidth: "none" }}
             sandbox="allow-scripts allow-forms" referrerPolicy="no-referrer" />
           : null)
