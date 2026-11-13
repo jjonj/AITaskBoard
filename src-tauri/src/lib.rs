@@ -533,12 +533,8 @@ fn open_task_session_blocking(path: Option<String>, id: String, implement: Optio
         return Err("Only executable tasks can start a session".into());
     }
     let claimant = task.claimed_by.as_deref().unwrap_or("");
-    let raw_claimant = claimant.strip_prefix("t3-browser:").unwrap_or(claimant);
-    let is_browser = raw_claimant.len() == 36 && raw_claimant.chars().enumerate().all(|(i, c)|
-        if [8, 13, 18, 23].contains(&i) { c == '-' } else { c.is_ascii_hexdigit() });
-    if is_browser {
-        return open_claimed_t3_session(claimant.to_string());
-    }
+    // Every task-bound open, including a legacy browser claim, must use the
+    // same T3 deduplication, live-state transition, and exact-session focus.
     let script = r"D:\SSDProjects\Tools\t3code\scripts\chatgpt-sessions.mjs";
     if !std::path::Path::new(script).is_file() {
         return Err("T3 open-task CLI is unavailable".into());

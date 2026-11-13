@@ -1630,7 +1630,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     task.kind !== "epic" && task.kind !== "for_user" && !task.completed &&
     !snapshot?.config.columns.some((column) => column.id === task.column && column.terminal);
   const openForTask = (task: Task) => void run(async () => {
-    await openTaskSession(task.id, boardPath, !hasTaskSession(task));
+    await openTaskSession(task.id, boardPath, !hasTaskSession(task) && !task.live?.with_me);
     const after = await loadBoard(boardPath);
     applySnapshot(after);
   });
@@ -3828,8 +3828,8 @@ Details: ${queueRecoveryWarning}`;
             <button disabled={busy || (!hasTaskSession(contextTask) && !canSpawnTask(contextTask))} onClick={() => {
               setContextMenu(null);
               openForTask(contextTask);
-            }} title={hasTaskSession(contextTask) ? "Open the linked T3 session" : "Spawn a T3 implementation worker for this task"}>
-              {hasTaskSession(contextTask) ? "Open Session" : "Spawn"}
+            }} title={hasTaskSession(contextTask) ? "Open the linked T3 session" : contextTask.live?.with_me ? "Start a conversation with me" : "Spawn a T3 implementation worker for this task"}>
+              {hasTaskSession(contextTask) ? "Open Session" : contextTask.live?.with_me ? "Start session with me" : "Spawn"}
             </button>
           )}
           {contextTask.kind !== "epic" && <button type="button"
