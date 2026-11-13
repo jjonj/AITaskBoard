@@ -566,8 +566,15 @@ fn open_task_session_blocking(path: Option<String>, id: String, implement: Optio
     }
     let output = process.wait_with_output().map_err(|e| e.to_string())?;
     if !output.status.success() {
-        return Err(format!("T3 open-task not confirmed; do not retry until reconciled: {}",
-            String::from_utf8_lossy(&output.stderr).trim()));
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        eprintln!("TaskBoard T3 open-task failed for {id}: {}", diagnostic.trim());
+        if diagnostic.contains("error[invalid_board_task_data]") {
+            if diagnostic.contains("unknown variant") {
+                return Err("TaskBoard saved the task, but T3's task launcher does not recognize a task flag. The launcher needs an update to match TaskBoard. Check T3 Sessions before starting the task again.".into());
+            }
+            return Err("T3 cannot read this board because some task data is invalid. The task was saved. Check the affected board data and T3 Sessions before retrying.".into());
+        }
+        return Err("T3 did not confirm whether the task session started. Check T3 Sessions for an existing session before trying again.".into());
     }
     let receipt: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|e| format!("T3 open-task receipt ambiguous; reconcile before retry: {e}"))?;

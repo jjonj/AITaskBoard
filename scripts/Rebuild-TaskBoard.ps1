@@ -29,10 +29,13 @@ try {
     # A plain 'npm run build' creates only the frontend, not a new desktop EXE.
     & $tauri build --no-bundle
     if ($LASTEXITCODE -ne 0) { throw "Tauri production build failed (exit $LASTEXITCODE)" }
-    # OMCPT launches the standalone CLI from packages/task-cli/target/debug.
-    # Keep it in lockstep with the task-core schema used by the desktop app.
-    & cargo build --quiet --manifest-path (Join-Path $repo 'packages\task-cli\Cargo.toml')
-    if ($LASTEXITCODE -ne 0) { throw "TaskBoard CLI schema sync failed (exit $LASTEXITCODE)" }
+    # OMCPT uses debug CLI and T3 open-task uses release CLI. Both must read
+    # the same task-core schema as the desktop app (including new attention flags).
+    $cliManifest = Join-Path $repo 'packages\task-cli\Cargo.toml'
+    & cargo build --quiet --manifest-path $cliManifest
+    if ($LASTEXITCODE -ne 0) { throw "TaskBoard debug CLI schema sync failed (exit $LASTEXITCODE)" }
+    & cargo build --quiet --release --manifest-path $cliManifest
+    if ($LASTEXITCODE -ne 0) { throw "TaskBoard release CLI schema sync failed (exit $LASTEXITCODE)" }
     & (Join-Path $PSScriptRoot 'Ensure-TaskBoardExecutable.ps1')
     if ($LASTEXITCODE -ne 0) { throw "Failed to synchronize TaskBoard launcher" }
     if (-not $NoStart) {
