@@ -95,6 +95,7 @@ export function VisualReviewInspector(props: Props) {
   const [openError, setOpenError] = useState("");
   const { showCopyMenu, copyMenu } = useLinkCopyMenu(setOpenError);
   const [moreOpen, setMoreOpen] = useState(false);
+  const [galleryCount, setGalleryCount] = useState(0);
   const stripRef = useRef<HTMLDivElement>(null);
   const active = playable[Math.min(activeIndex, playable.length - 1)];
   const dashboardMode = isDashboard(active, review.path);
@@ -300,8 +301,13 @@ export function VisualReviewInspector(props: Props) {
         <main className="review-visual-center">
           <div className="review-visual-toolbar">
             {dashboardMode ? <div className="review-visual-web-summary">
-              <strong>Published Dashboard evidence gallery</strong>
-              <p>{active?.label} · Originals and captions below, without unrelated Dashboard navigation.</p>
+              <div className="dashboard-gallery-heading">
+                <strong>Published Dashboard evidence gallery</strong>
+                <span aria-live="polite" className="dashboard-gallery-count">
+                  {galleryCount ? `${galleryCount} capture${galleryCount === 1 ? "" : "s"}` : "Loading…"}
+                </span>
+              </div>
+              <p>Original Wartribes captures · browse horizontally, then select one for closer inspection.</p>
             </div> : <>
               <span className="review-visual-counter">{activeIndex + 1} / {playable.length}</span>
               <strong title={active?.label}>{active?.label || "Review media"}</strong>
@@ -330,7 +336,7 @@ export function VisualReviewInspector(props: Props) {
             </details>
           )}
           <div id={dashboardMode ? "dashboard-review-evidence" : undefined} className={"review-visual-viewer" + (dashboardMode ? " dashboard-capture-viewer" : "")}>
-            {dashboardMode ? <DashboardEvidenceItem address={active!.path} /> : active && <>
+            {dashboardMode ? <DashboardEvidenceItem address={active!.path} onGalleryCountChange={setGalleryCount} /> : active && <>
               <div className="review-visual-viewer-actions">
                 <button type="button" className={"button " + (pinning ? "primary" : "secondary")}
                   aria-pressed={pinning} disabled={resolved}

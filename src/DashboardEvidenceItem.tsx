@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openFileInFomni } from "./InboxRichText";
 
@@ -43,17 +43,22 @@ function DashboardMedia({ item }: { item: DashboardItem }) {
     <img src={item.mediaDataUrl} alt={item.title + (item.caption ? " — " + item.caption : "")} />;
 }
 
-/** Native gallery of exact published Wartribes Dashboard captures. Generic
- * web/HTML reviews continue through the separate ordinary iframe renderer. */
-export function DashboardEvidenceItem({ address }: { address: string }) {
+type Props = { address: string; onGalleryCountChange?: (count: number) => void };
+
+/** Original published Wartribes media in a non-shrinking, scroll-snap gallery.
+ * Other boards and ordinary HTML/URL reviews use the generic web renderer. */
+export function DashboardEvidenceItem({ address, onGalleryCountChange }: Props) {
   const [items, setItems] = useState<DashboardItem[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
+  const [railActive, setRailActive] = useState(0);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const railRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setItems([]);
     setSelected(null);
+    setRailActive(0);
     setError("");
     let selection: ReturnType<typeof selectionFromUrl>;
     try {
@@ -73,9 +78,44 @@ export function DashboardEvidenceItem({ address }: { address: string }) {
     return () => { cancelled = true; };
   }, [address]);
 
+  useEffect(() => {
+    onGalleryCountChange?.(items.length);
+  }, [items.length, onGalleryCountChange]);
+
   const openSource = (item: DashboardItem) => {
     if (!item.mediaPath) return;
     void openFileInFomni(item.mediaPath).catch(reason => setError(String(reason)));
+  };
+
+  const scrollToCard = (index: number) => {
+    const rail = railRef.current;
+    const cards = rail?.querySelectorAll<HTMLElement>(".dashboard-evidence-card");
+    if (!rail || !cards?.length) return;
+    const bounded = Math.max(0, Math.min(index, cards.length - 1));
+    const firstLeft = cards[0].offsetLeft;
+    rail.scrollTo({ left: cards[bounded].offsetLeft - firstLeft, behavior: "smooth" });
+    setRailActive(bounded);
+  };
+  const syncRailPosition = () => {
+    const rail = railRef.current;
+    const cards = rail?.querySelectorAll<HTMLElement>(".dashboard-evidence-card");
+    if (!rail || !cards?.length) return;
+    const firstLeft = cards[0].offsetLeft;
+    let nearest = 0;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+    cards.forEach((card, index) => {
+      const distance = Math.abs(card.offsetLeft - firstLeft - rail.scrollLeft);
+      if (distance < nearestDistance) { nearest = index; nearestDistance = distance; }
+    });
+    setRailActive(nearest);
+  };
+  const railKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget) return;
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      event.stopPropagation();
+      scrollToCard(railActive + (event.key === "ArrowLeft" ? -1 : 1));
+    }
   };
 
   if (loading) return <div className="dashboard-evidence-message">Loading published Dashboard captures…</div>;
@@ -86,35 +126,46 @@ export function DashboardEvidenceItem({ address }: { address: string }) {
   const chosen = selected === null ? null : items[selected] ?? null;
   return <section className="dashboard-evidence-item"
     aria-label={"Wartribes Dashboard review gallery for " + items[0].task}>
-    <header className="dashboard-evidence-head">
+
+    {chosen ? <header className="dashboard-evidence-head dashboard-evidence-detail-head">
       <div className="dashboard-evidence-heading">
-        <small>{items[0].task} · Published Dashboard evidence</small>
-        <h2>{chosen ? chosen.title : items.length + (items.length === 1 ? " capture" : " captures")}</h2>
-        {chosen && chosen.caption && <p>{chosen.caption}</p>}
-        {!chosen && <p>Original published captures and captions. Select any image to inspect it larger.</p>}
+        <small>{chosen.task} · Published capture {selected! + 1} of {items.length}</small>
+        <h2>{chosen.title}</h2>
+        {chosen.caption && <p>{chosen.caption}</p>}
       </div>
       <div className="dashboard-evidence-meta">
-        <span>{chosen ? (selected! + 1) + " of " + items.length : "Gallery · " + items.length + " items"}</span>
-        {chosen?.capturedAt && <span>Captured <strong>{displayDate(chosen.capturedAt)}</strong></span>}
+        {chosen.capturedAt && <span>Captured <strong>{displayDate(chosen.capturedAt)}</strong></span>}
         <div className="dashboard-evidence-actions">
-          {chosen && <>
-            <button type="button" className="button secondary" onClick={() => setSelected(null)}>All captures</button>
-            <button type="button" className="button secondary"
-              aria-label="Previous capture" disabled={selected === 0}
-              onClick={() => setSelected(Math.max(0, selected! - 1))}>←</button>
-            <button type="button" className="button secondary"
-              aria-label="Next capture" disabled={selected === items.length - 1}
-              onClick={() => setSelected(Math.min(items.length - 1, selected! + 1))}>→</button>
-            {chosen.mediaPath && <button type="button" className="button secondary"
-              onClick={() => openSource(chosen)}>Open in Fomni ↗</button>}
-          </>}
+          <button type="button" className="button secondary"
+            onClick={() => setSelected(null)}>← All captures</button>
+          <button type="button" className="button secondary"
+            aria-label="Previous capture" disabled={selected === 0}
+            onClick={() => setSelected(Math.max(0, selected! - 1))}>‹</button>
+          <button type="button" className="button secondary"
+            aria-label="Next capture" disabled={selected === items.length - 1}
+            onClick={() => setSelected(Math.min(items.length - 1, selected! + 1))}>›</button>
+          {chosen.mediaPath && <button type="button" className="button secondary"
+            onClick={() => openSource(chosen)}>Open in Fomni ↗</button>}
         </div>
       </div>
-    </header>
+    </header> : <div className="dashboard-evidence-rail-header">
+      <span><strong>{items[0].task}</strong> · Original captures · Scroll sideways to compare</span>
+      <div className="dashboard-evidence-rail-actions">
+        <span aria-live="polite">{railActive + 1} / {items.length}</span>
+        <button type="button" className="button secondary"
+          aria-label="Scroll to previous capture" disabled={railActive === 0}
+          onClick={() => scrollToCard(railActive - 1)}>‹</button>
+        <button type="button" className="button secondary"
+          aria-label="Scroll to next capture" disabled={railActive >= items.length - 1}
+          onClick={() => scrollToCard(railActive + 1)}>›</button>
+      </div>
+    </div>}
 
     {chosen ? <div className="dashboard-evidence-media dashboard-evidence-selected">
       <DashboardMedia item={chosen} />
-    </div> : <div className="dashboard-evidence-gallery" aria-label="Dashboard captures">
+    </div> : <div ref={railRef} className="dashboard-evidence-gallery"
+      tabIndex={0} role="region" aria-label="Scrollable Wartribes Dashboard evidence"
+      onScroll={syncRailPosition} onKeyDown={railKeyDown}>
       {items.map((item, index) => <article className="dashboard-evidence-card" key={item.id}>
         {isVideo(item) ? <div className="dashboard-evidence-card-media">
           <DashboardMedia item={item} />
@@ -124,11 +175,15 @@ export function DashboardEvidenceItem({ address }: { address: string }) {
           <DashboardMedia item={item} />
         </button>}
         <div className="dashboard-evidence-card-info">
-          <span className="dashboard-evidence-date">Captured {displayDate(item.capturedAt)}</span>
-          <h3>{item.title}</h3>
-          {item.caption && <p>{item.caption}</p>}
+          <div className="dashboard-evidence-card-heading">
+            <span className="dashboard-evidence-index">{String(index + 1).padStart(2, "0")}</span>
+            <span className="dashboard-evidence-date">{displayDate(item.capturedAt)}</span>
+          </div>
+          <h3 title={item.title}>{item.title}</h3>
+          {item.caption && <p title={item.caption}>{item.caption}</p>}
           <div className="dashboard-evidence-card-actions">
-            <button type="button" className="button secondary" onClick={() => setSelected(index)}>Inspect larger</button>
+            <button type="button" className="button secondary"
+              onClick={() => setSelected(index)}>Inspect larger</button>
             {item.mediaPath && <button type="button" className="button secondary"
               onClick={() => openSource(item)}>Open original ↗</button>}
           </div>
