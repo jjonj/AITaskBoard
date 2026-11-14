@@ -442,6 +442,62 @@ fn open_file_in_fomni(file: String) -> Result<(), String> {
         .map_err(|error| format!("failed to launch Fomni: {error}"))
 }
 
+/// Read one exact, published Wartribes Dashboard capture for native Inbox review.
+/// Keep TaskBoard independent of the on-demand Dashboard web service; the saved
+/// publisher manifest and content-addressed media are its authoritative evidence.
+#[tauri::command]
+async fn dashboard_review_item(id: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if id.is_empty() || id.len() > 150 ||
+            !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_') {
+            return Err("invalid Dashboard capture id".to_string());
+        }
+        let dir = PathBuf::from(r"D:\Wartribes\Saved\DevelopmentDashboard");
+        let raw = fs::read(dir.join("index.json")).map_err(|e|
+            format!("Dashboard evidence manifest is unavailable: {e}"))?;
+        let manifest: serde_json::Value = serde_json::from_slice(&raw)
+            .map_err(|e| format!("Dashboard evidence manifest is invalid: {e}"))?;
+        let mut item = manifest.get("items").and_then(|items| items.as_array())
+            .and_then(|items| items.iter().find(|item|
+                item.get("id").and_then(|id_value| id_value.as_str()) == Some(id.as_str())))
+            .cloned().ok_or_else(|| format!("No published Dashboard capture has id {id}"))?;
+        if item.get("hidden").and_then(|hidden| hidden.as_bool()) == Some(true) {
+            return Err("This Dashboard capture is hidden".to_string());
+        }
+        let file = item.get("filename").and_then(|value| value.as_str())
+            .ok_or_else(|| "Dashboard capture has no media file".to_string())?;
+        let (hash, ext) = file.rsplit_once('.')
+            .ok_or_else(|| "Invalid Dashboard media file".to_string())?;
+        if hash.len() != 64 || !hash.bytes().all(|c| c.is_ascii_hexdigit()) {
+            return Err("Dashboard media filename is not content-addressed".into());
+        }
+        let mime = match ext {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "webp" => "image/webp",
+            "gif" => "image/gif",
+            "mp4" => "video/mp4",
+            "webm" => "video/webm",
+            _ => return Err("Unsupported Dashboard media format".into()),
+        };
+        let file_path = dir.join("media").join(file);
+        item["mediaPath"] = serde_json::Value::String(file_path.to_string_lossy().into_owned());
+        let size = fs::metadata(&file_path).map_err(|e|
+            format!("Dashboard capture media is unavailable: {e}"))?.len();
+        // Video can be larger than an IPC payload. Keep the exact metadata and
+        // show an explicit fallback, rather than sending an unsafe huge payload.
+        if size > 24 * 1024 * 1024 {
+            item["mediaUnavailable"] = serde_json::Value::String(
+                "Capture is too large for inline playback; open the original.".into());
+            return Ok(item);
+        }
+        let bytes = fs::read(file_path).map_err(|e| format!("Cannot read Dashboard capture: {e}"))?;
+        item["mediaDataUrl"] = serde_json::Value::String(format!(
+            "data:{mime};base64,{}", BASE64.encode(bytes)));
+        Ok(item)
+    }).await.map_err(|error| format!("Dashboard load was interrupted: {error}"))?
+}
+
 fn percent_encode_query(value: &str) -> String {
     let mut out = String::new();
     for byte in value.as_bytes() {
@@ -795,6 +851,7 @@ pub fn run() {
             verify_release_member,
             highlight_in_fomni,
             open_file_in_fomni,
+            dashboard_review_item,
             open_in_obsidian,
             open_claimed_t3_session,
             task_open_origin_session,

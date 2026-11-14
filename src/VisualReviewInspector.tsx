@@ -5,6 +5,7 @@ import type { Task } from "./types";
 import { InboxResponseFooter, reviewOutcomes } from "./InboxResponseFooter";
 import { InboxRichText, openFileInFomni } from "./InboxRichText";
 import { InboxQueueSidebar } from "./InboxQueueSidebar";
+import { DashboardEvidenceItem } from "./DashboardEvidenceItem";
 import { useLinkCopyMenu } from "./LinkCopyMenu";
 
 type Item = { path: string; project: string; task: Task };
@@ -190,7 +191,7 @@ export function VisualReviewInspector(props: Props) {
   return (
     <section onPaste={onPaste} onDragOver={event => event.preventDefault()} onDrop={onDrop}
       className={"review-visual-inspector" + (focus ? " focus" : "") +
-      (feedbackExpanded ? "" : " feedback-hidden") + (isDashboard(active) ? " web-review" : "")}>
+      (feedbackExpanded ? "" : " feedback-hidden") + (isDashboard(active) ? " dashboard-review" : "")}>
       <header className="review-visual-header">
         <button type="button" className="button secondary" onClick={onBack}
           title="Return to previously selected Inbox item (Esc)">← Previous item</button>
@@ -234,7 +235,7 @@ export function VisualReviewInspector(props: Props) {
         </div>
       </header>
 
-      <div className={"review-visual-body" + (isDashboard(active) ? " web-review" : "")}>
+      <div className={"review-visual-body" + (isDashboard(active) ? " dashboard-review" : "")}>
         {!focus && <InboxQueueSidebar
           items={items}
           selectedKey={selectedKey}
@@ -250,26 +251,27 @@ export function VisualReviewInspector(props: Props) {
 
         <main className="review-visual-center">
           <div className="review-visual-toolbar">
-            {isDashboard(active) && <div className="review-visual-web-summary">
-              <strong>Wartribes Development Dashboard</strong>
-              <p>Live task evidence below. Review its captures and activity, then provide your verdict using the controls above the webview.</p>
-            </div>}
-            <span className="review-visual-counter">{activeIndex + 1} / {playable.length}</span>
-            <strong title={active?.label}>{active?.label || "Review media"}</strong>
-            <span className="review-visual-toolbar-spacer" />
-            <button type="button" className="button secondary" disabled={activeIndex === 0}
-              title="Previous item (←)" onClick={() => onFocusArtifact(activeIndex - 1)}>←</button>
-            <button type="button" className="button secondary"
-              disabled={activeIndex >= playable.length - 1}
-              title="Next item (→)" onClick={() => onFocusArtifact(activeIndex + 1)}>→</button>
-            <button type="button" className={"button " + (compareMode === "single" ? "primary" : "secondary")}
-              onClick={() => setCompare("single")} aria-pressed={compareMode === "single"}>Single</button>
-            <button type="button" className={"button " + (compareMode === "side" ? "primary" : "secondary")}
-              disabled={!canCompare} title={canCompare ? "Side-by-side image comparison" : "Comparison requires two images"}
-              onClick={() => setCompare("side")} aria-pressed={compareMode === "side"}>Compare</button>
-            <button type="button" className={"button " + (compareMode === "overlay" ? "primary" : "secondary")}
-              disabled={!canCompare} title={canCompare ? "Image overlay with opacity slider" : "Comparison requires two images"}
-              onClick={() => setCompare("overlay")} aria-pressed={compareMode === "overlay"}>Overlay</button>
+            {isDashboard(active) ? <div className="review-visual-web-summary">
+              <strong>Specific Dashboard capture</strong>
+              <p>{active?.label} · View the actual published evidence below, without opening the full Dashboard.</p>
+            </div> : <>
+              <span className="review-visual-counter">{activeIndex + 1} / {playable.length}</span>
+              <strong title={active?.label}>{active?.label || "Review media"}</strong>
+              <span className="review-visual-toolbar-spacer" />
+              <button type="button" className="button secondary" disabled={activeIndex === 0}
+                title="Previous item (←)" onClick={() => onFocusArtifact(activeIndex - 1)}>←</button>
+              <button type="button" className="button secondary"
+                disabled={activeIndex >= playable.length - 1}
+                title="Next item (→)" onClick={() => onFocusArtifact(activeIndex + 1)}>→</button>
+              <button type="button" className={"button " + (compareMode === "single" ? "primary" : "secondary")}
+                onClick={() => setCompare("single")} aria-pressed={compareMode === "single"}>Single</button>
+              <button type="button" className={"button " + (compareMode === "side" ? "primary" : "secondary")}
+                disabled={!canCompare} title={canCompare ? "Side-by-side image comparison" : "Comparison requires two images"}
+                onClick={() => setCompare("side")} aria-pressed={compareMode === "side"}>Compare</button>
+              <button type="button" className={"button " + (compareMode === "overlay" ? "primary" : "secondary")}
+                disabled={!canCompare} title={canCompare ? "Image overlay with opacity slider" : "Comparison requires two images"}
+                onClick={() => setCompare("overlay")} aria-pressed={compareMode === "overlay"}>Overlay</button>
+            </>}
           </div>
           {error && <div className="error-banner" role="alert">{error}</div>}
           {openError && <div className="error-banner" role="alert">{openError}</div>}
@@ -279,8 +281,8 @@ export function VisualReviewInspector(props: Props) {
               <ul>{round.criteria.map((criterion, i) => <li key={i}>{criterion}</li>)}</ul>
             </details>
           )}
-          <div className="review-visual-viewer">
-            {active && <>
+          <div className={"review-visual-viewer" + (isDashboard(active) ? " dashboard-capture-viewer" : "")}>
+            {isDashboard(active) ? <DashboardEvidenceItem address={active!.path} /> : active && <>
               <div className="review-visual-viewer-actions">
                 <button type="button" className={"button " + (pinning ? "primary" : "secondary")}
                   aria-pressed={pinning} disabled={resolved}
