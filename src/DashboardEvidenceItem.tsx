@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openFileInFomni } from "./InboxRichText";
 
@@ -9,23 +9,20 @@ type DashboardItem = {
   caption?: string;
   kind?: string;
   mediaType?: string;
-  source?: string;
   sourceReport?: string;
   capturedAt?: string;
-  eventAt?: string;
   publishedAt?: string;
   mediaDataUrl?: string;
   mediaPath?: string;
   mediaUnavailable?: string;
 };
 
-function captureId(address: string): string | null {
-  try {
-    const url = new URL(address);
-    return url.searchParams.get("item");
-  } catch {
-    return null;
-  }
+function selectionFromUrl(address: string) {
+  const url = new URL(address);
+  const listed = url.searchParams.get("items");
+  const ids = listed ? listed.split(",").map(value => value.trim()) :
+    url.searchParams.get("item") ? [url.searchParams.get("item")!] : [];
+  return { ids, task: url.searchParams.get("task") };
 }
 
 function displayDate(raw?: string) {
@@ -34,64 +31,110 @@ function displayDate(raw?: string) {
   return Number.isFinite(parsed.getTime()) ? parsed.toLocaleString() : raw;
 }
 
-/** Single Dashboard capture, rendered within TaskBoard instead of embedding
- * the entire unrelated Dashboard navigation/workspace in an iframe. */
+function isVideo(item: DashboardItem) {
+  return item.mediaType === "video" || /\.(?:mp4|webm)$/i.test(item.mediaPath || "");
+}
+
+function DashboardMedia({ item }: { item: DashboardItem }) {
+  if (!item.mediaDataUrl) return <div className="dashboard-evidence-message">
+    {item.mediaUnavailable || "No inline media available."}
+  </div>;
+  return isVideo(item) ? <video src={item.mediaDataUrl} controls preload="metadata" /> :
+    <img src={item.mediaDataUrl} alt={item.title + (item.caption ? " — " + item.caption : "")} />;
+}
+
+/** Native gallery of exact published Wartribes Dashboard captures. Generic
+ * web/HTML reviews continue through the separate ordinary iframe renderer. */
 export function DashboardEvidenceItem({ address }: { address: string }) {
-  const id = useMemo(() => captureId(address), [address]);
-  const [item, setItem] = useState<DashboardItem | null>(null);
+  const [items, setItems] = useState<DashboardItem[]>([]);
+  const [selected, setSelected] = useState<number | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    setItem(null);
+    setItems([]);
+    setSelected(null);
     setError("");
-    if (!id) {
-      setError("This review must link one published Dashboard capture using ?item=<capture ID>.");
+    let selection: ReturnType<typeof selectionFromUrl>;
+    try {
+      selection = selectionFromUrl(address);
+      if (!selection.ids.length && !selection.task)
+        throw new Error("Supply an exact capture (?item=), a curated gallery (?items=id1,id2), or a task gallery (?task=WT-0000).");
+    } catch (reason) {
+      setError(String(reason));
       return;
     }
     let cancelled = false;
     setLoading(true);
-    void invoke<DashboardItem>("dashboard_review_item", { id })
-      .then((result) => { if (!cancelled) setItem(result); })
-      .catch((reason) => { if (!cancelled) setError(String(reason)); })
+    void invoke<DashboardItem[]>("dashboard_review_items", selection)
+      .then(result => { if (!cancelled) setItems(result); })
+      .catch(reason => { if (!cancelled) setError(String(reason)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [id]);
+  }, [address]);
 
-  const mediaPath = item?.mediaPath || "";
-  const openSource = () => {
-    if (!mediaPath) return;
-    void openFileInFomni(mediaPath).catch((reason) => setError(String(reason)));
+  const openSource = (item: DashboardItem) => {
+    if (!item.mediaPath) return;
+    void openFileInFomni(item.mediaPath).catch(reason => setError(String(reason)));
   };
-  const isVideo = item?.mediaType === "video" ||
-    /\.(?:mp4|webm)$/i.test(item?.source || "");
 
-  if (error && !item) return <section className="dashboard-evidence-message" role="alert">
-    <strong>Dashboard capture unavailable</strong><p>{error}</p>
+  if (loading) return <div className="dashboard-evidence-message">Loading published Dashboard captures…</div>;
+  if (!items.length) return <section className="dashboard-evidence-message" role="alert">
+    <strong>Dashboard gallery unavailable</strong><p>{error || "This task has no published captures."}</p>
   </section>;
-  if (loading || !item) return <div className="dashboard-evidence-message">Loading published Dashboard capture…</div>;
-  return <section className="dashboard-evidence-item" aria-label={"Dashboard evidence " + item.title}>
+
+  const chosen = selected === null ? null : items[selected] ?? null;
+  return <section className="dashboard-evidence-item"
+    aria-label={"Wartribes Dashboard review gallery for " + items[0].task}>
     <header className="dashboard-evidence-head">
       <div className="dashboard-evidence-heading">
-        <small>{item.task} · Dashboard capture · {item.kind || item.mediaType || "Evidence"}</small>
-        <h2>{item.title}</h2>
-        {item.caption && <p>{item.caption}</p>}
+        <small>{items[0].task} · Published Dashboard evidence</small>
+        <h2>{chosen ? chosen.title : items.length + (items.length === 1 ? " capture" : " captures")}</h2>
+        {chosen && chosen.caption && <p>{chosen.caption}</p>}
+        {!chosen && <p>Original published captures and captions. Select any image to inspect it larger.</p>}
       </div>
       <div className="dashboard-evidence-meta">
-        {item.capturedAt && <span>Captured <strong>{displayDate(item.capturedAt)}</strong></span>}
-        {item.publishedAt && <span>Published <strong>{displayDate(item.publishedAt)}</strong></span>}
-        {mediaPath && <button type="button" className="button secondary" onClick={openSource}>Open published media in Fomni ↗</button>}
+        <span>{chosen ? (selected! + 1) + " of " + items.length : "Gallery · " + items.length + " items"}</span>
+        {chosen?.capturedAt && <span>Captured <strong>{displayDate(chosen.capturedAt)}</strong></span>}
+        <div className="dashboard-evidence-actions">
+          {chosen && <>
+            <button type="button" className="button secondary" onClick={() => setSelected(null)}>All captures</button>
+            <button type="button" className="button secondary"
+              aria-label="Previous capture" disabled={selected === 0}
+              onClick={() => setSelected(Math.max(0, selected! - 1))}>←</button>
+            <button type="button" className="button secondary"
+              aria-label="Next capture" disabled={selected === items.length - 1}
+              onClick={() => setSelected(Math.min(items.length - 1, selected! + 1))}>→</button>
+            {chosen.mediaPath && <button type="button" className="button secondary"
+              onClick={() => openSource(chosen)}>Open in Fomni ↗</button>}
+          </>}
+        </div>
       </div>
     </header>
-    <div className="dashboard-evidence-media">
-      {item.mediaDataUrl ? (
-        isVideo ? <video src={item.mediaDataUrl} controls preload="metadata" /> :
-          <img src={item.mediaDataUrl} alt={item.title + (item.caption ? " — " + item.caption : "")} />
-      ) : <div className="dashboard-evidence-message">{item.mediaUnavailable || "No inline media available."}</div>}
-    </div>
+
+    {chosen ? <div className="dashboard-evidence-media dashboard-evidence-selected">
+      <DashboardMedia item={chosen} />
+    </div> : <div className="dashboard-evidence-gallery" aria-label="Dashboard captures">
+      {items.map((item, index) => <article className="dashboard-evidence-card" key={item.id}>
+        {isVideo(item) ? <div className="dashboard-evidence-card-media">
+          <DashboardMedia item={item} />
+        </div> : <button type="button" className="dashboard-evidence-card-media"
+          aria-label={"Enlarge " + item.title}
+          onClick={() => setSelected(index)}>
+          <DashboardMedia item={item} />
+        </button>}
+        <div className="dashboard-evidence-card-info">
+          <span className="dashboard-evidence-date">Captured {displayDate(item.capturedAt)}</span>
+          <h3>{item.title}</h3>
+          {item.caption && <p>{item.caption}</p>}
+          <div className="dashboard-evidence-card-actions">
+            <button type="button" className="button secondary" onClick={() => setSelected(index)}>Inspect larger</button>
+            {item.mediaPath && <button type="button" className="button secondary"
+              onClick={() => openSource(item)}>Open original ↗</button>}
+          </div>
+        </div>
+      </article>)}
+    </div>}
     {error && <div className="error-banner" role="alert">{error}</div>}
-    {item.sourceReport && <footer className="dashboard-evidence-origin">
-      Source report: <code>{item.sourceReport}</code>
-    </footer>}
   </section>;
 }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type MouseEvent, type ReactNode, type CSSProperties, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { ReviewArtifact, ReviewPin, ReviewRound } from "./reviewApi";
 import type { Task } from "./types";
@@ -69,7 +69,8 @@ type Props = {
 };
 
 const isWeb = (artifact: ReviewArtifact) => artifact.kind === "html" || artifact.kind === "url";
-const isDashboard = (artifact?: ReviewArtifact) => artifact?.kind === "url" &&
+const isDashboard = (artifact: ReviewArtifact | undefined, boardPath: string) =>
+  artifact?.kind === "url" && /[\\/]Wartribes[\\/]Tasks[\\/]?$/i.test(boardPath) &&
   /\/wartribes-development-dashboard(?:[/?#]|$)/i.test(artifact.path);
 
 /** First-class task review workspace. This is independent of the artifact count,
@@ -96,6 +97,52 @@ export function VisualReviewInspector(props: Props) {
   const [moreOpen, setMoreOpen] = useState(false);
   const stripRef = useRef<HTMLDivElement>(null);
   const active = playable[Math.min(activeIndex, playable.length - 1)];
+  const dashboardMode = isDashboard(active, review.path);
+  const defaultUpperHeight = 176;
+  const [upperHeight, setUpperHeight] = useState(() => {
+    try {
+      const remembered = Number(localStorage.getItem("taskboard.dashboardReview.controlsHeight"));
+      return Number.isFinite(remembered) && remembered >= 145 ? Math.min(remembered, 650) : defaultUpperHeight;
+    } catch { return defaultUpperHeight; }
+  });
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const dragOrigin = useRef<{ pointer: number; y: number; height: number } | null>(null);
+  const maxUpperHeight = () => Math.max(145, (bodyRef.current?.clientHeight ?? window.innerHeight) - 200);
+  const clampUpperHeight = (height: number) =>
+    Math.max(145, Math.min(Math.round(height), maxUpperHeight()));
+  const persistUpperHeight = (height: number) => {
+    const bounded = clampUpperHeight(height);
+    setUpperHeight(bounded);
+    try { localStorage.setItem("taskboard.dashboardReview.controlsHeight", String(bounded)); } catch { /* storage optional */ }
+  };
+  const resizePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragOrigin.current = { pointer: event.pointerId, y: event.clientY, height: upperHeight };
+  };
+  const resizePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const origin = dragOrigin.current;
+    if (origin?.pointer !== event.pointerId) return;
+    setUpperHeight(clampUpperHeight(origin.height + event.clientY - origin.y));
+  };
+  const resizePointerEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const origin = dragOrigin.current;
+    if (origin?.pointer !== event.pointerId) return;
+    const finalHeight = clampUpperHeight(origin.height + event.clientY - origin.y);
+    dragOrigin.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId))
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    persistUpperHeight(finalHeight);
+  };
+  const resizeKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const change = event.key === "ArrowUp" ? -24 : event.key === "ArrowDown" ? 24 : null;
+    if (change === null && event.key !== "Home" && event.key !== "End") return;
+    event.preventDefault();
+    event.stopPropagation();
+    persistUpperHeight(event.key === "Home" ? 145 :
+      event.key === "End" ? maxUpperHeight() : upperHeight + change!);
+  };
   const canCompare = active?.kind === "image" && round.previous?.kind === "image";
   const compareMode = canCompare ? compare : "single";
   const pinCount = active ? pins.filter((pin) => pin.artifact === active.id).length : 0;
@@ -191,7 +238,7 @@ export function VisualReviewInspector(props: Props) {
   return (
     <section onPaste={onPaste} onDragOver={event => event.preventDefault()} onDrop={onDrop}
       className={"review-visual-inspector" + (focus ? " focus" : "") +
-      (feedbackExpanded ? "" : " feedback-hidden") + (isDashboard(active) ? " dashboard-review" : "")}>
+      (feedbackExpanded ? "" : " feedback-hidden") + (dashboardMode ? " dashboard-review" : "")}>
       <header className="review-visual-header">
         <button type="button" className="button secondary" onClick={onBack}
           title="Return to previously selected Inbox item (Esc)">← Previous item</button>
@@ -235,7 +282,8 @@ export function VisualReviewInspector(props: Props) {
         </div>
       </header>
 
-      <div className={"review-visual-body" + (isDashboard(active) ? " dashboard-review" : "")}>
+      <div ref={bodyRef} className={"review-visual-body" + (dashboardMode ? " dashboard-review" : "")}
+        style={dashboardMode ? { "--dashboard-controls-height": upperHeight + "px" } as CSSProperties : undefined}>
         {!focus && <InboxQueueSidebar
           items={items}
           selectedKey={selectedKey}
@@ -251,9 +299,9 @@ export function VisualReviewInspector(props: Props) {
 
         <main className="review-visual-center">
           <div className="review-visual-toolbar">
-            {isDashboard(active) ? <div className="review-visual-web-summary">
-              <strong>Specific Dashboard capture</strong>
-              <p>{active?.label} · View the actual published evidence below, without opening the full Dashboard.</p>
+            {dashboardMode ? <div className="review-visual-web-summary">
+              <strong>Published Dashboard evidence gallery</strong>
+              <p>{active?.label} · Originals and captions below, without unrelated Dashboard navigation.</p>
             </div> : <>
               <span className="review-visual-counter">{activeIndex + 1} / {playable.length}</span>
               <strong title={active?.label}>{active?.label || "Review media"}</strong>
@@ -281,8 +329,8 @@ export function VisualReviewInspector(props: Props) {
               <ul>{round.criteria.map((criterion, i) => <li key={i}>{criterion}</li>)}</ul>
             </details>
           )}
-          <div className={"review-visual-viewer" + (isDashboard(active) ? " dashboard-capture-viewer" : "")}>
-            {isDashboard(active) ? <DashboardEvidenceItem address={active!.path} /> : active && <>
+          <div id={dashboardMode ? "dashboard-review-evidence" : undefined} className={"review-visual-viewer" + (dashboardMode ? " dashboard-capture-viewer" : "")}>
+            {dashboardMode ? <DashboardEvidenceItem address={active!.path} /> : active && <>
               <div className="review-visual-viewer-actions">
                 <button type="button" className={"button " + (pinning ? "primary" : "secondary")}
                   aria-pressed={pinning} disabled={resolved}
@@ -373,6 +421,17 @@ export function VisualReviewInspector(props: Props) {
               : pinCount > 0 ? pinCount + " annotations" : "Inspect artwork and choose an outcome"}
           />}
         </main>
+        {dashboardMode && !focus && <div className="dashboard-review-resizer"
+          role="separator" tabIndex={0} aria-controls="dashboard-review-evidence" aria-label="Resize TaskBoard controls and evidence viewer"
+          aria-orientation="horizontal" aria-valuemin={145} aria-valuemax={maxUpperHeight()}
+          aria-valuenow={Math.round(upperHeight)}
+          title="Drag to resize TaskBoard controls / evidence · double-click to reset · Up/Down arrow keys"
+          onPointerDown={resizePointerDown}
+          onPointerMove={resizePointerMove}
+          onPointerUp={resizePointerEnd}
+          onPointerCancel={resizePointerEnd}
+          onDoubleClick={() => persistUpperHeight(defaultUpperHeight)}
+          onKeyDown={resizeKeyDown}><span aria-hidden="true" /></div>}
 
         {!focus && feedbackExpanded && <aside className="review-visual-feedback" aria-label="Review feedback">
           <header><strong>YOUR RESPONSE</strong>
