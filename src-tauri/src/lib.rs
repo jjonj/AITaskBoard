@@ -585,22 +585,38 @@ fn open_claimed_t3_session(claimed_by: String) -> Result<serde_json::Value, Stri
     if !std::path::Path::new(script).is_file() {
         return Err("T3 Code session CLI is unavailable.".into());
     }
-    let mut process = Command::new("node").arg(script)
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .creation_flags(0x08000000).spawn().map_err(|e| format!("Cannot connect to T3 CLI: {e}"))?;
-    if let Some(mut stdin) = process.stdin.take() {
-        let request = serde_json::json!({ "action": "open", "sessionId": claimant });
-        stdin.write_all(request.to_string().as_bytes()).map_err(|e| e.to_string())?;
-    }
-    let output = process.wait_with_output().map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
-    }
-    let result: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("T3 returned an invalid open receipt: {e}"))?;
-    if result.get("action").and_then(|v| v.as_str()) != Some("open") ||
-       result.get("acknowledged").and_then(|v| v.as_bool()) != Some(true) {
-        return Err("T3 did not acknowledge opening the claimed session.".into());
+    // T3's "open" interprets a UUID as a *conversation ID* and may
+    // create a new session. Resolve against existing sessions first; link clicks
+    // must never silently create an extra ChatGPT session.
+    let call = |request: serde_json::Value| -> Result<serde_json::Value, String> {
+        let mut process = Command::new("node").arg(script)
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+            .creation_flags(0x08000000).spawn()
+            .map_err(|e| format!("Cannot connect to T3 CLI: {e}"))?;
+        if let Some(mut stdin) = process.stdin.take() {
+            stdin.write_all(request.to_string().as_bytes()).map_err(|e| e.to_string())?;
+        }
+        let output = process.wait_with_output().map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+        }
+        serde_json::from_slice(&output.stdout)
+            .map_err(|e| format!("T3 returned invalid JSON: {e}"))
+    };
+    let inventory = call(serde_json::json!({
+        "action": "list", "which": "all", "includeHidden": true
+    }))?;
+    let session = inventory.get("sessions").and_then(|v| v.as_array())
+        .and_then(|sessions| sessions.iter().find(|entry|
+            entry.get("id").and_then(|v| v.as_str()) == Some(claimant) ||
+            entry.get("conversationId").and_then(|v| v.as_str()) == Some(claimant)))
+        .and_then(|entry| entry.get("id").and_then(|v| v.as_str()))
+        .ok_or("That T3 session is no longer present; no new session was created.")?;
+    let result = call(serde_json::json!({ "action": "focus", "sessionId": session }))?;
+    if result.get("action").and_then(|v| v.as_str()) != Some("focus") ||
+        result.get("sessionId").and_then(|v| v.as_str()) != Some(session) ||
+        result.get("acknowledged").and_then(|v| v.as_bool()) != Some(true) {
+        return Err("T3 did not confirm opening the requested session.".into());
     }
     Ok(result)
 }

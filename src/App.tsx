@@ -4763,6 +4763,7 @@ Details: ${queueRecoveryWarning}`;
               )}
 
             <DescriptionTimeline
+              task={editor.original}
               key={editor.original?.id ?? "new-task"}
               description={editor.draft.description}
               readOnlyDescription={editor.mode === "edit" && !!editor.original?.agent_interacted}

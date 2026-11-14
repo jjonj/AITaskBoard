@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState, type TextareaHTMLAttributes } from "react";
 import { parseDescriptionTimeline, updateInitialDescription, type DescriptionUpdateKind } from "./descriptionTimeline";
 import { MarkdownText } from "./MarkdownText";
+import type { Task } from "./types";
 
 type AutoTextareaProps = TextareaHTMLAttributes<HTMLTextAreaElement> & {
   minRows?: number;
@@ -23,6 +24,7 @@ export function AutoTextarea({ minRows = 2, maxHeight = 420, value, style, ...pr
 }
 
 type Props = {
+  task?: Task;
   description: string;
   onChange: (description: string) => void;
   /** User-only Note to AI composer; omitted for epics. */
@@ -59,7 +61,7 @@ function relativeTime(iso: string) {
 }
 
 export function DescriptionTimeline({
-  description, onChange, noteToAi, onNoteToAiChange, legacyAiNotes,
+  task, description, onChange, noteToAi, onNoteToAiChange, legacyAiNotes,
   descriptionMinRows = 3, descriptionMaxHeight = 360, readOnlyDescription = false,
 }: Props) {
   const { initial, updates } = parseDescriptionTimeline(description);
@@ -82,7 +84,7 @@ export function DescriptionTimeline({
         </button>}
       </div>
       {previewDescription || readOnlyDescription
-        ? <MarkdownText text={initial || "*No description yet.*"} className="markdown-field-preview description-markdown-preview" />
+        ? <MarkdownText task={task} text={initial || "*No description yet.*"} className="markdown-field-preview description-markdown-preview" />
         : <AutoTextarea
             className="description-initial"
             minRows={descriptionMinRows}
@@ -110,7 +112,7 @@ export function DescriptionTimeline({
                   {relativeTime(entry.at)}
                 </time>
               </div>
-              <MarkdownText text={entry.text} className="description-entry-text" />
+              <MarkdownText task={task} text={entry.text} className="description-entry-text" />
             </li>
           ))}
           {legacyAiNotes?.trim() && (
@@ -119,7 +121,7 @@ export function DescriptionTimeline({
                 <strong>Existing AI notes</strong>
                 <time>moved into history on save</time>
               </div>
-              <MarkdownText text={legacyAiNotes} className="description-entry-text" />
+              <MarkdownText task={task} text={legacyAiNotes} className="description-entry-text" />
             </li>
           )}
           {showAll && updates.length > VISIBLE_UPDATES && (
