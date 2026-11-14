@@ -3737,7 +3737,20 @@ Details: ${queueRecoveryWarning}`;
                           title={task.next_due ? `Next run ${task.next_due}; ${task.run_count ?? 0} completed` : "Recurring: available after each recorded run"}>↻ {task.next_due || "RECURRING"}</span>}
                         {task.claimed_by && <span className={`claim-indicator ${claimHealth[task.id]?.agentState === "Working" ? "working" : ""}`}
                           title={claimTooltip(task)} aria-label={claimTooltip(task)} />}
-                        <span className="task-card-id" title={task.kind === "epic" ? "Epic (non-executable)" : isForUser(task) ? "For user (human input)" : "Executable task"}>{task.id}</span>
+                        <button type="button"
+                          className={`task-card-id${copiedTaskId === task.id ? " copied" : ""}`}
+                          title={copiedTaskId === task.id ? `Copied ${task.id}` : `Copy task ID ${task.id}`}
+                          aria-label={`Copy task ID ${task.id}`}
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onMouseDown={(event) => event.stopPropagation()}
+                          onDoubleClick={(event) => event.stopPropagation()}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setHoverTask(null);
+                            void copyTaskText(task.id);
+                          }}>
+                          {task.id}<span className="task-card-id-copy-icon" aria-hidden="true">{copiedTaskId === task.id ? "✓" : "⧉"}</span>
+                        </button>
                         {task.kind === "epic" && childCounts.has(task.id) && (
                           <button
                             className="task-collapse epic-collapse-toggle"

@@ -1787,7 +1787,25 @@ body.column-dragging * {
   letter-spacing: .03em;
   white-space: nowrap;
 }
+/* The ID is its own copy target, not part of the draggable card surface. */
+.task-card-id {
+  padding: 1px 3px;
+  margin: -1px -3px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  font-family: inherit;
+  cursor: copy;
+}
+.task-card-id-copy-icon { margin-left: 4px; opacity: .4; }
+.task-card-id:hover, .task-card-id:focus-visible { color: #e6f3ff; background: #34445a; }
+.task-card-id:hover .task-card-id-copy-icon,
+.task-card-id:focus-visible .task-card-id-copy-icon { opacity: 1; }
+.task-card-id:focus-visible { outline: 2px solid #88caff; outline-offset: 1px; }
+.task-card-id.copied { color: #b9f2d6; background: #24483f; }
+.task-card-id.copied .task-card-id-copy-icon { opacity: 1; }
 .epic-card .task-card-id { color: #dfbaff; }
+.epic-card .task-card-id.copied { color: #b9f2d6; }
 .dependency-arrows-overlay {
   position: fixed;
   z-index: 35;
