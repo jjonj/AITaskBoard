@@ -224,5 +224,46 @@ fn queued_task_completion_is_persisted_in_lifecycle() {
     let mut done = store.load(root).unwrap().tasks.into_iter().find(|row| row.id == task.id).unwrap();
     done.column = "done".into();
     store.update(root, done).unwrap();
-    assert_eq!(store.execution_intent(root, &task.id).unwrap().queue_state, Some(QueueState::Completed));
+    let completed = store.execution_intent(root, &task.id).unwrap();
+    assert_eq!(completed.queue_state, Some(QueueState::Completed));
+
+    // Done -> AI Ready restores Queue with a fresh, non-replayed request.
+    let mut reopened = store.load(root).unwrap().tasks.into_iter().find(|row| row.id == task.id).unwrap();
+    reopened.column = "ai-ready".into();
+    store.update_as(root, reopened, task_core::MutationActor::Human).unwrap();
+    let first = store.execution_intent(root, &task.id).unwrap();
+    assert_eq!(first.queue_state, Some(QueueState::Queued));
+    assert_ne!(first.queue_request, completed.queue_request);
+    assert!(first.queue_session_id.is_none());
+    assert!(first.queue_reservation_id.is_none());
+    assert!(store.load(root).unwrap().tasks.iter().find(|row| row.id == task.id).unwrap().completed.is_none());
+    assert_eq!(store.execution_intent(root, &task.id).unwrap().queue_request, first.queue_request);
+
+    // Done -> Draft also restores Queue intent, while readiness blocks dispatch.
+    let mut done = store.load(root).unwrap().tasks.into_iter().find(|row| row.id == task.id).unwrap();
+    done.column = "done".into();
+    store.update(root, done).unwrap();
+    let mut draft = store.load(root).unwrap().tasks.into_iter().find(|row| row.id == task.id).unwrap();
+    draft.column = "draft".into();
+    store.update_as(root, draft, task_core::MutationActor::Human).unwrap();
+    let second = store.execution_intent(root, &task.id).unwrap();
+    assert_eq!(second.queue_state, Some(QueueState::Queued));
+    assert_ne!(second.queue_request, first.queue_request);
+
+    // Out-of-band Markdown edits also repair a previously Completed Queue.
+    let mut done = store.load(root).unwrap().tasks.into_iter().find(|row| row.id == task.id).unwrap();
+    done.column = "done".into();
+    store.update(root, done).unwrap();
+    let before = store.execution_intent(root, &task.id).unwrap();
+    let path = std::path::Path::new(&task.path);
+    let raw = std::fs::read_to_string(path).unwrap();
+    let moved = raw.replacen("column: done", "column: ai-ready", 1);
+    assert_ne!(raw, moved);
+    std::fs::write(path, moved).unwrap();
+    let after = store.load(root).unwrap();
+    assert!(after.tasks.iter().find(|row| row.id == task.id).unwrap().completed.is_none());
+    let repaired = store.execution_intent(root, &task.id).unwrap();
+    assert_eq!(repaired.queue_state, Some(QueueState::Queued));
+    assert_ne!(repaired.queue_request, before.queue_request);
+    assert_eq!(store.execution_intent(root, &task.id).unwrap().queue_request, repaired.queue_request);
 }

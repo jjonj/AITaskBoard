@@ -637,7 +637,10 @@ impl FsTaskStore {
 
             let stale_user_status = is_terminal && (
                 task.kind == TaskKind::ForUser || task.attention.contains(&TaskAttention::NeedsUser));
-            if task.completed != normalized || stale_user_status {
+            // Repair manually edited and previously reopened cards whose Done
+            // receipt still says Completed, even if completed_at was cleared.
+            let stale_queue = !is_terminal && has_completed_queue_lifecycle(&task.path)?;
+            if task.completed != normalized || stale_user_status || stale_queue {
                 let path = PathBuf::from(&task.path);
                 let existing = fs::read_to_string(&path)?;
                 let newly_completed = task.completed.is_none() && normalized.is_some();
@@ -651,6 +654,7 @@ impl FsTaskStore {
                 }
                 if task.completed.is_none() { task.completed_at = None; }
                 let text = render_task(task, Some(&existing))?;
+                let text = restore_reopened_queue_lifecycle(&text, task)?;
                 write_text_atomic(&path, &text)?;
                 task.revision = revision(&text);
                 changed = true;
@@ -1178,6 +1182,9 @@ impl FsTaskStore {
         } else { render_task(&task, Some(&existing))? };
         let rendered = queue_policy_text(&rendered, &task, &snapshot, Some(&previous))?;
         let text = update_activity(&rendered, &existing, &previous, &task, &snapshot.config)?;
+        // Any departure from Done starts a fresh queue attempt when this task
+        // was previously queued, regardless of actor or reason for reopening.
+        let text = restore_reopened_queue_lifecycle(&text, &task)?;
         let text = reset_released_queue_lifecycle(&text, &task)?;
         write_text_atomic(&path, &text)?;
         task.revision = revision(&text);
@@ -2759,6 +2766,45 @@ fn mark_queue_completed_lifecycle(text: &str, task: &Task) -> Result<String, Tas
     }
     mapping.insert(serde_yaml::Value::String("queue_state".into()), serde_yaml::Value::String("completed".into()));
     mapping.remove(serde_yaml::Value::String("queue_reservation_expires_at".into()));
+    Ok(format!("---\n{}---\n{}", serde_yaml::to_string(&mapping)
+        .map_err(|error| TaskStoreError::Parse(error.to_string()))?, body))
+}
+
+fn has_completed_queue_lifecycle(path: &str) -> Result<bool, TaskStoreError> {
+    let text = fs::read_to_string(path)?;
+    let (yaml, _) = split_frontmatter(&text)?;
+    let mapping: serde_yaml::Mapping = serde_yaml::from_str(&yaml)
+        .map_err(|error| TaskStoreError::Parse(error.to_string()))?;
+    let key = |name: &str| serde_yaml::Value::String(name.into());
+    Ok(mapping.get(key("execution_mode")).and_then(serde_yaml::Value::as_str) == Some("queue")
+        && mapping.get(key("queue_state")).and_then(serde_yaml::Value::as_str) == Some("completed"))
+}
+
+/// A completed queue attempt is terminal, but the TASK is not terminal once
+/// moved out of Done. Reopen with a fresh request ID to avoid reusing the old
+/// session, reservation, delivery receipts, or retries.
+fn restore_reopened_queue_lifecycle(text: &str, task: &Task) -> Result<String, TaskStoreError> {
+    if task.archived || task.completed.is_some() ||
+        !matches!(task.kind, TaskKind::Task | TaskKind::Recurring) {
+        return Ok(text.to_owned());
+    }
+    let (yaml, body) = split_frontmatter(text)?;
+    let mut mapping: serde_yaml::Mapping = serde_yaml::from_str(&yaml)
+        .map_err(|error| TaskStoreError::Parse(error.to_string()))?;
+    let key = |name: &str| serde_yaml::Value::String(name.into());
+    if mapping.get(key("execution_mode")).and_then(serde_yaml::Value::as_str) != Some("queue")
+        || mapping.get(key("queue_state")).and_then(serde_yaml::Value::as_str) != Some("completed") {
+        return Ok(text.to_owned());
+    }
+    mapping.insert(key("queue_state"), key("queued"));
+    mapping.insert(key("queue_request"), key(&uuid::Uuid::new_v4().to_string()));
+    for field in [
+        "queue_session_id", "queue_reservation_id", "queue_reservation_expires_at",
+        "queue_error", "queue_registration_attempt", "queue_attempt", "queue_receipt",
+        "queue_retired_receipt",
+    ] {
+        mapping.remove(key(field));
+    }
     Ok(format!("---\n{}---\n{}", serde_yaml::to_string(&mapping)
         .map_err(|error| TaskStoreError::Parse(error.to_string()))?, body))
 }
