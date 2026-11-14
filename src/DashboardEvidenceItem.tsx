@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { openFileInFomni } from "./InboxRichText";
 
@@ -58,6 +59,16 @@ export function DashboardEvidenceItem({ address, selectedIndex, onSelectedIndexC
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const railRef = useRef<HTMLDivElement>(null);
+  const closeLightboxRef = useRef<HTMLButtonElement>(null);
+  const lightboxRef = useRef<HTMLDivElement>(null);
+
+  // Restore keyboard focus to the thumbnail when the fullscreen dialog closes.
+  useEffect(() => {
+    if (selectedIndex === null) return;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    closeLightboxRef.current?.focus();
+    return () => { if (previous?.isConnected) previous.focus(); };
+  }, [selectedIndex !== null]);
 
   useEffect(() => {
     setItems([]);
@@ -112,6 +123,19 @@ export function DashboardEvidenceItem({ address, selectedIndex, onSelectedIndexC
     });
     setRailActive(nearest);
   };
+  const lightboxKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "Tab") return;
+    const buttons = [...(lightboxRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? [])];
+    if (!buttons.length) return;
+    const active = document.activeElement;
+    if (event.shiftKey && active === buttons[0]) {
+      event.preventDefault();
+      buttons[buttons.length - 1].focus();
+    } else if (!event.shiftKey && active === buttons[buttons.length - 1]) {
+      event.preventDefault();
+      buttons[0].focus();
+    }
+  };
   const railKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.target !== event.currentTarget) return;
     if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
@@ -130,28 +154,7 @@ export function DashboardEvidenceItem({ address, selectedIndex, onSelectedIndexC
   return <section className="dashboard-evidence-item"
     aria-label={"Wartribes Dashboard review gallery for " + items[0].task}>
 
-    {chosen ? <header className="dashboard-evidence-head dashboard-evidence-detail-head">
-      <div className="dashboard-evidence-heading">
-        <small>{chosen.task} · Published capture {selectedIndex! + 1} of {items.length}</small>
-        <h2>{chosen.title}</h2>
-        {chosen.caption && <p>{chosen.caption}</p>}
-      </div>
-      <div className="dashboard-evidence-meta">
-        {chosen.capturedAt && <span>Captured <strong>{displayDate(chosen.capturedAt)}</strong></span>}
-        <div className="dashboard-evidence-actions">
-          <button type="button" className="button secondary"
-            onClick={() => onSelectedIndexChange(null)}>← All captures</button>
-          <button type="button" className="button secondary"
-            aria-label="Previous capture" disabled={selectedIndex === 0}
-            onClick={() => onSelectedIndexChange(Math.max(0, selectedIndex! - 1))}>‹</button>
-          <button type="button" className="button secondary"
-            aria-label="Next capture" disabled={selectedIndex === items.length - 1}
-            onClick={() => onSelectedIndexChange(Math.min(items.length - 1, selectedIndex! + 1))}>›</button>
-          {chosen.mediaPath && <button type="button" className="button secondary"
-            onClick={() => openSource(chosen)}>Open in Fomni ↗</button>}
-        </div>
-      </div>
-    </header> : <div className="dashboard-evidence-rail-header">
+    <div className="dashboard-evidence-rail-header">
       <span><strong>{items[0].task}</strong> · Original captures · Scroll sideways to compare</span>
       <div className="dashboard-evidence-rail-actions">
         <span aria-live="polite">{railActive + 1} / {items.length}</span>
@@ -162,11 +165,9 @@ export function DashboardEvidenceItem({ address, selectedIndex, onSelectedIndexC
           aria-label="Scroll to next capture" disabled={railActive >= items.length - 1}
           onClick={() => scrollToCard(railActive + 1)}>›</button>
       </div>
-    </div>}
+    </div>
 
-    {chosen ? <div className="dashboard-evidence-media dashboard-evidence-selected">
-      <DashboardMedia item={chosen} />
-    </div> : <div ref={railRef} className="dashboard-evidence-gallery"
+    <div ref={railRef} className="dashboard-evidence-gallery"
       tabIndex={0} role="region" aria-label="Scrollable Wartribes Dashboard evidence"
       onScroll={syncRailPosition} onKeyDown={railKeyDown}>
       {items.map((item, index) => <article className="dashboard-evidence-card" key={item.id}>
@@ -192,7 +193,43 @@ export function DashboardEvidenceItem({ address, selectedIndex, onSelectedIndexC
           </div>
         </div>
       </article>)}
-    </div>}
+    </div>
+    {chosen && createPortal(
+      <div className="dashboard-lightbox-backdrop"
+        onPointerDown={(event) => {
+          if (event.target === event.currentTarget) onSelectedIndexChange(null);
+        }}>
+        <div ref={lightboxRef} role="dialog" aria-modal="true" aria-label={"Enlarged Dashboard capture: " + chosen.title}
+          className="dashboard-lightbox" onKeyDown={lightboxKeyDown}>
+          <header className="dashboard-lightbox-header">
+            <div className="dashboard-lightbox-heading">
+              <small>{chosen.task} · Capture {selectedIndex! + 1} of {items.length}</small>
+              <strong title={chosen.title}>{chosen.title}</strong>
+            </div>
+            <div className="dashboard-lightbox-actions">
+              <button type="button" className="button secondary" aria-label="Previous image"
+                disabled={selectedIndex === 0}
+                onClick={() => onSelectedIndexChange(Math.max(0, selectedIndex! - 1))}>‹ Previous</button>
+              <button type="button" className="button secondary" aria-label="Next image"
+                disabled={selectedIndex === items.length - 1}
+                onClick={() => onSelectedIndexChange(Math.min(items.length - 1, selectedIndex! + 1))}>Next ›</button>
+              <button ref={closeLightboxRef} type="button" className="button primary"
+                title="Return to evidence gallery (Esc)" onClick={() => onSelectedIndexChange(null)}>✕ Close</button>
+            </div>
+          </header>
+          <div className="dashboard-lightbox-media"><DashboardMedia item={chosen} /></div>
+          <footer className="dashboard-lightbox-caption">
+            <div>
+              {chosen.caption && <p>{chosen.caption}</p>}
+              {chosen.capturedAt && <small>Captured {displayDate(chosen.capturedAt)}</small>}
+            </div>
+            {chosen.mediaPath && <button type="button" className="button secondary"
+              onClick={() => openSource(chosen)}>Open original in Fomni ↗</button>}
+          </footer>
+        </div>
+      </div>,
+      document.body,
+    )}
     {error && <div className="error-banner" role="alert">{error}</div>}
   </section>;
 }

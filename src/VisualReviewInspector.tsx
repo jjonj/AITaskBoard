@@ -176,10 +176,17 @@ export function VisualReviewInspector(props: Props) {
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopImmediatePropagation();
-        if (focus) setFocus(false);
-        else if (dashboardMode && gallerySelectedIndex !== null) setGallerySelectedIndex(null);
+        if (dashboardMode && gallerySelectedIndex !== null) setGallerySelectedIndex(null);
+        else if (focus) setFocus(false);
         else onBack();
-      } else if (event.key.toLowerCase() === "f") {
+      } else if (dashboardMode && gallerySelectedIndex !== null &&
+        (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        const direction = event.key === "ArrowLeft" ? -1 : 1;
+        setGallerySelectedIndex((current) => current === null ? null :
+          Math.min(Math.max(0, galleryCount - 1), Math.max(0, current + direction)));
+      } else if (event.key.toLowerCase() === "f" && gallerySelectedIndex === null) {
         event.preventDefault();
         event.stopImmediatePropagation();
         setFocus((state) => !state);
@@ -196,7 +203,7 @@ export function VisualReviewInspector(props: Props) {
     // Capture before the shared Inbox Escape handler so Focus only exits Focus.
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [focus, dashboardMode, gallerySelectedIndex, onBack, onFocusArtifact, activeIndex, playable.length]);
+  }, [focus, dashboardMode, gallerySelectedIndex, galleryCount, onBack, onFocusArtifact, activeIndex, playable.length]);
 
   const originalAddress = (artifact: ReviewArtifact) => {
     if (artifact.kind === "url") return artifact.path;

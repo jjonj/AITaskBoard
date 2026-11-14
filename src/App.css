@@ -4431,3 +4431,128 @@ body.card-dragging .project-tab-wrapper:not(.selected):hover {
   .dashboard-evidence-gallery {padding:8px 10px 15px;}
   .dashboard-evidence-card-media {padding:6px;}
 }
+
+/* Published Dashboard capture fullscreen viewer. A portal to document.body
+   deliberately breaks out of the lower Inbox grid and uses the ENTIRE app
+   window; it is not an embedded webview or browser fullscreen request. */
+.dashboard-lightbox-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 4000;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  padding: 8px;
+  background: rgba(3, 7, 11, .97);
+  color: #edf6fa;
+}
+.dashboard-lightbox {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid #40586a;
+  border-radius: 9px;
+  background: #080e13;
+  box-shadow: 0 12px 50px #000a;
+}
+.dashboard-lightbox-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  padding: 8px 14px;
+  min-width: 0;
+  background: #162631;
+  border-bottom: 1px solid #3e5363;
+}
+.dashboard-lightbox-heading {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1 1 400px;
+  gap: 2px;
+}
+.dashboard-lightbox-heading small {
+  color: #a9d2e6;
+  font-size: 11px;
+}
+.dashboard-lightbox-heading strong {
+  color: #ecf6fc;
+  font-size: 15px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dashboard-lightbox-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+}
+.dashboard-lightbox-actions .button,
+.dashboard-lightbox-caption .button {
+  min-height: 31px;
+  padding: 5px 11px;
+  font-size: 12px;
+}
+.dashboard-lightbox-media {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  padding: 8px;
+  overflow: hidden;
+  background: #05090e;
+}
+.dashboard-lightbox-media > img,
+.dashboard-lightbox-media > video {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+}
+.dashboard-lightbox-caption {
+  display: flex;
+  flex: 0 0 auto;
+  min-height: 36px;
+  max-height: 105px;
+  padding: 8px 14px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: #13212c;
+  border-top: 1px solid #304858;
+}
+.dashboard-lightbox-caption > div {
+  overflow-y: auto;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #bed0dc;
+}
+.dashboard-lightbox-caption p {
+  margin: 0 0 4px;
+  overflow-wrap: anywhere;
+}
+.dashboard-lightbox-caption small { color: #91b5c9; }
+.dashboard-lightbox-caption .button { flex: 0 0 auto; }
+@media (max-width: 720px) {
+  .dashboard-lightbox-backdrop { padding: 0; }
+  .dashboard-lightbox { border: 0; border-radius: 0; }
+  .dashboard-lightbox-header { padding: 6px 9px; }
+  .dashboard-lightbox-heading { flex-basis: 240px; }
+  .dashboard-lightbox-heading strong { font-size: 13px; }
+  .dashboard-lightbox-caption { padding: 6px 9px; }
+}
