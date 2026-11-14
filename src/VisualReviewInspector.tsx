@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
-import { openPath, openUrl } from "@tauri-apps/plugin-opener";
+import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type MouseEvent, type ReactNode } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import type { ReviewArtifact, ReviewPin, ReviewRound } from "./reviewApi";
 import type { Task } from "./types";
 import { InboxResponseFooter, reviewOutcomes } from "./InboxResponseFooter";
-import { InboxRichText } from "./InboxRichText";
+import { InboxRichText, openFileInFomni } from "./InboxRichText";
+import { InboxQueueSidebar } from "./InboxQueueSidebar";
 import { useLinkCopyMenu } from "./LinkCopyMenu";
 
 type Item = { path: string; project: string; task: Task };
@@ -14,7 +15,10 @@ type Props = {
   items: Item[];
   selectedKey: string;
   onSelectTask: (key: string) => void;
-  onClose: () => void;
+  onBack: () => void;
+  queueThumbnails: Record<string, string>;
+  queueModes: Record<string, string>;
+  queueCounts: Record<string, number>;
   onOpenTask?: () => void;
   onOpenSession: () => void;
   sessionOpening: boolean;
@@ -53,13 +57,19 @@ type Props = {
   primaryReady: boolean;
   submit: (verdict: string) => Promise<void>;
   onNoteOnly: () => Promise<void>;
+  onBrowseFiles: () => void;
+  imagePreviews: ReactNode;
+  imageCount: number;
+  onPaste: (event: ClipboardEvent<HTMLElement>) => void;
+  onDrop: (event: DragEvent<HTMLElement>) => void;
   onMoveToDraft: () => Promise<void>;
   onArchive: () => Promise<void>;
   onReconsider: () => Promise<void>;
 };
 
-const keyOf = (item: Item) => item.path + "|" + item.task.id;
 const isWeb = (artifact: ReviewArtifact) => artifact.kind === "html" || artifact.kind === "url";
+const isDashboard = (artifact?: ReviewArtifact) => artifact?.kind === "url" &&
+  /\/wartribes-development-dashboard(?:[/?#]|$)/i.test(artifact.path);
 
 /** First-class task review workspace. This is independent of the artifact count,
  * mode (pick/approve/rank/markup), and project: a single focused media stage,
@@ -67,15 +77,14 @@ const isWeb = (artifact: ReviewArtifact) => artifact.kind === "html" || artifact
  */
 export function VisualReviewInspector(props: Props) {
   const {
-    review, round, history, items, selectedKey, onSelectTask, onClose, onOpenTask, onOpenSession, sessionOpening, onTogglePriority, priorityBusy, allBoards, showResolved,
+    review, round, history, items, selectedKey, onSelectTask, onBack, queueThumbnails, queueModes, queueCounts, onOpenTask, onOpenSession, sessionOpening, onTogglePriority, priorityBusy, allBoards, showResolved,
     onAllBoards, onShowResolved, playable, activeIndex, onFocusArtifact, onChooseArtifact,
     choice, ranking, pins, setPins, pinning, onTogglePin, addPin, renderArtifact,
     posterOf, iframeWidth, onIframeWidth, note, setNote, saving,
     outcome, onOutcome, onSkip, onSnooze,
     resolved, awaitingNextRound, error, primaryVerdict, primaryReady, submit, onNoteOnly,
-    onMoveToDraft, onArchive, onReconsider,
+    onBrowseFiles, imagePreviews, imageCount, onPaste, onDrop, onMoveToDraft, onArchive, onReconsider,
   } = props;
-  const [queueExpanded, setQueueExpanded] = useState(false);
   const [feedbackExpanded, setFeedbackExpanded] = useState(true);
   const [focus, setFocus] = useState(false);
   const [compare, setCompare] = useState<"single" | "side" | "overlay">("single");
@@ -115,7 +124,7 @@ export function VisualReviewInspector(props: Props) {
         event.preventDefault();
         event.stopImmediatePropagation();
         if (focus) setFocus(false);
-        else onClose();
+        else onBack();
       } else if (event.key.toLowerCase() === "f") {
         event.preventDefault();
         event.stopImmediatePropagation();
@@ -133,7 +142,7 @@ export function VisualReviewInspector(props: Props) {
     // Capture before the shared Inbox Escape handler so Focus only exits Focus.
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [focus, onClose, onFocusArtifact, activeIndex, playable.length]);
+  }, [focus, onBack, onFocusArtifact, activeIndex, playable.length]);
 
   const originalAddress = (artifact: ReviewArtifact) => {
     if (artifact.kind === "url") return artifact.path;
@@ -149,7 +158,7 @@ export function VisualReviewInspector(props: Props) {
     try {
       if (artifact.kind === "url") await openUrl(artifact.path);
       else if (artifact.storage === "local" || artifact.storage === "synced") {
-        await openPath(originalAddress(artifact));
+        await openFileInFomni(originalAddress(artifact));
       } else throw new Error("No local file is available for this artifact.");
     } catch (reason) {
       setOpenError("Unable to open original: " + String(reason));
@@ -179,11 +188,12 @@ export function VisualReviewInspector(props: Props) {
   );
 
   return (
-    <section className={"review-visual-inspector" + (focus ? " focus" : "") +
-      (feedbackExpanded ? "" : " feedback-hidden") + (queueExpanded ? " queue-expanded" : "")}>
+    <section onPaste={onPaste} onDragOver={event => event.preventDefault()} onDrop={onDrop}
+      className={"review-visual-inspector" + (focus ? " focus" : "") +
+      (feedbackExpanded ? "" : " feedback-hidden") + (isDashboard(active) ? " web-review" : "")}>
       <header className="review-visual-header">
-        <button type="button" className="button secondary" onClick={onClose}
-          title="Back to Inbox/board (Esc)">← Inbox <span className="review-visual-count">{items.length}</span></button>
+        <button type="button" className="button secondary" onClick={onBack}
+          title="Return to previously selected Inbox item (Esc)">← Previous item</button>
         <div className="review-visual-title"><small>{review.project} · {review.task.id} · Round {round.number}</small>
           <strong title={review.task.title}>{review.task.title}</strong></div>
         <span className={`inbox-task-column-chip column-${review.task.column}`}>{review.task.column}</span>
@@ -224,37 +234,26 @@ export function VisualReviewInspector(props: Props) {
         </div>
       </header>
 
-      <div className="review-visual-body">
-        {!focus && (
-          <aside className="review-visual-queue" aria-label="Feedback queue">
-            <button type="button" className="button secondary review-visual-queue-toggle"
-              onClick={() => setQueueExpanded((value) => !value)}
-              aria-expanded={queueExpanded} title="Expand/collapse task queue">
-              {queueExpanded ? "← Collapse" : "☷"}
-            </button>
-            {queueExpanded ? <>
-              <h3>Feedback inbox <span>{items.length}</span></h3>
-              <div className="review-visual-filters">
-                <label><input type="checkbox" checked={allBoards}
-                  onChange={(event) => onAllBoards(event.target.checked)} /> All boards</label>
-                <label><input type="checkbox" checked={showResolved}
-                  onChange={(event) => onShowResolved(event.target.checked)} /> Resolved</label>
-              </div>
-              <div className="review-visual-queue-cards">
-                {items.map((item) => <button type="button" key={keyOf(item)}
-                  className={"review-visual-queue-card" + (keyOf(item) === selectedKey ? " selected" : "")}
-                  onClick={() => onSelectTask(keyOf(item))}>
-                  <small>{item.project} · {item.task.id}</small>
-                  <strong>{item.task.title}</strong>
-                  <span>{item.task.review_status === "open" ? "Visual review" : "Response"}</span>
-                </button>)}
-              </div>
-            </> : <span className="review-visual-queue-vertical">QUEUE · {items.length}</span>}
-          </aside>
-        )}
+      <div className={"review-visual-body" + (isDashboard(active) ? " web-review" : "")}>
+        {!focus && <InboxQueueSidebar
+          items={items}
+          selectedKey={selectedKey}
+          onSelect={onSelectTask}
+          allBoards={allBoards}
+          showResolved={showResolved}
+          onAllBoards={onAllBoards}
+          onShowResolved={onShowResolved}
+          thumbnails={queueThumbnails}
+          modes={queueModes}
+          counts={queueCounts}
+        />}
 
         <main className="review-visual-center">
           <div className="review-visual-toolbar">
+            {isDashboard(active) && <div className="review-visual-web-summary">
+              <strong>Wartribes Development Dashboard</strong>
+              <p>Live task evidence below. Review its captures and activity, then provide your verdict using the controls above the webview.</p>
+            </div>}
             <span className="review-visual-counter">{activeIndex + 1} / {playable.length}</span>
             <strong title={active?.label}>{active?.label || "Review media"}</strong>
             <span className="review-visual-toolbar-spacer" />
@@ -361,7 +360,7 @@ export function VisualReviewInspector(props: Props) {
             onSnooze={onSnooze}
             onSubmit={(verdict) => void submit(verdict ?? primaryVerdict)}
             primaryLabel={round.mode === "approve" && review.task.column === "done" ? "Done" : undefined}
-            notePresent={!!note.trim()}
+            notePresent={!!note.trim() || imageCount > 0}
             onNoteOnly={() => void onNoteOnly()}
             busy={saving}
             disabled={resolved}
@@ -391,6 +390,9 @@ export function VisualReviewInspector(props: Props) {
                 onChange={(event) => setNote(event.target.value)}
                 placeholder="Tell the agent what to keep or change." />
             </label>
+            <button type="button" className="button secondary inbox-attach-button"
+              disabled={resolved} onClick={onBrowseFiles}>+ Images / local files…</button>
+            {imagePreviews}
             <h3>Annotations · {pins.length}</h3>
             <p className="review-muted">{pinning ? "Click the artwork to place a pin." :
               "Choose Pin to annotate an image or a video frame."}</p>

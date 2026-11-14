@@ -429,6 +429,19 @@ fn highlight_in_fomni(file: String) -> Result<(), String> {
         .map_err(|e| format!("failed to launch Fomni: {e}"))
 }
 
+/// Open a real local Inbox artifact as a Fomni tab, rather than using the OS
+/// default application or revealing just its parent folder.
+#[tauri::command]
+fn open_file_in_fomni(file: String) -> Result<(), String> {
+    let path = fs::canonicalize(&file)
+        .map_err(|error| format!("Inbox file does not exist: {file} ({error})"))?;
+    Command::new(FOMNI_EXE)
+        .arg(&path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("failed to launch Fomni: {error}"))
+}
+
 fn percent_encode_query(value: &str) -> String {
     let mut out = String::new();
     for byte in value.as_bytes() {
@@ -781,6 +794,7 @@ pub fn run() {
             outcome_release,
             verify_release_member,
             highlight_in_fomni,
+            open_file_in_fomni,
             open_in_obsidian,
             open_claimed_t3_session,
             task_open_origin_session,

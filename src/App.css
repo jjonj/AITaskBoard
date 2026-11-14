@@ -3990,3 +3990,127 @@ body.card-dragging .project-tab-wrapper:not(.selected):hover {
   color: #f4d394; background: #463820; border: 1px solid #906e34;
   font-size: 9px; font-weight: 800; white-space: nowrap;
 }
+/* Review UX: the visual workspace keeps the EXACT same Inbox queue as the
+   compact response screen, expanded from the outset (no alternate rail UI). */
+.review-visual-body {
+  grid-template-columns: minmax(215px,265px) minmax(0,1fr) 300px;
+}
+.review-visual-inspector.feedback-hidden .review-visual-body {
+  grid-template-columns: minmax(215px,265px) minmax(0,1fr);
+}
+.review-visual-body > .review-queue {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  align-items: stretch;
+  padding: 12px;
+  gap: 0;
+  border-right: 1px solid #3d4653;
+  background: #1b222c;
+}
+.review-visual-body > .review-queue .review-queue-list { gap: 0; }
+.review-visual-body > .review-queue .review-queue-item { flex-shrink: 0; }
+.review-visual-inspector.focus .review-visual-body {
+  grid-template-columns: minmax(0,1fr);
+}
+
+/* The dashboard is a real browser view BELOW the TaskBoard controls.
+   The webview occupies the combined review+feedback width, not a small
+   image-candidate panel in the center column. */
+.review-visual-body.web-review {
+  grid-template-columns: minmax(215px,265px) minmax(0,1fr) minmax(285px,350px);
+  grid-template-rows: minmax(166px,auto) auto minmax(0,1fr);
+}
+.review-visual-body.web-review > .review-queue {
+  grid-area: 1 / 1 / 4 / 2;
+}
+.review-visual-body.web-review > .review-visual-center {
+  display: contents;
+}
+.review-visual-body.web-review .review-visual-toolbar {
+  grid-area: 1 / 2 / 2 / 3;
+  align-self: stretch;
+  align-content: flex-start;
+  flex-wrap: wrap;
+  background: #14212d;
+}
+.review-visual-web-summary {
+  flex-basis: 100%;
+  order: -1;
+  padding: 8px 3px 13px;
+  color: #dbe9f1;
+  font-size: 13px;
+}
+.review-visual-web-summary strong {font-size: 16px; color:#a9d5e9;}
+.review-visual-web-summary p { margin: 5px 0 0; color: #abc1ce; font-size: 12px; line-height: 1.4; }
+.review-visual-body.web-review .review-visual-criteria { display: none; }
+.review-visual-body.web-review .review-visual-feedback {
+  grid-area: 1 / 3 / 2 / 4;
+  min-height: 0;
+  overflow-y: auto;
+  border-bottom: 1px solid #34485b;
+}
+.review-visual-body.web-review .review-visual-feedback-content {
+  overflow: visible;
+}
+.review-visual-body.web-review .review-visual-feedback header { height: 34px; }
+.review-visual-body.web-review .review-visual-feedback .review-note textarea {min-height:55px;}
+.review-visual-body.web-review .review-visual-viewer {
+  grid-area: 3 / 2 / 4 / 4;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+.review-visual-body.web-review .review-visual-stage,
+.review-visual-body.web-review .review-visual-media,
+.review-visual-body.web-review .review-web-artifact,
+.review-visual-body.web-review iframe {
+  width: 100%; height: 100%; min-height: 0; max-width: none; max-height: none;
+}
+.review-visual-body.web-review .review-visual-stage {padding: 0;}
+.review-visual-body.web-review .review-visual-filmstrip {display:none;}
+.review-visual-body.web-review .inbox-response-footer { grid-area: 2 / 2 / 3 / 4; }
+.review-visual-body.web-review .review-reconsider { grid-area: 2 / 2 / 3 / 4; }
+.review-visual-inspector.feedback-hidden .review-visual-body.web-review {
+  grid-template-columns: minmax(215px,265px) minmax(0,1fr);
+}
+.review-visual-inspector.feedback-hidden .review-visual-body.web-review .review-visual-toolbar {
+  grid-area: 1 / 2 / 2 / 3;
+}
+.review-visual-inspector.feedback-hidden .review-visual-body.web-review .review-visual-viewer,
+.review-visual-inspector.feedback-hidden .review-visual-body.web-review .review-visual-filmstrip,
+.review-visual-inspector.feedback-hidden .review-visual-body.web-review .inbox-response-footer {
+  grid-column: 2 / 3;
+}
+.review-visual-inspector.focus .review-visual-body.web-review {
+  display: grid;
+  grid-template-columns: minmax(0,1fr);
+  grid-template-rows: minmax(0,1fr);
+}
+.review-visual-inspector.focus .review-visual-body.web-review > .review-visual-center {
+  display: flex;
+  grid-area: 1 / 1 / 2 / 2;
+}
+.review-visual-inspector.focus .review-visual-body.web-review .review-visual-toolbar {display:none;}
+.review-visual-inspector.focus .review-visual-body.web-review .review-visual-viewer { flex: 1; display:flex; }
+
+@media(max-width: 1160px) {
+  .review-visual-body:not(.web-review) { grid-template-columns:225px minmax(0,1fr) 260px; }
+  .review-visual-body.web-review { grid-template-columns:225px minmax(0,1fr) minmax(230px,285px); }
+}
+@media(max-width: 900px) {
+  .review-visual-body:not(.web-review) { grid-template-columns:215px minmax(0,1fr); }
+  .review-visual-body:not(.web-review) .review-visual-feedback {display:none;}
+  .review-visual-body.web-review { grid-template-columns:215px minmax(0,1fr); }
+  .review-visual-body.web-review .review-visual-feedback {display:none;}
+  .review-visual-body.web-review .review-visual-viewer,
+  .review-visual-body.web-review .inbox-response-footer {grid-column:2/3;}
+}
+@media(max-width: 720px) {
+  .review-visual-body:not(.web-review),
+  .review-visual-body.web-review { grid-template-columns: minmax(0,1fr); }
+  .review-visual-body > .review-queue {display:none;}
+  .review-visual-body.web-review .review-visual-toolbar {grid-area:1/1/2/2;}
+  .review-visual-body.web-review .review-visual-viewer {grid-area:3/1/4/2;}
+  .review-visual-body.web-review .inbox-response-footer {grid-area:2/1/3/2;}
+}

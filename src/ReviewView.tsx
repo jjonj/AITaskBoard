@@ -8,6 +8,7 @@ import { reviewAsset, reviewReconsider, reviewResolve, reviewShow,
 import type { Task } from "./types";
 import { isUserQueueEligible } from "./userQueueEligibility";
 import { VisualReviewInspector } from "./VisualReviewInspector";
+import { InboxQueueSidebar } from "./InboxQueueSidebar";
 import { InboxResponseFooter, reviewOutcomes } from "./InboxResponseFooter";
 import { InboxRichText } from "./InboxRichText";
 import { parseDescriptionTimeline } from "./descriptionTimeline";
@@ -846,6 +847,27 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
     return () => window.removeEventListener("keydown", keydown);
   });
 
+  // Clicking into a larger visual review retains the previously selected Inbox
+  // item. Back/Escape returns to that item instead of closing TaskBoard Inbox.
+  const navigationHistory = useRef<string[]>([]);
+  const selectInboxItem = (key: string) => {
+    if (selectedKey && selectedKey !== key) navigationHistory.current.push(selectedKey);
+    setSelectedKey(key);
+  };
+  const returnToPrevious = () => {
+    while (navigationHistory.current.length) {
+      const previous = navigationHistory.current.pop()!;
+      if (items.some(item => keyOf(item) === previous)) {
+        setSelectedKey(previous);
+        return;
+      }
+    }
+    const alternate = items.find(item => keyOf(item) !== selectedKey && !item.task.review_status)
+      ?? items.find(item => keyOf(item) !== selectedKey);
+    if (alternate) setSelectedKey(keyOf(alternate));
+    else onClose();
+  };
+
   const pinsFor = (artifact: ReviewArtifact) => pins.filter((pin) => pin.artifact === artifact.id);
   const image = (artifact: ReviewArtifact, className = "") => {
     const src = activeSrc(artifact);
@@ -862,7 +884,9 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
           : null)
         : (showPoster ? null : <iframe ref={isAnimationLabEmbed(artifact) ? embedFrameRef : undefined}
             title={artifact.label} src={reviewEmbedUrl(artifact.path)}
-            sandbox="allow-scripts allow-forms" referrerPolicy="no-referrer"
+            sandbox={/^https?:\/\/(?:localhost|127\.0\.0\.1):(?:3333|8768)\//i.test(artifact.path)
+              ? "allow-scripts allow-forms allow-same-origin" : "allow-scripts allow-forms"}
+            referrerPolicy="no-referrer"
             onError={() => setShowPoster(true)} />);
       return (
         <div className="review-web-artifact">
@@ -905,8 +929,11 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       history={manifest?.rounds.slice(0, -1) ?? []}
       items={items}
       selectedKey={selectedKey}
-      onSelectTask={setSelectedKey}
-      onClose={onClose}
+      onSelectTask={selectInboxItem}
+      onBack={returnToPrevious}
+      queueThumbnails={queueThumbnails}
+      queueModes={queueModes}
+      queueCounts={queueCounts}
       onOpenTask={reviewTask.path === project.path && onOpenUserTask ? () => onOpenUserTask(reviewTask.task) : undefined}
       onOpenSession={() => void openReviewTaskSession(reviewTask)}
       sessionOpening={openingTaskSession}
@@ -962,57 +989,18 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       onDragOver={event => event.preventDefault()} onDrop={onInboxDrop}>
       <button className="button secondary review-close review-close-corner" type="button"
         title="Close Inbox (Esc)" aria-label="Close Inbox" onClick={onClose}>×</button>
-      <aside className="review-queue">
-        <header>
-          <strong>Feedback inbox <span>{items.length}</span></strong>
-
-        </header>
-        <div className="review-queue-filters">
-          <label className="review-all-boards">
-            <input type="checkbox" checked={allBoards} onChange={(event) => setAllBoards(event.target.checked)} />
-            All boards
-          </label>
-          <label className="review-all-boards">
-            <input type="checkbox" checked={showResolved} onChange={(event) => setShowResolved(event.target.checked)} />
-            Include past decisions
-          </label>
-        </div>
-        <nav className="review-queue-list" aria-label="Unified human feedback queue">
-        {items.map((item) => (
-          <button key={keyOf(item)} type="button" title={item.task.title}
-            aria-current={keyOf(item) === selectedKey ? "true" : undefined}
-            className={["review-queue-item", queueThumbnails[keyOf(item)] && "has-preview",
-              keyOf(item) === selectedKey && "selected",
-              item.task.review_status !== "open" && !!item.task.review_status && "resolved",
-              !item.task.review_status && "review-user-item"
-            ].filter(Boolean).join(" ")}
-            onClick={() => setSelectedKey(keyOf(item))}>
-            {queueThumbnails[keyOf(item)] && (
-              <span className="review-queue-media" aria-hidden="true">
-                <img className="review-queue-preview" src={queueThumbnails[keyOf(item)]} alt="" />
-              </span>
-            )}
-            <span className="review-queue-copy">
-              <small className="inbox-queue-breadcrumb">{item.project} · {item.task.id}
-                {item.task.attention.includes("priority") && <span className="inbox-priority-mark" title="Priority">! Priority</span>}
-              </small>
-              <strong>{item.task.title}</strong>
-              <span className="review-queue-meta">
-                <em className={`review-queue-mode review-queue-mode-${queueModes[keyOf(item)] ||
-                  (item.task.review_status ? "review" : "user")}`}>
-                  {queueModes[keyOf(item)] || (item.task.review_status ? "review" : "response")}
-                </em>
-                {item.task.review_status === "awaiting_revision" ? "Rejected · awaiting AI revision" :
-                  item.task.review_status === "resolved" ? "Resolved" :
-                  item.task.review_round ? `Round ${item.task.review_round}` : "Awaiting response"}
-                {(queueCounts[keyOf(item)] ?? 0) > 1 && ` · ${queueCounts[keyOf(item)]} candidates`}
-              </span>
-            </span>
-          </button>
-        ))}
-        </nav>
-        {!items.length && <p className="review-empty">No pending feedback. Agents can request reviews with <code>task review request</code>.</p>}
-      </aside>
+      <InboxQueueSidebar
+        items={items}
+        selectedKey={selectedKey}
+        onSelect={selectInboxItem}
+        allBoards={allBoards}
+        showResolved={showResolved}
+        onAllBoards={setAllBoards}
+        onShowResolved={setShowResolved}
+        thumbnails={queueThumbnails}
+        modes={queueModes}
+        counts={queueCounts}
+      />
       <section className="review-main">
         <div className="review-scroll">
         {error && <div className="error-banner" role="alert">{error}</div>}

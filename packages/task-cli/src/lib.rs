@@ -597,6 +597,41 @@ fn validate_inbox_links(question: &str) -> Result<(), CliError> {
             )));
         }
     }
+    // Inline-code formatting defeats our Markdown renderer's autolinking.
+    // Reject code-wrapped evidence paths before the Inbox receives them.
+    for snippet in question.split('`').skip(1).step_by(2) {
+        let lower = snippet.to_ascii_lowercase();
+        let resembles_path = snippet.contains(":\\") || snippet.contains(":/")
+            || snippet.starts_with(".agents/") || snippet.starts_with("Saved/");
+        if resembles_path && [".jpg", ".png", ".jpeg", ".webp", ".html", ".pdf",
+            ".mp4", ".webm", ".json"].iter().any(|ext| lower.contains(ext)) {
+            return Err(CliError::new("unclickable_inbox_link",
+                "Evidence paths in backticks are not clickable. Use inline plain paths or Markdown [label](path) links."));
+        }
+    }
+    // The Inbox can render concrete absolute paths inline, but shell globs
+    // and grouped placeholders such as screenshots/{top_down,cinematic}.jpg
+    // are not files and will never be clickable evidence.
+    let resource_extensions = [".png", ".jpg", ".jpeg", ".webp", ".gif",
+        ".mp4", ".webm", ".html", ".htm", ".pdf", ".json"];
+    for word in question.split_whitespace() {
+        let reference = word.trim_matches(|ch: char|
+            matches!(ch, '\'' | '"' | '`' | '<' | '>' | '(' | ')' | ',' | ';' | '.'));
+        let lower = reference.to_ascii_lowercase();
+        let file_like = resource_extensions.iter().any(|extension| lower.ends_with(extension));
+        if !file_like { continue; }
+        if reference.contains('{') || reference.contains('}') || reference.contains('*') {
+            return Err(CliError::new("unclickable_inbox_link", format!(
+                "Evidence reference `{reference}` is a pattern, not a real clickable file. List each concrete file separately or attach the media to a visual review."
+            )));
+        }
+        if [".agents/", ".agents\\", "Saved/", "Saved\\", "Content/", "Content\\"]
+            .iter().any(|prefix| reference.starts_with(prefix)) {
+            return Err(CliError::new("unclickable_inbox_link", format!(
+                "Project-relative evidence `{reference}` is not resolvable from the TaskBoard Inbox. Use an absolute existing file path, a proper TaskBoard attachment, or a dashboard/tour link."
+            )));
+        }
+    }
     Ok(())
 }
 
