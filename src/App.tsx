@@ -103,6 +103,14 @@ type ColumnContextMenu = {
   y: number;
 };
 
+// The highlighted drop intent is also the command executed on release.
+// Epic membership is never inferred from mere placement below a card.
+type CardDropIntent =
+  | { kind: "epic"; epicId: string; columnId: string }
+  | { kind: "after"; taskId: string; columnId: string }
+  | { kind: "column"; columnId: string; detach: boolean }
+  | { kind: "project"; projectId: string };
+
 type SnoozeSpan = "day" | "three-days" | "week" | "month";
 type UserQueueReview = { ids: string[]; index: number };
 type UserQueueSnoozes = Record<string, number>;
@@ -655,12 +663,14 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     y: number;
     width: number;
   } | null>(null);
-  const [cardDropTargetId, setCardDropTargetId] = useState<string | null>(null);
+  const [cardDropIntent, setCardDropIntent] = useState<CardDropIntent | null>(null);
   const [cardDragPreview, setCardDragPreview] = useState<{
     id: string;
     title: string;
     x: number;
     y: number;
+    pointerX: number;
+    pointerY: number;
     width: number;
   } | null>(null);
   const [collapsedTaskIds, setCollapsedTaskIds] = useState<Set<string>>(() => {
@@ -2389,7 +2399,7 @@ Details: ${queueRecoveryWarning}`;
     }
   };
 
-  const makeSubtaskOf = async (id: string, parentId: string) => {
+  const makeSubtaskOf = async (id: string, parentId: string, columnId: string) => {
     const task = taskMap.get(id);
     const parent = taskMap.get(parentId);
     if (!task || !parent || parent.kind !== "epic" || id === parentId) return;
@@ -2411,11 +2421,20 @@ Details: ${queueRecoveryWarning}`;
       return next;
     });
 
-    await persistTaskMutation(id, "make subtask", (current) => ({
+    // Joining an epic in another lane must also move the task to that lane.
+    // Persist both fields together so membership and column cannot diverge.
+    const terminal = columns.find((column) => column.id === columnId)?.terminal;
+    await persistTaskMutation(id, "add task to epic", (current) => ({
       ...current,
+      column: columnId,
       parent: parentId,
       position_after: null,
       positioned_at: null,
+      ...(terminal ? {
+        kind: current.kind === "for_user" ? "task" as const : current.kind,
+        attention: current.attention.filter((flag) => flag !== "needs-user"),
+        ...(!current.completed ? { completed_at: new Date().toISOString() } : {}),
+      } : {}),
     }));
   };
 
@@ -2429,6 +2448,24 @@ Details: ${queueRecoveryWarning}`;
       return x >= rect.left && x <= rect.right && y >= rect.top;
     });
     return lane?.dataset.columnId ?? null;
+  };
+
+  const dropFeedback = (intent: CardDropIntent | null, dragged?: Task) => {
+    const columnName = (id: string) => columns.find((column) => column.id === id)?.name ?? id;
+    const retainedParent = dragged?.parent ? `keeps epic ${dragged.parent}` : "does not join an epic";
+    if (!intent) return { title: "No drop target", detail: "Drop on an epic to join it, or elsewhere in a column to move." };
+    switch (intent.kind) {
+      case "epic":
+        return { title: `Join epic ${intent.epicId}`, detail: `Move to ${columnName(intent.columnId)} and set epic parent` };
+      case "after":
+        return { title: `Place below ${intent.taskId}`, detail: `Move to ${columnName(intent.columnId)}; ${retainedParent}` };
+      case "column":
+        if (dragged?.kind === "epic") return { title: `Move epic tasks to ${columnName(intent.columnId)}`, detail: "Only tasks in this epic's source column move" };
+        return { title: `Move to ${columnName(intent.columnId)}`, detail: intent.detach && dragged?.parent
+          ? `Leave epic ${dragged.parent}` : retainedParent };
+      case "project":
+        return { title: `Transfer to ${intent.projectId}`, detail: "Move task to another project" };
+    }
   };
 
   const beginCardDrag = (
@@ -2461,19 +2498,29 @@ Details: ${queueRecoveryWarning}`;
       setDragId(null);
       setDragSourceColumn(null);
       setCardDragPreview(null);
-      setCardDropTargetId(null);
+      setCardDropIntent(null);
       document.body.classList.remove("card-dragging");
     };
 
-    const validDropTaskAt = (x: number, y: number) => {
-      const candidate = document
-        .elementFromPoint(x, y)
-        ?.closest<HTMLElement>("[data-task-id]")
-        ?.dataset.taskId;
-      if (isEpic || !candidate || candidate === task.id) return null; // epics only target columns
-      // Normal cards are placement targets, not parents. Only epic cards
-      // establish hierarchy; moving onto another card merely places below it.
-      return taskMap.has(candidate) ? candidate : null;
+    const dropIntentAt = (x: number, y: number): CardDropIntent | null => {
+      const hovered = document.elementFromPoint(x, y);
+      const projectId = hovered?.closest<HTMLElement>("[data-project-tab-id]")?.dataset.projectTabId;
+      if (!isEpic && projectId && projectId !== project.id) return { kind: "project", projectId };
+
+      const columnId = columnAtPoint(x, y);
+      if (!columnId) return null;
+      if (isEpic) return { kind: "column", columnId, detach: false };
+
+      // An epic proxy is just as intentional a parent target as its real card.
+      // Ordinary cards only specify placement, and never change the parent.
+      const targetId = hovered?.closest<HTMLElement>("[data-task-id]")?.dataset.taskId
+        ?? hovered?.closest<HTMLElement>("[data-epic-proxy]")?.dataset.epicProxy;
+      if (targetId && targetId !== task.id) {
+        const target = taskMap.get(targetId);
+        if (target?.kind === "epic") return { kind: "epic", epicId: targetId, columnId };
+        if (target) return { kind: "after", taskId: targetId, columnId: target.column };
+      }
+      return { kind: "column", columnId, detach: !!hovered?.closest(".column-header") };
     };
 
     const handleMove = (moveEvent: MouseEvent) => {
@@ -2485,7 +2532,7 @@ Details: ${queueRecoveryWarning}`;
       ) {
         dragging = true;
         stopAutoScroll = startDragEdgeScroll(boardRef.current, () => ({ x: pointerX, y: pointerY }), () => {
-          setCardDropTargetId(validDropTaskAt(pointerX, pointerY));
+          setCardDropIntent(dropIntentAt(pointerX, pointerY));
           setHoverTask(null);
         });
         setDragId(task.id);
@@ -2495,6 +2542,8 @@ Details: ${queueRecoveryWarning}`;
           title: task.title,
           x: moveEvent.clientX - grabOffsetX,
           y: moveEvent.clientY - grabOffsetY,
+          pointerX: moveEvent.clientX,
+          pointerY: moveEvent.clientY,
           width: rect.width,
         });
         document.body.classList.add("card-dragging");
@@ -2507,11 +2556,11 @@ Details: ${queueRecoveryWarning}`;
           title: task.title,
           x: moveEvent.clientX - grabOffsetX,
           y: moveEvent.clientY - grabOffsetY,
+          pointerX: moveEvent.clientX,
+          pointerY: moveEvent.clientY,
           width: rect.width,
         });
-        setCardDropTargetId(
-          validDropTaskAt(moveEvent.clientX, moveEvent.clientY),
-        );
+        setCardDropIntent(dropIntentAt(moveEvent.clientX, moveEvent.clientY));
       }
     };
 
@@ -2519,19 +2568,7 @@ Details: ${queueRecoveryWarning}`;
     const handleUp = (upEvent: MouseEvent | PointerEvent) => {
       if (finished) return;
       finished = true;
-      const droppedProjectId = dragging
-        ? document.elementFromPoint(upEvent.clientX, upEvent.clientY)
-            ?.closest<HTMLElement>("[data-project-tab-id]")?.dataset.projectTabId
-        : null;
-      const taskTargetId = dragging
-        ? validDropTaskAt(upEvent.clientX, upEvent.clientY)
-        : null;
-      const taskTarget = taskTargetId ? taskMap.get(taskTargetId) : null;
-      const columnHeaderTarget = dragging
-        ? document.elementFromPoint(upEvent.clientX, upEvent.clientY)
-            ?.closest<HTMLElement>(".column-header")
-        : null;
-      const columnTarget = dragging ? columnAtPoint(upEvent.clientX, upEvent.clientY) : null;
+      const intent = dragging ? dropIntentAt(upEvent.clientX, upEvent.clientY) : null;
 
       cleanup();
 
@@ -2541,26 +2578,28 @@ Details: ${queueRecoveryWarning}`;
       }
       if (isEpic) {
         suppressEpicClickUntil.current = Date.now() + 300;
-        const column = taskTarget?.column ?? columnTarget;
-        if (column) void moveEpicTo(task.id, sourceColumn, column);
+        if (intent?.kind === "column") void moveEpicTo(task.id, sourceColumn, intent.columnId);
         return;
       }
 
-      if (droppedProjectId && droppedProjectId !== project.id) {
-        window.dispatchEvent(new CustomEvent("taskboard:project-transfer", {
-          detail: {
-            taskId: task.id, expectedRevision: task.revision,
-            sourceProjectId: project.id, destinationProjectId: droppedProjectId,
-          },
-        }));
-        return;
-      }
-      if (taskTarget?.kind === "epic") {
-        void makeSubtaskOf(task.id, taskTarget.id);
-      } else if (taskTarget) {
-        void moveTaskTo(task.id, taskTarget.column, taskTarget.id);
-      } else if (columnTarget) {
-        void moveTaskTo(task.id, columnTarget, null, !!columnHeaderTarget);
+      switch (intent?.kind) {
+        case "project":
+          window.dispatchEvent(new CustomEvent("taskboard:project-transfer", {
+            detail: {
+              taskId: task.id, expectedRevision: task.revision,
+              sourceProjectId: project.id, destinationProjectId: intent.projectId,
+            },
+          }));
+          break;
+        case "epic":
+          void makeSubtaskOf(task.id, intent.epicId, intent.columnId);
+          break;
+        case "after":
+          void moveTaskTo(task.id, intent.columnId, intent.taskId);
+          break;
+        case "column":
+          void moveTaskTo(task.id, intent.columnId, null, intent.detach);
+          break;
       }
     };
 
@@ -3524,7 +3563,7 @@ Details: ${queueRecoveryWarning}`;
             <div
               className={`column ${column.terminal ? "terminal" : ""} ${highlightedEpicId && taskMap.get(highlightedEpicId)?.column === column.id ? "epic-proxy-origin-column" : ""} ${
                 dragColumnId === column.id ? "column-drag-source" : ""
-              }${columnActivityClass}`}
+              } ${cardDropIntent?.kind === "column" && cardDropIntent.columnId === column.id ? "column-drop-target" : ""}${columnActivityClass}`}
               key={column.id}
               data-column-id={column.id}
               style={columnStyle}
@@ -3598,7 +3637,7 @@ Details: ${queueRecoveryWarning}`;
                       <button
                         type="button"
                         key={`epic-proxy-${epic.id}-${rowIndex}`}
-                        className={`epic-proxy${highlightedEpicId === epic.id ? " epic-proxy-active" : ""}${dragId === epic.id && dragSourceColumn === column.id ? " drag-source" : ""}`}
+                        className={`epic-proxy${highlightedEpicId === epic.id ? " epic-proxy-active" : ""}${dragId === epic.id && dragSourceColumn === column.id ? " drag-source" : ""}${cardDropIntent?.kind === "epic" && cardDropIntent.epicId === epic.id && cardDropIntent.columnId === column.id ? " drop-parent-target" : ""}`}
                         data-epic-proxy={epic.id}
                         title={`${epic.id}: ${epic.title}. Drag to move only this column's cards. Click to jump to the original in ${realColumn?.name ?? epic.column}.`}
                         aria-label={`Epic proxy ${epic.id}: ${epic.title}. Click to jump to the real epic.`}
@@ -3621,7 +3660,8 @@ Details: ${queueRecoveryWarning}`;
                   return (
                     <article
                       className={`task-card ${keyboardSelectedTaskId === task.id ? "keyboard-selected" : ""} ${task.kind === "epic" ? "epic-card" : isForUser(task) ? "for-user-card" : task.kind === "recurring" ? "recurring-card" : ""} ${task.attention.includes("priority") ? "priority-card" : ""} ${highlightedEpicId === task.id ? "epic-proxy-highlight" : ""} ${dragId === task.id && dragSourceColumn === column.id ? "drag-source" : ""} ${
-                        cardDropTargetId === task.id ? (task.kind === "epic" ? "drop-parent-target" : "drop-after-target") : ""
+                        cardDropIntent?.kind === "epic" && cardDropIntent.epicId === task.id && cardDropIntent.columnId === column.id ? "drop-parent-target" :
+                         cardDropIntent?.kind === "after" && cardDropIntent.taskId === task.id ? "drop-after-target" : ""
                       } ${
                         taskActivity[task.id]
                           ? `activity-${taskActivity[task.id]}`
@@ -3824,6 +3864,21 @@ Details: ${queueRecoveryWarning}`;
           </div>
         </div>
       )}
+
+      {cardDragPreview && (() => {
+        const feedback = dropFeedback(cardDropIntent, taskMap.get(cardDragPreview.id));
+        return <div
+          className={`card-drop-feedback ${cardDropIntent?.kind ?? "none"}`}
+          style={{
+            left: Math.max(8, Math.min(window.innerWidth - 310, cardDragPreview.pointerX + 18)),
+            top: Math.max(8, Math.min(window.innerHeight - 75, cardDragPreview.pointerY + 18)),
+          }}
+          role="status"
+        >
+          <strong>{feedback.title}</strong>
+          <span>{feedback.detail}</span>
+        </div>;
+      })()}
 
       {hoverTask && !cardDragPreview && !contextMenu && (
         <aside

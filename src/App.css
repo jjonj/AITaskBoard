@@ -551,6 +551,34 @@ body.card-dragging .task-card {
   opacity: 0.96;
 }
 
+/* The badge follows the pointer and describes the exact release operation.
+   Epic membership and column-only placement use different colors. */
+.card-drop-feedback {
+  position: fixed;
+  z-index: 70;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  box-sizing: border-box;
+  max-width: min(300px, calc(100vw - 16px));
+  padding: 7px 10px;
+  border: 1px solid #66889b;
+  border-radius: 7px;
+  background: #17262f;
+  color: #e3f5fc;
+  box-shadow: 0 8px 24px rgba(0,0,0,.45);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.card-drop-feedback strong { font-size: 12px; }
+.card-drop-feedback span { color: #c2d0d9; }
+.card-drop-feedback.epic { border-color: #d3a5fc; background: #352343; color: #f4deff; }
+.card-drop-feedback.epic span { color: #e1c9f5; }
+.card-drop-feedback.after { border-color: #7ad8b4; background: #19382e; color: #d4f9e8; }
+.card-drop-feedback.after span { color: #b8e7d4; }
+.card-drop-feedback.none { border-color: #76545b; background: #322428; color: #eeced0; }
+
 .card-drag-preview h3 {
   min-width: 0;
   margin: 0;
@@ -1311,10 +1339,32 @@ body.column-dragging * {
 }
 
 .task-card.drop-parent-target {
-  border-color: #94bdff;
-  background: color-mix(in srgb, #6e9ee8 18%, #20242a);
-  box-shadow: 0 0 0 2px rgba(116, 165, 238, 0.18);
+  position: relative;
+  border-color: #d3a5fc;
+  background: color-mix(in srgb, #b377e3 22%, #20242a);
+  box-shadow: 0 0 0 2px rgba(190, 131, 242, 0.27);
   transform: translateY(-1px) scale(1.01);
+}
+.task-card.drop-parent-target::after {
+  content: "JOIN EPIC";
+  position: absolute;
+  top: -9px;
+  right: 9px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #563675;
+  color: #f7e5ff;
+  border: 1px solid #d3a5fc;
+  font-size: 9px;
+  font-weight: 750;
+  pointer-events: none;
+}
+.column.column-drop-target {
+  border-color: #76a6bf;
+  box-shadow: inset 0 3px 0 #76a6bf, 0 0 0 2px rgba(118,166,191,.18);
+}
+.column.column-drop-target > .cards {
+  background: rgba(93, 151, 186, .055);
 }
 
 .task-context-menu {
@@ -1824,6 +1874,18 @@ body.column-dragging * {
   border-left-color: #e0b8ff;
   background: #3c2e50;
   box-shadow: 0 0 0 1px rgba(200,154,255,.16), 0 0 11px rgba(168,103,236,.19);
+}
+.epic-proxy.drop-parent-target {
+  border-color: #e0b8ff;
+  background: #553a69;
+  box-shadow: 0 0 0 2px rgba(190,131,242,.3);
+}
+.epic-proxy.drop-parent-target::after {
+  content: "JOIN";
+  margin-left: auto;
+  font-size: 9px;
+  font-weight: 800;
+  color: #f8e3ff;
 }
 .epic-proxy:focus-visible { outline: 2px solid #e0b8ff; outline-offset: 2px; }
 .epic-proxy.drag-source { opacity: .28; }
