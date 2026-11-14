@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import "./ProjectTabs.css";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -10,6 +11,8 @@ type Props = {
   Board: (props: { project: ProjectTab; onInteractionChange: (locked: boolean) => void; requestedReviewId?: string; requestedTask?: {id: string; requestKey: number} }) => React.ReactNode;
 };
 type DialogMode = "create" | "folders" | null;
+type TabDrop = { id: string; after: boolean };
+type TabPointerDrag = { pointerId: number; fromId: string; x: number; y: number; started: boolean; target: TabDrop | null };
 const OBSIDIAN_ROOT = "B:\\GDrive\\SharedWithPhone\\Obsidian\\jjj";
 
 // Suggest an editable namespace for new projects; never infer a change for an
@@ -110,8 +113,11 @@ export function ProjectTabs({ Board }: Props) {
   const recentProjects = useRef<string[]>([]);
   const [switchHint, setSwitchHint] = useState<string | null>(null);
   const switchHintTimer = useRef<number | null>(null);
-  const draggedTab = useRef<string | null>(null);
-  const [dropTab, setDropTab] = useState<string | null>(null);
+  const tabStrip = useRef<HTMLDivElement>(null);
+  const tabPointerDrag = useRef<TabPointerDrag | null>(null);
+  const suppressTabClick = useRef(false);
+  const [draggingTab, setDraggingTab] = useState<string | null>(null);
+  const [dropTab, setDropTab] = useState<TabDrop | null>(null);
   const [changedProjects, setChangedProjects] = useState<Record<string, boolean>>({});
   const [inboxIdsByPath, setInboxIdsByPath] = useState<Record<string, { eligibleIds: string[]; reviewIds: string[] }>>({});
   const knownBoardTokens = useRef<Record<string, string>>({});
@@ -386,13 +392,14 @@ export function ProjectTabs({ Board }: Props) {
     }
   };
 
-  const reorder = async (fromId: string, toId: string) => {
+  const reorder = async (fromId: string, toId: string, after: boolean) => {
     if (!catalog || working || locked || dialogMode || fromId === toId) return;
     const ids = catalog.projects.map((item) => item.id);
-    const source = ids.indexOf(fromId), destination = ids.indexOf(toId);
-    if (source < 0 || destination < 0) return;
-    const next = [...ids];
-    next.splice(destination, 0, ...next.splice(source, 1));
+    if (!ids.includes(fromId) || !ids.includes(toId)) return;
+
+    const next = ids.filter((id) => id !== fromId);
+    next.splice(next.indexOf(toId) + Number(after), 0, fromId);
+    if (next.every((id, index) => id === ids[index])) return;
     setWorking(true);
     setError("");
     try {
@@ -402,6 +409,66 @@ export function ProjectTabs({ Board }: Props) {
       setError(String(err));
     } finally { setWorking(false); }
   };
+
+  // Tab pointers use a movement threshold so ordinary clicks still switch boards.
+  // Unlike native HTML drag/drop, this works consistently over WebView buttons.
+  useEffect(() => {
+    const clearDrag = () => {
+      tabPointerDrag.current = null;
+      setDraggingTab(null);
+      setDropTab(null);
+    };
+    const onMove = (event: PointerEvent) => {
+      const drag = tabPointerDrag.current;
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      // A release outside the window may not send pointerup back to WebView.
+      if (event.pointerType === "mouse" && !(event.buttons & 1)) { clearDrag(); return; }
+      if (!drag.started) {
+        if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 6) return;
+        drag.started = true;
+        setDraggingTab(drag.fromId);
+      }
+      if (event.cancelable) event.preventDefault();
+      const strip = tabStrip.current;
+      if (!strip || working || locked || dialogMode) return;
+      const bounds = strip.getBoundingClientRect();
+      if (event.clientY < bounds.top - 12 || event.clientY > bounds.bottom + 12) {
+        drag.target = null;
+        setDropTab(null);
+        return;
+      }
+      const tabs = Array.from(strip.querySelectorAll<HTMLElement>("[data-project-tab-id]"));
+      const target = tabs.find((tab) => event.clientX < tab.getBoundingClientRect().right) ?? tabs[tabs.length - 1];
+      if (!target?.dataset.projectTabId) return;
+      const tabBounds = target.getBoundingClientRect();
+      const next = { id: target.dataset.projectTabId, after: event.clientX >= (tabBounds.left + tabBounds.right) / 2 };
+      drag.target = next;
+      setDropTab((previous) => previous?.id === next.id && previous.after === next.after ? previous : next);
+    };
+    const onUp = (event: PointerEvent) => {
+      const drag = tabPointerDrag.current;
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      if (drag.started) {
+        suppressTabClick.current = true;
+        window.setTimeout(() => { suppressTabClick.current = false; }, 0);
+      }
+      clearDrag();
+      if (drag.started && drag.target && drag.fromId !== drag.target.id) {
+        void reorder(drag.fromId, drag.target.id, drag.target.after);
+      }
+    };
+    const onCancel = () => clearDrag();
+    window.addEventListener("pointermove", onMove, { passive: false });
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
+    window.addEventListener("blur", onCancel);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      window.removeEventListener("blur", onCancel);
+    };
+  }, [catalog, working, locked, dialogMode]);
 
   const undoProjectChange = async () => {
     if (!undoProjectAction || working || locked || dialogMode) return;
@@ -592,32 +659,25 @@ export function ProjectTabs({ Board }: Props) {
   return (
     <div className="project-shell">
       {switchHint && <div className="project-switch-hint" role="status">Switching to {switchHint} · Ctrl+Tab</div>}
-      <div className="project-tabs" role="tablist" aria-label="Project task boards">
+      <div className="project-tabs" ref={tabStrip} role="tablist" aria-label="Project task boards">
         {catalog?.projects.map((project) => (
-          <div className={`project-tab-wrapper ${project.id === catalog.activeId ? "selected" : ""} ${changedProjects[project.id] ? "changed" : ""} ${dropTab === project.id ? "project-tab-drop-target" : ""}`}
+          <div className={`project-tab-wrapper ${project.id === catalog.activeId ? "selected" : ""} ${changedProjects[project.id] ? "changed" : ""} ${draggingTab === project.id ? "project-tab-being-dragged" : ""} ${dropTab?.id === project.id && draggingTab !== project.id ? (dropTab.after ? "project-tab-insert-after" : "project-tab-insert-before") : ""}`}
             key={project.id}
             data-project-tab-id={project.id}
-            draggable={!working && !locked && !dialogMode}
-            onDragStart={(event) => {
-              draggedTab.current = project.id;
-              event.dataTransfer.effectAllowed = "move";
-              event.dataTransfer.setData("text/plain", project.id);
+            onPointerDown={(event) => {
+              if (event.button !== 0 || !event.isPrimary || working || locked || dialogMode ||
+                  !(event.target as Element).closest(".project-tab")) return;
+              tabPointerDrag.current = {
+                pointerId: event.pointerId, fromId: project.id, x: event.clientX,
+                y: event.clientY, started: false, target: null,
+              };
             }}
-            onDragOver={(event) => {
-              if (!draggedTab.current || draggedTab.current === project.id) return;
+            onClickCapture={(event) => {
+              if (!suppressTabClick.current) return;
               event.preventDefault();
-              event.dataTransfer.dropEffect = "move";
-              setDropTab(project.id);
+              event.stopPropagation();
+              suppressTabClick.current = false;
             }}
-            onDragLeave={() => setDropTab((current) => current === project.id ? null : current)}
-            onDrop={(event) => {
-              event.preventDefault();
-              const source = draggedTab.current;
-              draggedTab.current = null;
-              setDropTab(null);
-              if (source) void reorder(source, project.id);
-            }}
-            onDragEnd={() => { draggedTab.current = null; setDropTab(null); }}
           >
             <button
               type="button"

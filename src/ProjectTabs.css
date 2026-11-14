@@ -1,0 +1,27 @@
+/* Project tab reordering: a precise insertion edge instead of an ambiguous full-tab target. */
+.project-tab-wrapper {
+  position: relative;
+  user-select: none;
+  touch-action: none;
+}
+.project-tab-wrapper .project-tab:not(:disabled) { cursor: grab; }
+.project-tab-wrapper.project-tab-being-dragged {
+  opacity: .62;
+  background: #263e56;
+}
+.project-tab-wrapper.project-tab-being-dragged .project-tab { cursor: grabbing; }
+.project-tab-wrapper.project-tab-insert-before::before,
+.project-tab-wrapper.project-tab-insert-after::after {
+  content: "";
+  position: absolute;
+  z-index: 4;
+  top: 3px;
+  bottom: 3px;
+  width: 4px;
+  border-radius: 4px;
+  background: #87c8ff;
+  box-shadow: 0 0 0 1px #0c1118, 0 0 10px #4da5ed;
+  pointer-events: none;
+}
+.project-tab-wrapper.project-tab-insert-before::before { left: -4px; }
+.project-tab-wrapper.project-tab-insert-after::after { right: -4px; }
