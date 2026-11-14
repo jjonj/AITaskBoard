@@ -3191,7 +3191,7 @@ pub(crate) fn write_text_atomic(path: &Path, text: &str) -> Result<(), TaskStore
     // A move notification is based on the persisted before/after frontmatter,
     // not on a UI drag or a requested column that might have been rejected.
     let announcement = if path.extension().is_some_and(|ext| ext == "md") && text.contains("announce") {
-        fs::read_to_string(path).ok().and_then(|before| column_move_announcement(&before, text))
+        fs::read_to_string(path).ok().and_then(|before| column_move_announcement(path, &before, text))
     } else {
         None
     };
@@ -3227,7 +3227,7 @@ pub(crate) fn write_text_atomic(path: &Path, text: &str) -> Result<(), TaskStore
     saved
 }
 
-/// Only the four frontmatter fields needed to identify a real announcement.
+/// Only the task frontmatter fields needed to identify a real announcement.
 #[derive(Deserialize)]
 struct AnnouncementTask {
     id: String,
@@ -3236,16 +3236,25 @@ struct AnnouncementTask {
     #[serde(default)] attention: Vec<TaskAttention>,
 }
 
-fn column_move_announcement(before: &str, after: &str) -> Option<String> {
+fn column_move_announcement(path: &Path, before: &str, after: &str) -> Option<String> {
     let previous: AnnouncementTask = serde_yaml::from_str(&split_frontmatter(before).ok()?.0).ok()?;
     let current: AnnouncementTask = serde_yaml::from_str(&split_frontmatter(after).ok()?.0).ok()?;
     if previous.id != current.id || previous.column == current.column ||
         !current.attention.contains(&TaskAttention::Announce) {
         return None;
     }
-    // AISpeak enforces a 20-word maximum. Cap only the descriptive suffix.
-    let column = current.column.replace('-', " ").replace('_', " ");
-    let introduction = format!("{} moved to {}.", current.id, column);
+
+    // Resolve the owning board even for archived tasks under Archive/<year>/.
+    // Use display names rather than the task ID prefix and column slug.
+    let board = path.ancestors().skip(1).find_map(|folder| {
+        let text = fs::read_to_string(folder.join(BOARD_FILE)).ok()?;
+        parse_board(&text).ok()
+    })?;
+    let column = board.columns.iter().find(|column| column.id == current.column)
+        .map(|column| column.name.as_str())
+        .unwrap_or(current.column.as_str());
+    let introduction = format!("Task from the {} Taskboard, has moved to {}.", board.name, column);
+    // AISpeak enforces a 20-word maximum; preserve the full location phrase.
     let remaining = 20usize.saturating_sub(introduction.split_whitespace().count());
     let title = current.title.split_whitespace().take(remaining).collect::<Vec<_>>().join(" ");
     Some(format!("{introduction} {title}").trim().to_owned())
