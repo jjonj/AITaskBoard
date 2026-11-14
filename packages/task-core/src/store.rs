@@ -967,6 +967,7 @@ impl FsTaskStore {
             review_status: None,
             review_round: None,
             created,
+            observed_modified_at: None,
             completed: None,
             completed_at: None,
             description: draft.description,
@@ -2731,6 +2732,9 @@ fn parse_task(path: &Path, archived: bool, text: &str) -> Result<Task, TaskStore
         review_status: meta.review_status,
         review_round: meta.review_round,
         created: meta.created,
+        observed_modified_at: fs::metadata(path).ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .map(|modified| DateTime::<Utc>::from(modified).to_rfc3339()),
         completed: meta.completed,
         completed_at: meta.completed_at,
         description,

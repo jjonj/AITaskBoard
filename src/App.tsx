@@ -25,6 +25,7 @@ import { TaskTracePanel } from "./TaskTracePanel";
 import { StaleBlockerPanel } from "./StaleBlockerPanel";
 import { AgentRecoverySettings } from "./AgentRecoverySettings";
 import { TaskFilterPanel, type TaskFilterSelection } from "./TaskFilterPanel";
+import { todaysWorkIds } from "./todaysWork";
 import { mergeTaskEdits } from "./taskMerge";
 import type { ProjectTab, TaskIdReservation, ExecutionMode, QueueOverview, QueueCapacity, ClaimHealth, StaleBlocker } from "./api";
 import {
@@ -307,6 +308,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const collapsedKey = storageKey("collapsedTasks");
   const blockedInboxFilterKey = storageKey("hideBlockedInboxTasks");
   const hideWaitingKey = storageKey("hideDependencyWaitingTasks");
+  const todaysWorkKey = storageKey("todaysWork");
   const [snapshot, setSnapshot] = useState<BoardSnapshot | null>(null);
   const [query, setQuery] = useState("");
   const [searchResultsOpen, setSearchResultsOpen] = useState(false);
@@ -423,6 +425,22 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     try { window.localStorage.setItem(hideWaitingKey, String(hideWaitingTasks)); }
     catch { /* The board filter remains functional without persistence. */ }
   }, [hideWaitingKey, hideWaitingTasks]);
+  const [todaysWork, setTodaysWork] = useState(() => {
+    try { return window.localStorage.getItem(todaysWorkKey) === "true"; }
+    catch { return false; }
+  });
+  const [todayClock, setTodayClock] = useState(Date.now);
+  useEffect(() => {
+    try { window.localStorage.setItem(todaysWorkKey, String(todaysWork)); }
+    catch { /* Filtering still works without persistence. */ }
+  }, [todaysWorkKey, todaysWork]);
+  useEffect(() => {
+    if (!todaysWork) return;
+    setTodayClock(Date.now());
+    // Rollover at local midnight without requiring a manual refresh.
+    const timer = window.setInterval(() => setTodayClock(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, [todaysWork]);
   const [staleBlockers, setStaleBlockers] = useState<StaleBlocker[]>([]);
   const [staleDrawerOpen, setStaleDrawerOpen] = useState(false);
   const [agentSettingsOpen, setAgentSettingsOpen] = useState(false);
@@ -1133,10 +1151,14 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     [snapshot],
   );
 
+  const todaysWorkSet = useMemo(() => todaysWork
+    ? todaysWorkIds(activeTasks, columns, isComplete, todayClock)
+    : null, [todaysWork, activeTasks, columns, remotePrerequisites, todayClock]);
   const visibleTasks = useMemo(() => {
     const needle = query.trim().toLowerCase();
+    const scoped = todaysWorkSet ? activeTasks.filter(task => todaysWorkSet.has(task.id)) : activeTasks;
     const candidates = needle
-      ? activeTasks.filter((task) =>
+      ? scoped.filter((task) =>
           [
             task.id,
             task.title,
@@ -1151,7 +1173,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
             .toLowerCase()
             .includes(needle),
         )
-      : activeTasks;
+      : scoped;
 
     const hasIconFilter = taskFilters.icons.length > 0 || taskFilters.noIcon;
     return candidates.filter((task) => {
@@ -1168,9 +1190,9 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
 
       // Collapsing an epic hides its executable descendants in every column,
       // including while searching. Orange For user cards are always visible.
-      return !isHiddenByCollapsedEpic(task, collapsedTaskIds, taskMap);
+      return !!todaysWorkSet || !isHiddenByCollapsedEpic(task, collapsedTaskIds, taskMap);
     });
-  }, [activeTasks, query, taskMap, collapsedTaskIds, taskFilters, remotePrerequisites, columns]);
+  }, [activeTasks, todaysWorkSet, query, taskMap, collapsedTaskIds, taskFilters, remotePrerequisites, columns]);
 
   const activeFilterCount = taskFilters.icons.length + Number(taskFilters.noIcon) +
     taskFilters.columns.length + taskFilters.readiness.length +
@@ -3383,6 +3405,13 @@ Details: ${queueRecoveryWarning}`;
             />}
           </div>}
           {!reviewOpen && <button type="button"
+            className={`toolbar-toggle${todaysWork ? " on" : ""}`}
+            aria-pressed={todaysWork}
+            onClick={() => setTodaysWork(value => !value)}
+            title="Show tasks touched today and the 10 highest-priority pending pickups (T3 Keep Busy order). Temporarily reveals hidden columns and waiting work.">
+            Today’s work
+          </button>}
+          {!reviewOpen && <button type="button"
             className={`toolbar-toggle${hideWaitingTasks ? " on" : ""}`}
             aria-pressed={hideWaitingTasks}
             onClick={() => setHideWaitingTasks((value) => !value)}
@@ -3514,7 +3543,7 @@ Details: ${queueRecoveryWarning}`;
           const columnQueueMixed = queuedColumnCount > 0 && queuedColumnCount < eligibleColumnQueue.length;
           const columnTasks = orderCardsByDependencies(applyCardPlacements(allColumnTasks
             .filter((task) => !(column.id === "blocked" && hideBlockedInboxTasks && isInReviewInbox(task)))
-            .filter((task) => !hideWaitingTasks || taskFilters.readiness.includes("waiting") || isComplete(task.id) || task.column === "in-progress" || readinessOf(task) !== "waiting")
+            .filter((task) => todaysWork || !hideWaitingTasks || taskFilters.readiness.includes("waiting") || isComplete(task.id) || task.column === "in-progress" || readinessOf(task) !== "waiting")
             .sort((a, b) => column.terminal
               ? completedSortTime(b) - completedSortTime(a) || b.id.localeCompare(a.id)
               : attentionRank(a) - attentionRank(b) ||
@@ -3539,7 +3568,9 @@ Details: ${queueRecoveryWarning}`;
             ? ` activity-${columnActivityKind}`
             : "";
 
-          if (column.hidden && (!column.snoozed_until || Date.parse(column.snoozed_until) > Date.now())) {
+          // Focus mode shows only relevant columns and temporarily reveals hidden ones.
+          if (todaysWork && columnTasks.length === 0) return null;
+          if (!todaysWork && column.hidden && (!column.snoozed_until || Date.parse(column.snoozed_until) > Date.now())) {
             return (
               <button
                 className={`hidden-column${column.snoozed_until ? " snoozed" : ""}${columnActivityClass}`}

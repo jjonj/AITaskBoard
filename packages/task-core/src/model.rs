@@ -152,6 +152,9 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_round: Option<u32>,
     pub created: String,
+    /// Read-only filesystem activity evidence for board views; never written to Markdown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_modified_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -69,6 +69,8 @@ export type Task = {
   review_status?: "open" | "awaiting_revision" | "resolved" | null;
   review_round?: number | null;
   created: string;
+  /** Latest observed file write, not necessarily a substantive task edit. */
+  observed_modified_at?: string | null;
   completed: string | null;
   completed_at?: string | null;
   last_run_at?: string | null;
