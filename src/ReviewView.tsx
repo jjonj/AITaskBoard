@@ -8,12 +8,12 @@ import { reviewAsset, reviewReconsider, reviewResolve, reviewShow,
 import type { Task } from "./types";
 import { isUserQueueEligible } from "./userQueueEligibility";
 import { VisualReviewInspector } from "./VisualReviewInspector";
-import { InboxQueueSidebar } from "./InboxQueueSidebar";
+import { InboxQueueSidebar, type InboxQueueItem } from "./InboxQueueSidebar";
 import { InboxResponseFooter, reviewOutcomes } from "./InboxResponseFooter";
 import { InboxRichText } from "./InboxRichText";
 import { parseDescriptionTimeline } from "./descriptionTimeline";
 
-type QueueItem = { path: string; project: string; task: Task };
+type QueueItem = InboxQueueItem;
 // Only the most recent text-Inbox action is reversible. Its saved revision
 // guards against undo overwriting progress made by another agent afterwards.
 type AnswerUndo = { path: string; key: string; before: Task; savedRevision: string };
@@ -309,20 +309,30 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
         project: board,
         snapshot: await loadBoard(board.path),
       })));
-      const pending = snapshots.flatMap(({ project: board, snapshot }) =>
-        snapshot.tasks.filter((task) => !task.archived &&
-          (task.review_status === "open" ||
-            (showResolved && (task.review_status === "resolved" || task.review_status === "awaiting_revision")) ||
+      // Keep the actionable queue unchanged. With history enabled, also show
+      // answered text decisions (including Done/Needs changes verifications)
+      // and completed visual reviews, even after their tasks were archived.
+      const pending: QueueItem[] = snapshots.flatMap(({ project: board, snapshot }) =>
+        snapshot.tasks.flatMap((task) => {
+          const actionable = !task.archived && (task.review_status === "open" ||
             (task.id === initialTaskId && board.path === project.path) ||
             (isUserQueueEligible(task, snapshot, {}) && (allBoards || board.id !== project.id ||
-              userTasks.some((candidate) => candidate.id === task.id)))))
-          .map((task) => ({ project: board.name, path: board.path, task })))
+              userTasks.some((candidate) => candidate.id === task.id))));
+          const historical = !actionable && (
+            task.review_status === "resolved" || task.review_status === "awaiting_revision" ||
+            !!task.question?.answer?.trim());
+          return actionable || (showResolved && historical)
+            ? [{ project: board.name, path: board.path, task, historical }]
+            : [];
+        }))
         .filter((item) => !pendingResponses.current.has(keyOf(item)) &&
-          !(Number(locallyHidden.current.get(keyOf(item))) > Date.now()) &&
-          !(Number(snoozedLocally[keyOf(item)]) > Date.now()));
-      pending.sort((a, b) => b.task.created.localeCompare(a.task.created) || a.task.id.localeCompare(b.task.id));
+          (item.historical || (
+            !(Number(locallyHidden.current.get(keyOf(item))) > Date.now()) &&
+            !(Number(snoozedLocally[keyOf(item)]) > Date.now()))));
+      pending.sort((a, b) => Number(!!a.historical) - Number(!!b.historical) ||
+        b.task.created.localeCompare(a.task.created) || a.task.id.localeCompare(b.task.id));
       if (pending.length) hasShownFeedback.current = true;
-      else if (hasShownFeedback.current && pendingResponses.current.size === 0) {
+      else if (!showResolved && hasShownFeedback.current && pendingResponses.current.size === 0) {
         closeRef.current();
         return;
       }
@@ -546,7 +556,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       !skippedThisPass.current.has(keyOf(item)) &&
       !(Number(snoozedLocally[keyOf(item)]) > Date.now()));
     if (next) setSelectedKey(keyOf(next));
-    else if (backgroundSave) setSelectedKey("");
+    else if (backgroundSave || showResolved) setSelectedKey("");
     else onClose();
   };
 
@@ -597,7 +607,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   };
 
   const submitUser = (markDone = false, reopen = false) => {
-    if (!reviewTask || isVisualReview || saving) return;
+    if (!reviewTask || reviewTask.historical || isVisualReview || saving) return;
     const item = reviewTask;
     const old = item.task;
     const aiQuestion = old.kind === "task" && old.attention.includes("question") &&
@@ -1068,7 +1078,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
                 <h2 className="inbox-task-heading-title" title={reviewTask.task.title}>{reviewTask.task.title}</h2>
               </div>
               <div className="flex items-center gap-2">
-                <button type="button" className={"inbox-priority-button" +
+                {!reviewTask.historical && <button type="button" className={"inbox-priority-button" +
                   (reviewTask.task.attention.includes("priority") ? " is-priority" : "")}
                   aria-pressed={reviewTask.task.attention.includes("priority")}
                   aria-label={reviewTask.task.attention.includes("priority")
@@ -1078,7 +1088,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
                     ? "Priority enabled · click to remove" : "Mark Priority so agents handle this task sooner"}
                   disabled={saving} onClick={() => void toggleInboxPriority(reviewTask)}>
                   <span aria-hidden="true">!</span> {reviewTask.task.attention.includes("priority") ? "Priority" : "Prioritize"}
-                </button>
+                </button>}
                 {(reviewTask.task.claimed_by || reviewTask.task.live?.with_me) && (
                   <button type="button" className="button secondary"
                     aria-label={`Open session for ${reviewTask.task.id}`}
@@ -1088,19 +1098,25 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
                   </button>
                 )}
                 <span className={`inbox-task-column-chip column-${reviewTask.task.column}`}>{reviewTask.task.column === "blocked" ? "Waiting" : reviewTask.task.column}</span>
-                <div className="inbox-more-wrap">
+                {!reviewTask.historical && <div className="inbox-more-wrap">
                   <button className="button secondary" type="button" aria-label="More Inbox actions"
                     aria-expanded={moreOpen} onClick={() => setMoreOpen(value => !value)}>⋯</button>
                   {moreOpen && <div className="inbox-more-menu">
                     <button type="button" disabled={saving} onClick={() => void moveSelectedToDraft()}>Move to Draft</button>
                     <button type="button" disabled={saving} onClick={() => void archiveSelected()}>Archive</button>
                   </div>}
-                </div>
+                </div>}
               </div>
             </header>
             <div className="review-workspace review-human-workspace">
               <div className="review-stage-column">
                 <div className="review-user-fields">
+                  {reviewTask.historical ? <div className="review-user-question">
+                    <strong>Past decision · {reviewTask.task.question?.request_type === "verification" ? "Verification" : "Response"}</strong>
+                    {reviewTask.task.question?.prompt && <InboxRichText task={reviewTask.task}
+                      text={reviewTask.task.question.prompt} onError={setError} className="inbox-question-markdown" />}
+                    <p><strong>Answer: </strong>{reviewTask.task.question?.answer}</p>
+                  </div> : <>
                   {reviewTask.task.question?.prompt && (
                     <div className="review-user-question">
                       <InboxRichText task={reviewTask.task} text={reviewTask.task.question.prompt}
@@ -1152,13 +1168,15 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
                         onChange={(event) => setKeepForUser(event.target.checked)} />
                       Keep marked For user
                     </label>}
+                  </>}
                 </div>
               </div>
               <div className="review-feedback-rail review-human-details">
-                <strong>After you respond</strong>
-                <p>{reviewTask.task.question?.request_type === "verification" || reviewTask.task.column === "done"
-                  ? "Done accepts the finished work. Needs changes sends it back for implementation."
-                  : "Submit sends your answer to AI Ready. Done · Keep current closes the task without changes."}</p>
+                <strong>{reviewTask.historical ? "Decision history" : "After you respond"}</strong>
+                <p>{reviewTask.historical ? "This response was already submitted. You can inspect the original task without changing its verdict." :
+                  reviewTask.task.question?.request_type === "verification" || reviewTask.task.column === "done"
+                    ? "Done accepts the finished work. Needs changes sends it back for implementation."
+                    : "Submit sends your answer to AI Ready. Done · Keep current closes the task without changes."}</p>
                 <details className="review-task-context" open>
                   <summary>Task context & links</summary>
                   <InboxRichText task={reviewTask.task}
@@ -1179,8 +1197,8 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
                   </>}
                 </details>
                 <details className="review-task-context">
-                  <summary>Requirements {userCriteria.trim() && "· editable"}</summary>
-                  <textarea aria-label="Acceptance criteria" value={userCriteria} onChange={event => {
+                  <summary>Requirements {!reviewTask.historical && userCriteria.trim() && "· editable"}</summary>
+                  <textarea aria-label="Acceptance criteria" value={userCriteria} readOnly={reviewTask.historical} onChange={event => {
                     setUserCriteria(event.currentTarget.value);
                     setKeepForUser(false);
                   }} rows={5} placeholder="One criterion per line" />
@@ -1194,6 +1212,8 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
                 </div>
               </div>
             </div>
+            {reviewTask.historical ?
+              <footer className="inbox-response-footer"><span className="inbox-response-summary">Past decision · Read-only</span></footer> :
             <InboxResponseFooter
               mode="reply"
               outcome="respond"
@@ -1214,7 +1234,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
                 : reviewTask.task.question?.request_type === "verification" || reviewTask.task.column === "done"
                   ? "Done accepts; Needs changes reopens"
                   : "Submit → AI Ready · Done keeps current implementation"}
-            />
+            />}
           </div>
         ) : !round ? (
           <div className="review-placeholder">Loading feedback details…</div>

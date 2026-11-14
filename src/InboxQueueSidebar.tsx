@@ -1,6 +1,6 @@
 import type { Task } from "./types";
 
-export type InboxQueueItem = { path: string; project: string; task: Task };
+export type InboxQueueItem = { path: string; project: string; task: Task; historical?: boolean };
 const keyOf = (item: InboxQueueItem) => item.path + "|" + item.task.id;
 
 type Props = {
@@ -37,11 +37,12 @@ export function InboxQueueSidebar({
       {items.map((item) => {
         const key = keyOf(item);
         const mode = modes[key] || (item.task.review_status ? "review" : "user");
+        const pastAnswer = item.historical && item.task.question?.answer?.trim();
         return <button key={key} type="button" title={item.task.title}
           aria-current={key === selectedKey ? "true" : undefined}
           className={["review-queue-item", thumbnails[key] && "has-preview",
             key === selectedKey && "selected",
-            item.task.review_status !== "open" && !!item.task.review_status && "resolved",
+            item.historical && "resolved",
             !item.task.review_status && "review-user-item",
           ].filter(Boolean).join(" ")}
           onClick={() => onSelect(key)}>
@@ -58,7 +59,8 @@ export function InboxQueueSidebar({
               <em className={"review-queue-mode review-queue-mode-" + mode}>
                 {modes[key] || (item.task.review_status ? "review" : "response")}
               </em>
-              {item.task.review_status === "awaiting_revision" ? "Rejected · awaiting AI revision" :
+              {pastAnswer ? `Answered: ${pastAnswer}` :
+                item.task.review_status === "awaiting_revision" ? "Rejected · awaiting AI revision" :
                 item.task.review_status === "resolved" ? "Resolved" :
                 item.task.review_round ? "Round " + item.task.review_round : "Awaiting response"}
               {(counts[key] ?? 0) > 1 && " · " + counts[key] + " candidates"}
@@ -67,6 +69,6 @@ export function InboxQueueSidebar({
         </button>;
       })}
     </nav>
-    {!items.length && <p className="review-empty">No pending feedback.</p>}
+    {!items.length && <p className="review-empty">{showResolved ? "No feedback history found." : "No pending feedback."}</p>}
   </aside>;
 }
