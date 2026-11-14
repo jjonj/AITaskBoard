@@ -207,9 +207,11 @@ export const openInObsidian = (file: string) =>
 
 export const openClaimedT3Session = (claimedBy: string) =>
   invoke<{ sessionId: string; reopened: boolean }>("open_claimed_t3_session", { claimedBy });
-/** Open the board-qualified task's current T3 session, or request one safely. */
+/** Open the board-qualified task's current T3 session, or request one safely.
+ * T3 journals the request before spawning, so lock-contention retries cannot
+ * create a second worker or replay its first prompt. */
 export const openTaskSession = (id: string, path?: string, implement = false) =>
-  invoke<Record<string, unknown>>("open_task_session", { path, id, implement });
+  retryBoardBusy(() => invoke<Record<string, unknown>>("open_task_session", { path, id, implement }));
 
 export type PreparationReceipt = { outcome: "delivered" | "created" | "unknown"; sessionId?: string | null };
 export const startTaskPreparation = (path: string, id: string, requestId: string, title: string, description: string, prepfile = false) =>

@@ -1838,8 +1838,9 @@ Details: ${queueRecoveryWarning}`;
     return null;
   };
 
-  // Saving a task and waiting for T3 to start it are separate operations. The
-  // launch remains one-shot in T3; UNKNOWN delivery must be reconciled, not retried.
+  // T3 journals every open-task request before spawning. Re-observing that
+  // same request is safe; starting a second worker is not. A Queue-vs-Start
+  // race therefore waits for the queue's existing claim and opens that session.
   const startTaskSessionDetached = (id: string, path: string, implement: boolean) => {
     const key = `${path}:${id}`;
     if (pendingTaskStarts.current.has(key)) return;
@@ -1847,11 +1848,19 @@ Details: ${queueRecoveryWarning}`;
     setStartingTaskIds(current => [...current, id]);
     void (async () => {
       try {
-        const receipt = await openTaskSession(id, path, implement);
-        if (implement && ["prompt_unknown", "unknown", "in_progress"].includes(String(receipt.status))) {
-          setError(`${id} T3 start: ${receipt.status}. Inspect its existing request before trying again.`);
-        } else if (implement && receipt.status !== "opened" && receipt.status !== "created") {
-          throw new Error(`T3 did not confirm opening the task session (${String(receipt.status)}).`);
+        for (let attempt = 0; attempt < 90; attempt++) {
+          const receipt = await openTaskSession(id, path, implement);
+          if (["opened", "created", "prompt_unknown"].includes(String(receipt.status))) break;
+          if (!["in_progress", "unknown"].includes(String(receipt.status)))
+            throw new Error(`T3 returned an unrecognized session status (${String(receipt.status)}).`);
+          // Both statuses retain the exact journal/reservation. Never invent
+          // a fresh request ID or replace an existing worker.
+          await new Promise<void>(resolve => setTimeout(resolve, Math.min(1200 + attempt * 200, 4000)));
+          const latest = (await loadBoard(path)).tasks.find(task => task.id === id);
+          if (!latest || latest.archived || latest.completed) break;
+          if (latest.claimed_by && !hasTaskSession(latest)) break;
+          if (attempt === 89)
+            console.warn(`T3 start for ${id} remains pending; the durable request is preserved.`);
         }
       } catch (err) {
         setError(`${id} was saved, but its T3 launch needs attention: ${errorText(err)}`);

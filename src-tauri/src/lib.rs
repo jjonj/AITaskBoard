@@ -650,26 +650,74 @@ fn open_task_session_blocking(path: Option<String>, id: String, implement: Optio
     if !matches!(task.kind, TaskKind::Task | TaskKind::Recurring) {
         return Err("Only executable tasks can start a session".into());
     }
+    let mut implement = implement.unwrap_or(false);
     let claimant = task.claimed_by.as_deref().unwrap_or("");
+    // An in-flight queue start already owns this task. Treat Start now as
+    // "open its existing session", never as permission for a second spawn.
+    let t3_claimed = claimant.starts_with("t3:") || claimant.starts_with("t3-browser:");
+    if implement && t3_claimed { implement = false; }
     // Every task-bound open, including a legacy browser claim, must use the
     // same T3 deduplication, live-state transition, and exact-session focus.
     let script = r"D:\SSDProjects\Tools\t3code\scripts\chatgpt-sessions.mjs";
     if !std::path::Path::new(script).is_file() {
         return Err("T3 open-task CLI is unavailable".into());
     }
-    if implement.unwrap_or(false) && !claimant.is_empty() {
-        return Err("Task is already claimed; open or reconcile its existing session instead.".into());
+    if implement && !claimant.is_empty() {
+        return Err("Task is claimed by another agent; cannot start a duplicate T3 worker.".into());
     }
-    if implement.unwrap_or(false) {
-        // Explicit Start now may bypass capacity, but it must atomically preempt
-        // only a not-yet-started queue reservation before T3 receives the request.
-        FsTaskStore::default().prepare_manual_start(&path, &id).map_err(|error| error.to_string())?;
+    let store = FsTaskStore::default();
+    if implement {
+        // The board lock decides the race with T3's queue dispatcher. If the
+        // queue won, preserve its reservation and return a pending receipt;
+        // the UI will observe/focus its eventual session instead of retrying a spawn.
+        if let Err(error) = store.prepare_manual_start(&path, &id) {
+            let execution = store.execution_intent(&path, &id).map_err(|e| e.to_string())?;
+            if execution.mode != task_core::ExecutionMode::Queue ||
+                !matches!(execution.queue_state, Some(task_core::QueueState::Starting | task_core::QueueState::Working)) {
+                return Err(error.to_string());
+            }
+            let current = store.load(&path).map_err(|e| e.to_string())?.tasks.into_iter()
+                .find(|task| task.id == id && !task.archived)
+                .ok_or_else(|| format!("Task not found: {id}"))?;
+            let owner = current.claimed_by.as_deref().unwrap_or("");
+            if owner.starts_with("t3:") || owner.starts_with("t3-browser:") {
+                implement = false;
+            } else if owner.is_empty() {
+                return Ok(serde_json::json!({
+                    "status": "in_progress", "created": false,
+                    "taskRef": { "board": path.display().to_string(), "id": id },
+                    "queueState": "starting",
+                    "message": "T3 queue already owns this start; waiting for its existing session."
+                }));
+            } else {
+                return Err(format!("{id} is claimed by another agent; cannot start a duplicate."));
+            }
+        }
+    }
+    if !implement {
+        // Opening a task before T3 has attached its claim must not create a
+        // second manual guest while the queued first prompt is in flight.
+        let execution = store.execution_intent(&path, &id).map_err(|e| e.to_string())?;
+        if execution.mode == task_core::ExecutionMode::Queue &&
+            matches!(execution.queue_state, Some(task_core::QueueState::Starting | task_core::QueueState::Working)) {
+            let current = store.load(&path).map_err(|e| e.to_string())?.tasks.into_iter()
+                .find(|task| task.id == id && !task.archived)
+                .ok_or_else(|| format!("Task not found: {id}"))?;
+            if current.claimed_by.is_none() {
+                return Ok(serde_json::json!({
+                    "status": "in_progress", "created": false,
+                    "taskRef": { "board": path.display().to_string(), "id": id },
+                    "queueState": "starting",
+                    "message": "T3 queue is already starting this task."
+                }));
+            }
+        }
     }
     let request = serde_json::json!({
         "action": "open-task",
         "taskRef": { "board": path.display().to_string(), "id": id },
-        "intent": if implement.unwrap_or(false) { "implement" } else { "conversation" },
-        "kind": if implement.unwrap_or(false) { Some("chatgpt") } else { None },
+        "intent": if implement { "implement" } else { "conversation" },
+        "kind": if implement { Some("chatgpt") } else { None },
     });
     let t3_home = std::env::var_os("T3CODE_HOME").map(PathBuf::from)
         .or_else(|| std::env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join(".t3")))
@@ -696,9 +744,9 @@ fn open_task_session_blocking(path: Option<String>, id: String, implement: Optio
     let receipt: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|e| format!("T3 open-task receipt ambiguous; reconcile before retry: {e}"))?;
     match receipt.get("status").and_then(|v| v.as_str()) {
-        Some("opened" | "created" | "prompt_unknown") => {},
-        Some("in_progress" | "unknown") => return Err(
-            "T3 spawn is pending or uncertain. Reconcile the task session before retrying.".into()),
+        // T3's task journal guarantees that these pending states can be
+        // observed again without repeating the original first prompt.
+        Some("opened" | "created" | "prompt_unknown" | "in_progress" | "unknown") => {},
         _ => return Err("T3 did not confirm open-task; reconcile before retrying".into()),
     }
     Ok(receipt)
