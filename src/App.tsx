@@ -109,7 +109,7 @@ type ColumnContextMenu = {
 // Epic membership is never inferred from mere placement below a card.
 type CardDropIntent =
   | { kind: "epic"; epicId: string; columnId: string }
-  | { kind: "after"; taskId: string; columnId: string }
+  | { kind: "after"; taskId: string; columnId: string; belowEpicId?: string }
   | { kind: "column"; columnId: string; detach: boolean }
   | { kind: "project"; projectId: string };
 
@@ -2481,7 +2481,7 @@ Details: ${queueRecoveryWarning}`;
       case "epic":
         return { title: `Join epic ${intent.epicId}`, detail: `Move to ${columnName(intent.columnId)} and set epic parent` };
       case "after":
-        return { title: `Place below ${intent.taskId}`, detail: `Move to ${columnName(intent.columnId)}; ${retainedParent}` };
+        return { title: intent.belowEpicId ? `Place below epic ${intent.belowEpicId} and all its tasks` : `Place below ${intent.taskId}`, detail: `Move to ${columnName(intent.columnId)}; ${retainedParent}` };
       case "column":
         if (dragged?.kind === "epic") return { title: `Move epic tasks to ${columnName(intent.columnId)}`, detail: "Only tasks in this epic's source column move" };
         return { title: `Move to ${columnName(intent.columnId)}`, detail: intent.detach && dragged?.parent
@@ -2534,14 +2534,45 @@ Details: ${queueRecoveryWarning}`;
       if (!columnId) return null;
       if (isEpic) return { kind: "column", columnId, detach: false };
 
-      // An epic proxy is just as intentional a parent target as its real card.
-      // Ordinary cards only specify placement, and never change the parent.
+      // Epic cards/proxies explicitly join the epic. Dropping on one of its
+      // children instead places the task after the *whole* visible epic group.
+      // This never changes the dragged task's parent.
       const targetId = hovered?.closest<HTMLElement>("[data-task-id]")?.dataset.taskId
         ?? hovered?.closest<HTMLElement>("[data-epic-proxy]")?.dataset.epicProxy;
       if (targetId && targetId !== task.id) {
         const target = taskMap.get(targetId);
         if (target?.kind === "epic") return { kind: "epic", epicId: targetId, columnId };
-        if (target) return { kind: "after", taskId: targetId, columnId: target.column };
+        if (target) {
+          let epicId: string | null = null;
+          let ancestor = target.parent;
+          const seen = new Set<string>();
+          while (ancestor && !seen.has(ancestor)) {
+            seen.add(ancestor);
+            const parent = taskMap.get(ancestor);
+            if (!parent) break;
+            if (parent.kind === "epic") epicId = parent.id;
+            ancestor = parent.parent;
+          }
+          if (epicId) {
+            const belongsToEpic = (id: string) => {
+              let current: string | null = id;
+              const visited = new Set<string>();
+              while (current && !visited.has(current)) {
+                if (current === epicId) return true;
+                visited.add(current);
+                current = taskMap.get(current)?.parent ?? null;
+              }
+              return false;
+            };
+            const lane = hovered?.closest<HTMLElement>("[data-column-id]");
+            const cards = lane?.querySelectorAll<HTMLElement>("[data-task-id]");
+            const descendants = [...(cards ?? [])].filter((card) =>
+              card.dataset.taskId !== task.id && belongsToEpic(card.dataset.taskId ?? ""));
+            const last = descendants[descendants.length - 1]?.dataset.taskId;
+            if (last) return { kind: "after", taskId: last, columnId, belowEpicId: epicId };
+          }
+          return { kind: "after", taskId: targetId, columnId: target.column };
+        }
       }
       return { kind: "column", columnId, detach: !!hovered?.closest(".column-header") };
     };
