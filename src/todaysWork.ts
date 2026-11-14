@@ -68,7 +68,9 @@ export function todaysWorkIds(
     const isTechnicalBlocked = (task.column === "blocked" || task.attention.includes("blocked")) &&
       !!task.blocked_reason?.trim();
     const isReady = !!column?.ai_ready && !column.terminal &&
-      task.column !== "blocked" && !task.attention.includes("blocked");
+      // In Progress is only suggested by Keep Busy once genuinely stale.
+      task.column !== "in-progress" && task.column !== "blocked" &&
+      !task.attention.includes("blocked");
     let tier: number | null = null;
     if (task.attention.includes("priority")) tier = 1;
     else if (task.column === "in-progress" && age >= DAY_MS) tier = 2;
