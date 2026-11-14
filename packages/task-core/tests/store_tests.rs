@@ -67,6 +67,24 @@ fn reserved_task_ids_prevent_collision_and_support_clipboard_attachments() {
 }
 
 #[test]
+fn newly_created_task_persists_preparation_receipt_in_notes() {
+    let root = temp_board("preparation-notes");
+    let store = FsTaskStore::default();
+    store.ensure_board(&root, "Test").unwrap();
+    let mut task = draft("Prepare new work", "draft", None);
+    task.attention.push(task_core::TaskAttention::Prepare);
+    task.notes = "<!-- taskboard:preparation-request:3a53d68f-acb0-494e-b413-ade3cdb1cc0c -->\n\n<!-- taskboard:preparation-target:ai-ready -->\n\n<!-- taskboard:preparation-saved -->".into();
+    let created = store.create(&root, task).unwrap();
+    let persisted = fs::read_to_string(&created.path).unwrap();
+    assert!(persisted.contains("## Notes"));
+    assert!(persisted.contains("taskboard:preparation-saved"));
+    assert!(persisted.contains("taskboard:preparation-request:3a53d68f-acb0-494e-b413-ade3cdb1cc0c"));
+    let loaded = store.load(&root).unwrap();
+    assert_eq!(loaded.tasks.iter().find(|t| t.id == created.id).unwrap().notes, created.notes);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn creates_loads_updates_and_archives_tasks() {
     let root = temp_board("roundtrip");
     let store = FsTaskStore::default();

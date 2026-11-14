@@ -2984,13 +2984,17 @@ fn render_task_body(task: &Task, existing: Option<&str>) -> String {
             }
             return body;
         }
-        return format!(
+        let mut body = format!(
             "\n## Description\n\n{}\n\n## Acceptance Criteria\n\n{}\n\n## AI Notes\n\n{}\n\n## User Notes\n\n{}\n",
             task.description.trim(),
             criteria,
             task.ai_notes.trim(),
             task.user_notes.trim()
         );
+        if !task.notes.trim().is_empty() {
+            body.push_str(&format!("\n## Notes\n\n{}\n", task.notes.trim()));
+        }
+        return body;
     };
 
     let mut body = existing.to_string();

@@ -11,7 +11,7 @@ const T3_SESSIONS: &str = r"D:\SSDProjects\Tools\t3code\scripts\chatgpt-sessions
 
 fn t3_home() -> Result<PathBuf, String> {
     std::env::var_os("T3CODE_HOME").map(PathBuf::from)
-        .or_else(|| std::env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join(".t3")))
+        .or_else(|| Path::new(T3_SPAWN).parent()?.parent().map(|root| root.join(".t3")))
         .ok_or("The active T3 home cannot be resolved".to_string())
 }
 
