@@ -17,6 +17,11 @@ type QueueItem = { path: string; project: string; task: Task };
 // Only the most recent text-Inbox action is reversible. Its saved revision
 // guards against undo overwriting progress made by another agent afterwards.
 type AnswerUndo = { path: string; key: string; before: Task; savedRevision: string };
+type InboxDraft = {
+  note: string; pins: ReviewPin[]; choice: string; ranking: string[];
+  userNote: string; userAnswer: string; userCriteria: string; keepForUser: boolean;
+  images: Array<{ dataUrl: string; mime: string; name: string }>;
+};
 type Props = {
   project: ProjectTab;
   onClose: () => void;
@@ -96,7 +101,12 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   closeRef.current = onClose;
   // Skips last for this Inbox pass; manual selection can still revisit the item.
   const skippedThisPass = useRef<Set<string>>(new Set());
-  const [manifest, setManifest] = useState<ReviewManifest | null>(null);
+  const pendingResponses = useRef(new Set<string>());
+  const locallyHidden = useRef(new Map<string, number>());
+  const failedDrafts = useRef(new Map<string, InboxDraft>());
+  const [pendingResponseCount, setPendingResponseCount] = useState(0);
+  const [loadedManifest, setLoadedManifest] = useState<{ key: string; value: ReviewManifest } | null>(null);
+  const manifest = loadedManifest?.key === selectedKey ? loadedManifest.value : null;
   const [assets, setAssets] = useState<Record<string, string>>({});
   const [htmlDocuments, setHtmlDocuments] = useState<Record<string, string>>({});
   const [queueThumbnails, setQueueThumbnails] = useState<Record<string, string>>({});
@@ -123,6 +133,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   const [saving, setSaving] = useState(false);
   const [openingTaskSession, setOpeningTaskSession] = useState(false);
   const [error, setError] = useState("");
+  const [backgroundError, setBackgroundError] = useState("");
   const [userNote, setUserNote] = useState("");
   const [userCriteria, setUserCriteria] = useState("");
   const [keepForUser, setKeepForUser] = useState(false);
@@ -132,7 +143,6 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   const [responseOutcome, setResponseOutcome] = useState("");
   const [moreOpen, setMoreOpen] = useState(false);
   const [inboxImages, setInboxImages] = useState<Array<{dataUrl:string;mime:string;name:string}>>([]);
-  useEffect(() => { setInboxImages([]); }, [selectedKey]);
   const videoRef = useRef<HTMLVideoElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const reviewTask = items.find((item) => keyOf(item) === selectedKey);
@@ -307,10 +317,12 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
             (isUserQueueEligible(task, snapshot, {}) && (allBoards || board.id !== project.id ||
               userTasks.some((candidate) => candidate.id === task.id)))))
           .map((task) => ({ project: board.name, path: board.path, task })))
-        .filter((item) => !(Number(snoozedLocally[keyOf(item)]) > Date.now()));
+        .filter((item) => !pendingResponses.current.has(keyOf(item)) &&
+          !(Number(locallyHidden.current.get(keyOf(item))) > Date.now()) &&
+          !(Number(snoozedLocally[keyOf(item)]) > Date.now()));
       pending.sort((a, b) => b.task.created.localeCompare(a.task.created) || a.task.id.localeCompare(b.task.id));
       if (pending.length) hasShownFeedback.current = true;
-      else if (hasShownFeedback.current) {
+      else if (hasShownFeedback.current && pendingResponses.current.size === 0) {
         closeRef.current();
         return;
       }
@@ -341,32 +353,35 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
 
   useEffect(() => {
     setError("");
-    setManifest(null);
+    setLoadedManifest(null);
     setAssets({});
     setHtmlDocuments({});
     setShowPoster(false);
     setChoice("");
     setRanking([]);
     setPins([]);
-    setNote("");
+    const draft = failedDrafts.current.get(selectedKey);
+    setNote(draft?.note ?? "");
     setMediaIndex(0);
     setPinMode(false);
-    setUserNote("");
-    setUserCriteria(reviewTask?.task.acceptance_criteria.join("\n") ?? "");
-    setKeepForUser(reviewTask?.task.kind === "for_user" ||
-      !!reviewTask?.task.attention.includes("needs-user"));
-    setUserAnswer(reviewTask?.task.question?.answer ?? "");
+    setUserNote(draft?.userNote ?? "");
+    setUserCriteria(draft?.userCriteria ?? reviewTask?.task.acceptance_criteria.join("\n") ?? "");
+    setKeepForUser(draft?.keepForUser ?? (reviewTask?.task.kind === "for_user" ||
+      !!reviewTask?.task.attention.includes("needs-user")));
+    setUserAnswer(draft?.userAnswer ?? "");
+    setInboxImages(draft?.images ?? []);
     setResponseOutcome("");
     if (!reviewTask || !reviewTask.task.review_status) return;
     let cancelled = false;
     void reviewShow(reviewTask.task.id, reviewTask.path).then((value) => {
       if (cancelled) return;
-      setManifest(value);
+      setLoadedManifest({ key: selectedKey, value });
       const verdict = value.rounds[value.rounds.length - 1]?.result;
-      setPins(verdict?.pins || []);
-      setNote(verdict?.note || "");
-      setChoice(verdict?.choices[0] || "");
-      setRanking(verdict?.ranking || []);
+      const draft = failedDrafts.current.get(selectedKey);
+      setPins(draft?.pins ?? verdict?.pins ?? []);
+      setNote(draft?.note ?? verdict?.note ?? "");
+      setChoice(draft?.choice ?? verdict?.choices[0] ?? "");
+      setRanking(draft?.ranking ?? verdict?.ranking ?? []);
     }).catch((cause) => { if (!cancelled) setError(String(cause)); });
     return () => { cancelled = true; };
   }, [selectedKey]);
@@ -521,20 +536,24 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   }, [activeArtifact?.path]);
   const activeSrc = (artifact?: ReviewArtifact) => artifact &&
     (assets[artifact.path] || (artifact.poster && assets[artifact.poster]) || "");
-  const advance = (excludingKey?: string, skipCurrent = false) => {
+  const advance = (excludingKey?: string, skipCurrent = false, backgroundSave = false) => {
     if (skipCurrent && selectedKey) skippedThisPass.current.add(selectedKey);
     const index = items.findIndex((item) => keyOf(item) === selectedKey);
     const ordered = index < 0 ? items : [...items.slice(index + 1), ...items.slice(0, index)];
     const next = ordered.find((item) => keyOf(item) !== excludingKey &&
+      !pendingResponses.current.has(keyOf(item)) &&
+      !(Number(locallyHidden.current.get(keyOf(item))) > Date.now()) &&
       !skippedThisPass.current.has(keyOf(item)) &&
       !(Number(snoozedLocally[keyOf(item)]) > Date.now()));
     if (next) setSelectedKey(keyOf(next));
+    else if (backgroundSave) setSelectedKey("");
     else onClose();
   };
 
   const hideLocally = (item: QueueItem, milliseconds: number, persist = false) => {
     const until = Date.now() + milliseconds;
     const key = keyOf(item);
+    locallyHidden.current.set(key, until);
     setSnoozedLocally((current) => {
       const updated = { ...current, [key]: until };
       if (persist) {
@@ -545,69 +564,97 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
     });
   };
 
-  const submitUser = async (markDone = false, reopen = false) => {
-    if (!reviewTask || isVisualReview || saving) return;
-    setSaving(true);
+  const captureDraft = (): InboxDraft => ({
+    note, pins: [...pins], choice, ranking: [...ranking],
+    userNote, userAnswer, userCriteria, keepForUser, images: [...inboxImages],
+  });
+
+  // Leave the current item immediately; the revision-checked native write runs
+  // independently. Hide only this item during its write, never the entire Inbox.
+  const submitInBackground = (item: QueueItem, work: () => Promise<void>) => {
+    const key = keyOf(item);
+    if (saving || pendingResponses.current.has(key)) return;
+    pendingResponses.current.add(key);
+    failedDrafts.current.set(key, captureDraft());
+    setPendingResponseCount(pendingResponses.current.size);
+    setItems(previous => previous.filter(entry => keyOf(entry) !== key));
+    setBackgroundError("");
     setError("");
-    try {
-      const old = reviewTask.task;
-      const aiQuestion = old.kind === "task" && old.attention.includes("question") &&
-        !!old.question && !old.question.answer;
-      const isApproval = aiQuestion && (old.question?.request_type === "verification" || old.column === "done");
-      // Done on a decision is a deliberate "keep the current implementation",
-      // NOT another answer to implement. The choice and any note are ignored
-      // as a proposed change unless the human explicitly presses Submit.
-      const answer = reopen ? "Needs changes" : aiQuestion && markDone
-        ? (isApproval ? "Done" : "Keep current implementation")
-        : userAnswer.trim() ? userAnswer : userNote;
-      if (aiQuestion && !answer.trim()) throw new Error("Choose an option or enter an answer before submitting.");
-      const isWaitingAnswer = aiQuestion && !isApproval && !markDone;
-      const needsChanges = reopen || (isApproval && answer.toLowerCase() === "needs changes");
-      const attention = old.attention.filter(flag => flag !== "question" && flag !== "needs-user" && flag !== "blocked");
-      if ((isWaitingAnswer || needsChanges) && !attention.includes("user-note")) attention.push("user-note");
+    advance(key, false, true);
+    void work().then(() => {
+      failedDrafts.current.delete(key);
+      hideLocally(item, 60 * 60 * 1000);
+    }).catch((cause) => {
+      const message = `Could not confirm ${item.task.id}: ${String(cause)}. Item returned to Inbox; check before retrying.`;
+      setBackgroundError(message);
+      onUserTaskUpdated?.(message);
+      setSelectedKey((current) => current || key);
+    }).finally(() => {
+      pendingResponses.current.delete(key);
+      setPendingResponseCount(pendingResponses.current.size);
+      void refresh();
+    });
+  };
+
+  const submitUser = (markDone = false, reopen = false) => {
+    if (!reviewTask || isVisualReview || saving) return;
+    const item = reviewTask;
+    const old = item.task;
+    const aiQuestion = old.kind === "task" && old.attention.includes("question") &&
+      !!old.question && !old.question.answer;
+    const isApproval = aiQuestion && (old.question?.request_type === "verification" || old.column === "done");
+    // Done on a decision means keep the current implementation, not a change request.
+    const answer = reopen ? "Needs changes" : aiQuestion && markDone
+      ? (isApproval ? "Done" : "Keep current implementation")
+      : userAnswer.trim() ? userAnswer : userNote;
+    if (aiQuestion && !answer.trim()) {
+      setError("Choose an option or enter an answer before submitting.");
+      return;
+    }
+    const isWaitingAnswer = aiQuestion && !isApproval && !markDone;
+    const needsChanges = reopen || (isApproval && answer.toLowerCase() === "needs changes");
+    const attention = old.attention.filter(flag => flag !== "question" && flag !== "needs-user" && flag !== "blocked");
+    if ((isWaitingAnswer || needsChanges) && !attention.includes("user-note")) attention.push("user-note");
+    const newNotes = userNote;
+    const criteria = userCriteria;
+    const retainForUser = keepForUser;
+    submitInBackground(item, async () => {
       let doneColumn: string | undefined;
       if (markDone && !isWaitingAnswer) {
-        const board = await loadBoard(reviewTask.path);
+        const board = await loadBoard(item.path);
         doneColumn = board.config.columns.find(col => col.id === "done" && col.terminal)?.id
           ?? board.config.columns.find(col => col.terminal)?.id;
         if (!doneColumn) throw new Error("This board has no Done column.");
       }
-      const imageLinks = await attachInboxImages(old.id, reviewTask.path);
+      const imageLinks = await attachInboxImages(old.id, item.path);
       const updated: Task = {
         ...old,
         ...(isWaitingAnswer || needsChanges ? { column: "ai-ready", claimed_by: null, blocked_reason: null } :
           doneColumn ? { column: doneColumn, claimed_by: null } : {}),
-        user_notes: [old.user_notes, userNote, ...imageLinks].filter(Boolean).join("\n\n"),
-        acceptance_criteria: userCriteria.split(/\r?\n/).filter(Boolean),
-        kind: needsChanges ? "task" : aiQuestion ? old.kind : markDone ? "task" : keepForUser ? (old.kind === "epic" ? "epic" : "for_user") : "task",
+        user_notes: [old.user_notes, newNotes, ...imageLinks].filter(Boolean).join("\n\n"),
+        acceptance_criteria: criteria.split(/\r?\n/).filter(Boolean),
+        kind: needsChanges ? "task" : aiQuestion ? old.kind : markDone ? "task" : retainForUser
+          ? (old.kind === "epic" ? "epic" : "for_user") : "task",
         attention,
         question: old.question ? { ...old.question, answer: answer || null } : null,
       };
-      const saved = await updateTask(updated, reviewTask.path);
+      const saved = await updateTask(updated, item.path);
       let notice: string | undefined;
       if (saved.completed && saved.category === "Implementation Review" && saved.related_to.length === 1) {
-        const board = await loadBoard(reviewTask.path);
-        const parent = board.tasks.find((task) => task.id === saved.related_to[0]);
-        const entry = parent?.notes.split("\n").find((line) => line.includes(`[review:${saved.id}]`));
-        if (parent && entry) notice = `Review ${saved.id} — ${parent.id}: ` +
-          (entry.includes("approved_parent_done") ? "approved, original moved to Done"
-            : entry.includes("needs_changes") ? "needs changes, original returned to work"
-            : entry.includes("partial_or_blocked") ? "partial approval or other work remains"
-            : "review closed; original disposition unresolved");
+        try {
+          const board = await loadBoard(item.path);
+          const parent = board.tasks.find((task) => task.id === saved.related_to[0]);
+          const entry = parent?.notes.split("\n").find((line) => line.includes(`[review:${saved.id}]`));
+          if (parent && entry) notice = `Review ${saved.id} — ${parent.id}: ` +
+            (entry.includes("approved_parent_done") ? "approved, original moved to Done"
+              : entry.includes("needs_changes") ? "needs changes, original returned to work"
+              : entry.includes("partial_or_blocked") ? "partial approval or other work remains"
+              : "review closed; original disposition unresolved");
+        } catch { /* The answer is saved even if its optional parent notice cannot be loaded. */ }
       }
-      setLastAnswered({ path: reviewTask.path, key: keyOf(reviewTask), before: old, savedRevision: saved.revision });
+      setLastAnswered({ path: item.path, key: keyOf(item), before: old, savedRevision: saved.revision });
       onUserTaskUpdated?.(notice);
-      setInboxImages([]);
-      // A response may deliberately leave "For user" enabled. Do not ask for
-      // the same answer again in this Inbox pass.
-      hideLocally(reviewTask, 60 * 60 * 1000);
-      advance(keyOf(reviewTask));
-      void refresh();
-    } catch (cause) {
-      setError(`Could not save this task: ${String(cause)}`);
-    } finally {
-      setSaving(false);
-    }
+    });
   };
   const undoLastAnswer = async () => {
     if (!lastAnswered || saving) return;
@@ -620,6 +667,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
         throw new Error("This task has changed since your response. Undo was stopped to protect the agent's newer work.");
       await updateTask({ ...lastAnswered.before, revision: current.revision }, lastAnswered.path);
       const key = lastAnswered.key;
+      locallyHidden.current.delete(key);
       setSnoozedLocally(current => {
         const next = { ...current };
         delete next[key];
@@ -698,7 +746,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       setResponseOutcome("");
       setMediaIndex(0);
       await refresh(); // Refresh the task revision before allowing the new verdict.
-      setManifest(reopened);
+      setLoadedManifest({ key: selectedKey, value: reopened });
     } catch (cause) {
       setError(`Unable to reconsider review: ${String(cause)}`);
       await refresh();
@@ -718,28 +766,25 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       setError("Choose the required variant or finish ranking before submitting.");
       return;
     }
-    setSaving(true);
-    try {
-      const resolved = await reviewResolve({
-        task_id: reviewTask.task.id, verdict,
-        choices: verdict === "picked" ? [choice] : verdict === "approved" ? [playable[0]?.id ?? "A"] : [],
-        ranking: verdict === "ranked" ? ranking : [],
-        pins, note: [note, ...await attachInboxImages(reviewTask.task.id, reviewTask.path)].filter(Boolean).join("\n\n"),
-        expected_task_revision: reviewTask.task.revision,
-        expected_manifest_revision: manifest.revision,
-      }, reviewTask.path);
-      // Always advance the unified Inbox after a successful decision, even
-      // when a rejected round remains open pending the agent's next variant.
-      hideLocally(reviewTask, 60 * 60 * 1000);
-      setInboxImages([]);
-      advance(keyOf(reviewTask));
-      setManifest(verdict === "rejected" || verdict === "more-variants" ? resolved : null);
-      setError("");
-      void refresh();
-    } catch (cause) {
-      setError(`Review submission failed: ${String(cause)}`);
-      await refresh();
-    } finally { setSaving(false); }
+    const item = reviewTask;
+    const chosen = verdict === "picked" ? [choice] : verdict === "approved" ? [playable[0]?.id ?? "A"] : [];
+    const rankingSnapshot = [...ranking];
+    const pinSnapshot = pins.map(pin => ({ ...pin }));
+    const message = note;
+    const taskRevision = item.task.revision;
+    const manifestRevision = manifest.revision;
+    submitInBackground(item, async () => {
+      await reviewResolve({
+        task_id: item.task.id, verdict,
+        choices: chosen,
+        ranking: verdict === "ranked" ? rankingSnapshot : [],
+        pins: pinSnapshot,
+        note: [message, ...await attachInboxImages(item.task.id, item.path)].filter(Boolean).join("\n\n"),
+        expected_task_revision: taskRevision,
+        expected_manifest_revision: manifestRevision,
+      }, item.path);
+      onUserTaskUpdated?.();
+    });
   };
   const submitNoteOnly = async () => {
     if (!reviewTask || !isVisualReview || !(note.trim() || inboxImages.length) || saving || resolved) return;
@@ -971,7 +1016,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       onSnooze={snoozeSelected}
       resolved={resolved}
       awaitingNextRound={awaitingNextRound}
-      error={error}
+      error={backgroundError || error}
       primaryVerdict={primaryVerdict}
       primaryReady={primaryReady}
       submit={submit}
@@ -1006,10 +1051,10 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       />
       <section className="review-main">
         <div className="review-scroll">
-        {error && <div className="error-banner" role="alert">{error}</div>}
+        {(backgroundError || error) && <div className="error-banner" role="alert">{backgroundError || error}</div>}
         {!reviewTask ? (
           <div className="review-placeholder">
-            <p>All caught up.</p>
+            <p>{pendingResponseCount ? "No more items to review — saving your response in the background." : "All caught up."}</p>
             {lastAnswered && <button type="button" className="button secondary"
               disabled={saving} onClick={() => void undoLastAnswer()}>
               ↶ Undo last answer · {lastAnswered.before.id}
