@@ -812,6 +812,9 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        // The visual inspector owns nested navigation (enlarged capture -> gallery
+        // -> previous Inbox item). Never close the entire Inbox from here.
+        if (isVisualReview) return;
         event.preventDefault();
         event.stopImmediatePropagation();
         onClose();

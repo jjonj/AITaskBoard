@@ -96,6 +96,9 @@ export function VisualReviewInspector(props: Props) {
   const { showCopyMenu, copyMenu } = useLinkCopyMenu(setOpenError);
   const [moreOpen, setMoreOpen] = useState(false);
   const [galleryCount, setGalleryCount] = useState(0);
+  // The enlarged Dashboard image is a nested viewer, not a separate Inbox item.
+  // Keep its selection here so the Inbox-level Escape handler can close it first.
+  const [gallerySelectedIndex, setGallerySelectedIndex] = useState<number | null>(null);
   const stripRef = useRef<HTMLDivElement>(null);
   const active = playable[Math.min(activeIndex, playable.length - 1)];
   const dashboardMode = isDashboard(active, review.path);
@@ -155,7 +158,8 @@ export function VisualReviewInspector(props: Props) {
     setCompare("single");
     setZoom(1);
     setOpenError("");
-  }, [selectedKey, active?.id]);
+    setGallerySelectedIndex(null);
+  }, [selectedKey, active?.id, active?.path]);
   useEffect(() => {
     stripRef.current?.querySelector('[aria-current="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [active?.id]);
@@ -173,6 +177,7 @@ export function VisualReviewInspector(props: Props) {
         event.preventDefault();
         event.stopImmediatePropagation();
         if (focus) setFocus(false);
+        else if (dashboardMode && gallerySelectedIndex !== null) setGallerySelectedIndex(null);
         else onBack();
       } else if (event.key.toLowerCase() === "f") {
         event.preventDefault();
@@ -191,7 +196,7 @@ export function VisualReviewInspector(props: Props) {
     // Capture before the shared Inbox Escape handler so Focus only exits Focus.
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [focus, onBack, onFocusArtifact, activeIndex, playable.length]);
+  }, [focus, dashboardMode, gallerySelectedIndex, onBack, onFocusArtifact, activeIndex, playable.length]);
 
   const originalAddress = (artifact: ReviewArtifact) => {
     if (artifact.kind === "url") return artifact.path;
@@ -241,8 +246,11 @@ export function VisualReviewInspector(props: Props) {
       className={"review-visual-inspector" + (focus ? " focus" : "") +
       (feedbackExpanded ? "" : " feedback-hidden") + (dashboardMode ? " dashboard-review" : "")}>
       <header className="review-visual-header">
-        <button type="button" className="button secondary" onClick={onBack}
-          title="Return to previously selected Inbox item (Esc)">← Previous item</button>
+        <button type="button" className="button secondary"
+          onClick={() => dashboardMode && gallerySelectedIndex !== null ? setGallerySelectedIndex(null) : onBack()}
+          title={dashboardMode && gallerySelectedIndex !== null
+            ? "Return to Dashboard gallery (Esc)" : "Return to previously selected Inbox item (Esc)"}>
+          {dashboardMode && gallerySelectedIndex !== null ? "← All captures" : "← Previous item"}</button>
         <div className="review-visual-title"><small>{review.project} · {review.task.id} · Round {round.number}</small>
           <strong title={review.task.title}>{review.task.title}</strong></div>
         <span className={`inbox-task-column-chip column-${review.task.column}`}>{review.task.column}</span>
@@ -336,7 +344,8 @@ export function VisualReviewInspector(props: Props) {
             </details>
           )}
           <div id={dashboardMode ? "dashboard-review-evidence" : undefined} className={"review-visual-viewer" + (dashboardMode ? " dashboard-capture-viewer" : "")}>
-            {dashboardMode ? <DashboardEvidenceItem address={active!.path} onGalleryCountChange={setGalleryCount} /> : active && <>
+            {dashboardMode ? <DashboardEvidenceItem address={active!.path} selectedIndex={gallerySelectedIndex}
+              onSelectedIndexChange={setGallerySelectedIndex} onGalleryCountChange={setGalleryCount} /> : active && <>
               <div className="review-visual-viewer-actions">
                 <button type="button" className={"button " + (pinning ? "primary" : "secondary")}
                   aria-pressed={pinning} disabled={resolved}

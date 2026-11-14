@@ -43,13 +43,17 @@ function DashboardMedia({ item }: { item: DashboardItem }) {
     <img src={item.mediaDataUrl} alt={item.title + (item.caption ? " — " + item.caption : "")} />;
 }
 
-type Props = { address: string; onGalleryCountChange?: (count: number) => void };
+type Props = {
+  address: string;
+  selectedIndex: number | null;
+  onSelectedIndexChange: (index: number | null) => void;
+  onGalleryCountChange?: (count: number) => void;
+};
 
 /** Original published Wartribes media in a non-shrinking, scroll-snap gallery.
  * Other boards and ordinary HTML/URL reviews use the generic web renderer. */
-export function DashboardEvidenceItem({ address, onGalleryCountChange }: Props) {
+export function DashboardEvidenceItem({ address, selectedIndex, onSelectedIndexChange, onGalleryCountChange }: Props) {
   const [items, setItems] = useState<DashboardItem[]>([]);
-  const [selected, setSelected] = useState<number | null>(null);
   const [railActive, setRailActive] = useState(0);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -57,7 +61,6 @@ export function DashboardEvidenceItem({ address, onGalleryCountChange }: Props) 
 
   useEffect(() => {
     setItems([]);
-    setSelected(null);
     setRailActive(0);
     setError("");
     let selection: ReturnType<typeof selectionFromUrl>;
@@ -123,13 +126,13 @@ export function DashboardEvidenceItem({ address, onGalleryCountChange }: Props) 
     <strong>Dashboard gallery unavailable</strong><p>{error || "This task has no published captures."}</p>
   </section>;
 
-  const chosen = selected === null ? null : items[selected] ?? null;
+  const chosen = selectedIndex === null ? null : items[selectedIndex] ?? null;
   return <section className="dashboard-evidence-item"
     aria-label={"Wartribes Dashboard review gallery for " + items[0].task}>
 
     {chosen ? <header className="dashboard-evidence-head dashboard-evidence-detail-head">
       <div className="dashboard-evidence-heading">
-        <small>{chosen.task} · Published capture {selected! + 1} of {items.length}</small>
+        <small>{chosen.task} · Published capture {selectedIndex! + 1} of {items.length}</small>
         <h2>{chosen.title}</h2>
         {chosen.caption && <p>{chosen.caption}</p>}
       </div>
@@ -137,13 +140,13 @@ export function DashboardEvidenceItem({ address, onGalleryCountChange }: Props) 
         {chosen.capturedAt && <span>Captured <strong>{displayDate(chosen.capturedAt)}</strong></span>}
         <div className="dashboard-evidence-actions">
           <button type="button" className="button secondary"
-            onClick={() => setSelected(null)}>← All captures</button>
+            onClick={() => onSelectedIndexChange(null)}>← All captures</button>
           <button type="button" className="button secondary"
-            aria-label="Previous capture" disabled={selected === 0}
-            onClick={() => setSelected(Math.max(0, selected! - 1))}>‹</button>
+            aria-label="Previous capture" disabled={selectedIndex === 0}
+            onClick={() => onSelectedIndexChange(Math.max(0, selectedIndex! - 1))}>‹</button>
           <button type="button" className="button secondary"
-            aria-label="Next capture" disabled={selected === items.length - 1}
-            onClick={() => setSelected(Math.min(items.length - 1, selected! + 1))}>›</button>
+            aria-label="Next capture" disabled={selectedIndex === items.length - 1}
+            onClick={() => onSelectedIndexChange(Math.min(items.length - 1, selectedIndex! + 1))}>›</button>
           {chosen.mediaPath && <button type="button" className="button secondary"
             onClick={() => openSource(chosen)}>Open in Fomni ↗</button>}
         </div>
@@ -171,7 +174,7 @@ export function DashboardEvidenceItem({ address, onGalleryCountChange }: Props) 
           <DashboardMedia item={item} />
         </div> : <button type="button" className="dashboard-evidence-card-media"
           aria-label={"Enlarge " + item.title}
-          onClick={() => setSelected(index)}>
+          onClick={() => onSelectedIndexChange(index)}>
           <DashboardMedia item={item} />
         </button>}
         <div className="dashboard-evidence-card-info">
@@ -183,7 +186,7 @@ export function DashboardEvidenceItem({ address, onGalleryCountChange }: Props) 
           {item.caption && <p title={item.caption}>{item.caption}</p>}
           <div className="dashboard-evidence-card-actions">
             <button type="button" className="button secondary"
-              onClick={() => setSelected(index)}>Inspect larger</button>
+              onClick={() => onSelectedIndexChange(index)}>Inspect larger</button>
             {item.mediaPath && <button type="button" className="button secondary"
               onClick={() => openSource(item)}>Open original ↗</button>}
           </div>
