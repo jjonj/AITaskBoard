@@ -12,6 +12,7 @@ import { AutoTextarea, DescriptionTimeline } from "./TaskDescriptionPanel";
 import { MarkdownText, MarkdownPreviewToggle } from "./MarkdownText";
 import { TaskImageGallery, type PendingClipboardImage } from "./TaskImageGallery";
 import { ReviewView } from "./ReviewView";
+import { useRememberedInbox } from "./useRememberedInbox";
 import { isUserQueueEligible } from "./userQueueEligibility";
 import { attachImagesToDescription, parseDescriptionTimeline, prepareTaskDraftForSave, updateInitialDescription } from "./descriptionTimeline";
 import { applyCardPlacements, orderCardsByDependencies } from "./dependencyLayout";
@@ -348,7 +349,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     const timer = window.setTimeout(() => setQuery(""), 90_000);
     return () => window.clearTimeout(timer);
   }, [query]);
-  const [reviewOpen, setReviewOpen] = useState(false);
+  const [reviewOpen, setReviewOpen] = useRememberedInbox(storageKey("reviewOpenUntil"));
   const [queueDrawerOpen, setQueueDrawerOpen] = useState(false);
   const [queueTelemetry, setQueueTelemetry] = useState<QueueOverview | null>(null);
   const [capacityTelemetry, setCapacityTelemetry] = useState<QueueCapacity | null>(null);

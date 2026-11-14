@@ -3011,7 +3011,6 @@ body.column-dragging * {
   inset: 32px 0 0;
   z-index: 185;
   background: rgba(4, 8, 13, .78);
-  backdrop-filter: blur(4px);
   display: grid;
   place-items: center;
   padding: 24px;
