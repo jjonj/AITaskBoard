@@ -9,6 +9,7 @@ mod preparation;
 mod orphan_recovery;
 mod queue_bridge;
 mod error_log;
+mod restart_warning;
 
 use std::{fs, path::PathBuf, process::{Command, Stdio}, io::Write};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -718,6 +719,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             error_log::record_ui_error,
+            restart_warning::restart_warning_status,
+            restart_warning::postpone_restart_warning,
             startup_review,
             startup_task,
             projects::list_projects,

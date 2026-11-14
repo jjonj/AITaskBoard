@@ -10,11 +10,73 @@ if (-not (Test-Path -LiteralPath $tauri)) {
     throw "Install dependencies first with npm install: $tauri"
 }
 
-$wasRunning = $false
+# Only one agent may rebuild/restart the app at a time.
+$mutex = [System.Threading.Mutex]::new($false, 'Local\TaskBoard-Rebuild')
+if (-not $mutex.WaitOne(0)) {
+    $mutex.Dispose()
+    throw 'Another TaskBoard rebuild is already running.'
+}
+try {
+$running = @(Get-Process -Name taskboard -ErrorAction SilentlyContinue | Where-Object {
+    $_.Path -and ($_.Path -ieq $launcher -or $_.Path -ieq $release)
+})
+$wasRunning = $running.Count -gt 0
+
+if ($wasRunning) {
+    # The running desktop app polls this short-lived request and offers Postpone.
+    # Canceling must happen BEFORE the process is stopped and the build starts.
+    $noticeDir = Join-Path $env:LOCALAPPDATA 'TaskBoard'
+    $requestFile = Join-Path $noticeDir 'restart-warning.json'
+    $postponeFile = Join-Path $noticeDir 'restart-postponed.json'
+    New-Item -ItemType Directory -Path $noticeDir -Force | Out-Null
+    $requestId = [Guid]::NewGuid().ToString()
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(30).ToUnixTimeMilliseconds()
+    $requestJson = @{ id = $requestId; deadlineUnixMs = $deadline } | ConvertTo-Json -Compress
+    $tmpFile = Join-Path $noticeDir "restart-warning.$requestId.tmp"
+    $postponed = $false
+    try {
+        Remove-Item -LiteralPath $postponeFile -Force -ErrorAction SilentlyContinue
+        [IO.File]::WriteAllText($tmpFile, $requestJson, [Text.UTF8Encoding]::new($false))
+        Move-Item -LiteralPath $tmpFile -Destination $requestFile -Force
+        Write-Output 'TaskBoard restart warning active (30s countdown; Postpone cancels this attempt).'
+        while ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -lt $deadline) {
+            if (Test-Path -LiteralPath $postponeFile) {
+                try {
+                    $response = Get-Content -LiteralPath $postponeFile -Raw | ConvertFrom-Json
+                    if ($response.id -eq $requestId) { $postponed = $true; break }
+                } catch { }
+            }
+            Start-Sleep -Milliseconds 250
+        }
+        # Give a click near the deadline one final chance to be acknowledged.
+        if (Test-Path -LiteralPath $postponeFile) {
+            try {
+                $response = Get-Content -LiteralPath $postponeFile -Raw | ConvertFrom-Json
+                if ($response.id -eq $requestId) { $postponed = $true }
+            } catch { }
+        }
+    } finally {
+        Remove-Item -LiteralPath $tmpFile -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $requestFile) {
+            try {
+                $current = Get-Content -LiteralPath $requestFile -Raw | ConvertFrom-Json
+                if ($current.id -eq $requestId) {
+                    Remove-Item -LiteralPath $requestFile -Force -ErrorAction SilentlyContinue
+                }
+            } catch { }
+        }
+        Remove-Item -LiteralPath $postponeFile -Force -ErrorAction SilentlyContinue
+    }
+    if ($postponed) {
+        Write-Warning 'TaskBoard restart postponed by user. No build or restart was performed; rerun the script later.'
+        exit 3
+    }
+}
+
+# No warning is needed if TaskBoard was already closed.
 foreach ($proc in @(Get-Process -Name taskboard -ErrorAction SilentlyContinue)) {
     try {
         if ($proc.Path -and ($proc.Path -ieq $launcher -or $proc.Path -ieq $release)) {
-            $wasRunning = $true
             Stop-Process -Id $proc.Id -Force -ErrorAction Stop
             Write-Output "Stopped TaskBoard PID $($proc.Id)"
         }
@@ -51,4 +113,8 @@ try {
     throw
 } finally {
     Pop-Location
+}
+} finally {
+    $mutex.ReleaseMutex()
+    $mutex.Dispose()
 }

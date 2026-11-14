@@ -1,0 +1,69 @@
+.restart-warning {
+  position: fixed;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 99999;
+  width: min(610px, calc(100vw - 32px));
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  padding: 15px 18px 18px;
+  border: 1px solid #dfa956;
+  border-radius: 12px;
+  background: #242018;
+  color: #f7ebd5;
+  box-shadow: 0 15px 48px #000a, 0 0 0 3px #dfa95619;
+  font: 13px/1.45 system-ui, sans-serif;
+  overflow: hidden;
+}
+.restart-warning-icon {
+  font-size: 27px;
+  color: #e7ad55;
+}
+.restart-warning-copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: #c9c0b1;
+}
+.restart-warning-copy strong {
+  font-size: 15px;
+  font-weight: 650;
+  color: #fff1db;
+}
+.restart-warning-seconds {
+  font-variant-numeric: tabular-nums;
+  color: #ffc973;
+}
+.restart-warning button {
+  flex: none;
+  border: 1px solid #b68747;
+  border-radius: 7px;
+  background: #56402a;
+  color: #fff0db;
+  font-weight: 600;
+  padding: 8px 13px;
+  cursor: pointer;
+}
+.restart-warning button:hover:not(:disabled) { background: #755333; }
+.restart-warning button:disabled { opacity: 0.6; cursor: default; }
+.restart-warning-error { color: #ff9b85; }
+.restart-warning-progress {
+  position: absolute;
+  height: 3px;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: #ffca78;
+  transform-origin: left;
+  transition: transform 0.3s linear;
+}
+@media (max-width: 540px) {
+  .restart-warning { gap: 8px; padding: 11px 12px 15px; }
+  .restart-warning-icon { display: none; }
+  .restart-warning-copy strong { font-size: 13px; }
+  .restart-warning button { padding: 7px 8px; }
+}
