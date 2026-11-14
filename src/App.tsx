@@ -1414,10 +1414,10 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     })();
   };
 
-  const closeEditor = (board = snapshot, persisted = false) => {
-    // A dismissed creation with meaningful contents becomes a short-lived
-    // human draft, rather than vanishing without a Save click.
-    if (!persisted && editor?.mode === "create" && !autosavingDraft.current &&
+  const closeEditor = (board = snapshot, persisted = false, explicitCancel = false) => {
+    // Only implicit dismissal auto-saves an unfinished creation. The Cancel
+    // button explicitly discards it, even when fields have been populated.
+    if (!persisted && !explicitCancel && editor?.mode === "create" && !autosavingDraft.current &&
         (editor.draft.title.trim() || editor.draft.description.trim() ||
          editor.draft.user_notes.trim() || editor.draft.notes.trim() ||
          editor.draft.acceptance_criteria.some((item) => item.trim()) ||
@@ -4792,7 +4792,7 @@ Details: ${queueRecoveryWarning}`;
                 <span className="agent-notify-switch" aria-hidden="true" />
                 Notify agent
               </label>}
-              <button className="button editor-cancel-button" onClick={() => closeEditor()} disabled={busy}>Cancel</button>
+              <button className="button editor-cancel-button" onClick={() => closeEditor(snapshot, false, true)} disabled={busy}>Cancel</button>
               <button
                 className={`button primary ${queueEdited ? "queue-save-release" : ""}`}
                 title={queueEdited ? "Save your response and remove For user from this task" : "Save (Enter or Ctrl+S). Textareas keep Enter for new lines."}
