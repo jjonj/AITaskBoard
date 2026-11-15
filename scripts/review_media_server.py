@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 import html
 import json
-import mimetypes
 import os
 from pathlib import Path
 import re
@@ -53,11 +52,23 @@ def source(board: str, task: str, round_num: int, artifact_id: str, poster: bool
     real = path.resolve(strict=True)
     reviews = (root / "Reviews").resolve(strict=True)
     local = Path(os.environ.get("LOCALAPPDATA", "")) / "TaskBoard" / "review-media"
-    # The original review manifest controls all filenames. Never serve arbitrary
-    # files/URLs outside the known review media stores.
-    if not real.is_relative_to(reviews) and not (
-        local.is_dir() and real.is_relative_to(local.resolve())):
-        raise ValueError("Review media path is outside the review store")
+    # The manifest controls filenames but only this exact task/round may be
+    # served, not a sibling task or unrelated file in the global local cache.
+    own_review = (reviews / task).resolve(strict=True)
+    own_round = (own_review / f"r{round_num}").resolve(strict=True)
+    in_review = real.is_relative_to(own_round)
+    in_local = False
+    if local.is_dir():
+        cache = local.resolve()
+        if real.is_relative_to(cache):
+            relative = real.relative_to(cache)
+            in_local = (
+                len(relative.parts) >= 4 and
+                relative.parts[1] == task and
+                relative.parts[2] == f"r{round_num}"
+            )
+    if not in_review and not in_local:
+        raise ValueError("Review media path is outside the owning task and round")
     kind = KINDS.get(real.suffix.lower())
     if not kind or not real.is_file() or real.stat().st_size > MAX_MEDIA:
         raise ValueError("Unsupported or oversized review media")
@@ -74,6 +85,12 @@ def address(group: str, board: str, task: str, round_num: int, artifact_id: str)
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "TaskBoardReviewMedia/1"
+
+    def log_message(self, format: str, *args) -> None:
+        # pythonw.exe (Task Scheduler hidden logon service) has no stderr:
+        # BaseHTTPRequestHandler's default logging would otherwise raise and
+        # close every HTTP connection before sending its response.
+        pass
 
     def _send(self, code: int, message: bytes, content_type="text/plain; charset=utf-8"):
         self.send_response(code)
@@ -127,7 +144,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _stream(self, path: Path, mime: str):
         size = path.stat().st_size
-        start, end = 0, max(0, size - 1)
+        if size <= 0:
+            return self._send(404, b"Review media is empty")
+        start, end = 0, size - 1
         requested = self.headers.get("Range", "")
         if requested:
             match = re.fullmatch(r"bytes=(\d*)-(\d*)", requested.strip())
