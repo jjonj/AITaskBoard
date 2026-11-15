@@ -20,6 +20,7 @@ struct Busy {
     owner: Option<String>,
     paused_by_user: bool,
     since: Option<DateTime<Utc>>,
+    first_observed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Default)]
@@ -30,6 +31,7 @@ impl Fifo {
         for row in active.iter_mut() {
             let first = self.first_seen.entry(row.key.clone()).or_insert(now);
             row.since = row.since.or(Some(*first));
+            row.first_observed_at = Some(*first);
         }
         let keys: HashSet<_> = active.iter().map(|entry| entry.key.clone()).collect();
         self.items.retain(|key| keys.contains(key));
@@ -88,6 +90,7 @@ fn scan() -> Result<Vec<Busy>, String> {
             active.push(Busy {
                 key: Key { root: root.clone(), task: task.id.clone(), attempt },
                 state, intent, owner: task.claimed_by.clone(), since,
+                first_observed_at: None,
                 paused_by_user: task.question.as_ref().is_some_and(|q|
                     q.request_type.as_deref() == Some("queue_recovery") &&
                     q.answer.as_deref() == Some("Keep paused")) || task.column == "blocked",
@@ -177,6 +180,11 @@ fn decide(row: &Busy, matches: &[&Value], now: DateTime<Utc>) -> Repair {
                 }
             }
             if age >= 90 {
+                // A restored T3 guest may temporarily report Loading/Unknown.
+                // Give TaskBoard startup time to restore its session evidence.
+                if row.first_observed_at.is_some_and(|first| (now-first).num_minutes() < 10) {
+                    return Repair::None;
+                }
                 if row.owner.is_none() && matches.is_empty() { Repair::RequeueReleased }
                 else { Repair::Incident }
             } else { Repair::None }
@@ -320,7 +328,7 @@ mod tests {
         let when = Utc::now() - chrono::Duration::minutes(minutes_old);
         Busy {
             key: Key {root: PathBuf::from("C:/board"), task:id.into(), attempt:format!("attempt-{id}")},
-            state:Some(state), owner:None, paused_by_user:false, since:Some(when),
+            state:Some(state), owner:None, paused_by_user:false, since:Some(when), first_observed_at:None,
             intent: ExecutionIntent {
                 mode:ExecutionMode::Queue, queue_request:Some(uuid::Uuid::new_v4().to_string()),
                 queue_reservation_id:Some(uuid::Uuid::new_v4().to_string()),
@@ -385,6 +393,8 @@ mod tests {
         row.owner=Some("t3:agent".into());row.intent.queue_session_id=Some("agent".into());
         let uncertain=json!({"id":"agent","closedAt":null,"bootstrapIdentity":{"state":"registered"}});
         assert_eq!(decide(&row,&[&uncertain],Utc::now()), Repair::Incident);
+        row.first_observed_at=Some(Utc::now());
+        assert_eq!(decide(&row,&[&uncertain],Utc::now()), Repair::None);
         let gone=json!({"id":"agent","closedAt":"closed","totalTurns":0});
         assert_eq!(decide(&row,&[&gone],Utc::now()), Repair::ReclaimClosed);
     }
