@@ -752,6 +752,30 @@ impl FsTaskStore {
         parse_task(&destination, true, &existing)
     }
 
+    /// Restore a recently archived phone card through the same canonical board
+    /// lock and exact revision contract as archive. Never overwrite an active ID.
+    pub fn restore_archived_if_revision(&self, root: &Path, id: &str, expected: &str) -> Result<Task, TaskStoreError> {
+        if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(TaskStoreError::Invalid("phone restore requires an exact SHA-256 revision".into()));
+        }
+        let _lock = acquire_lock(root)?;
+        let source = find_task_path(root, id)?;
+        if !source.starts_with(root.join(ARCHIVE_DIR)) {
+            return Err(TaskStoreError::Conflict(format!("{id} is not archived")));
+        }
+        let existing = fs::read_to_string(&source)?;
+        if revision(&existing) != expected {
+            return Err(TaskStoreError::Conflict(format!("{id} changed in Archive since the phone snapshot")));
+        }
+        let target = root.join(ACTIVE_DIR).join(format!("{id}.md"));
+        if target.exists() {
+            return Err(TaskStoreError::Conflict(format!("active task {id} already exists")));
+        }
+        fs::create_dir_all(root.join(ACTIVE_DIR))?;
+        fs::rename(&source, &target)?;
+        parse_task(&target, false, &existing)
+    }
+
     /// OW-0023: the phone's create request validates the source board revision
     /// under the SAME lock as ID allocation and Markdown creation.
     /// OW-0023: phone column edits have exact-revision CAS AND referential
