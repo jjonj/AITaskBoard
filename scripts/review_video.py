@@ -154,6 +154,11 @@ def start(args):
                 print(f"Recovered stale recorder state: {previous}; preserved raw: {recovered}", file=sys.stderr)
             else:
                 print(f"Recovered stale recorder state: {previous}", file=sys.stderr)
+        else:
+            # Do not let start() mistake the last run's "done"/"failed"
+            # state for the new worker's status before it gets CPU time.
+            previous = args.state.with_name(args.state.name + f".previous-{time.time_ns()}.json")
+            args.state.replace(previous)
     args.state.with_suffix(".stop").unlink(missing_ok=True)
     cmd = [sys.executable, "-B", str(Path(__file__).resolve()), "_worker",
            "--state", str(args.state), "--raw", str(args.raw.resolve()),

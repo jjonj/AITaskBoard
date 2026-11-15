@@ -123,3 +123,6 @@ Ran D:/Wartribes/Tools/gateway_web.py on an isolated temporary loopback port 187
 ### Recorder crash recovery
 
 Generic scripts/review_video.py start/stop now checks the worker PID before waiting or rejecting a new session. If a prior worker died, it refuses to overwrite an **actively recording orphaned FFmpeg process**, but once both processes have exited it atomically preserves the stale .state.json as .recovered-TIMESTAMP.json and any nonempty raw Matroska as .recovered-TIMESTAMP.mkv before starting a new recording; no manual state deletion is required. Stop reports a crashed worker promptly rather than waiting for a result that will never arrive. Validation: E:/_AgentScratch/Tasks/Misc/MISC-0157/Validation/stale_capture_recovery.py used simulated crashed PIDs and interrupted raw bytes, verified both backups; real crash injection was **not** performed. PID validity check uses native Windows process handles without an optional Python dependency.
+
+
+Additional recording-session regression check: a previous `done`/`failed` state is archived before starting the next worker, so a reused --state path cannot falsely report the old run as the new capture. Focused simulated completed-state restart in stale_capture_recovery.py passed; actual process restart without FFmpeg window playback was not claimed.
