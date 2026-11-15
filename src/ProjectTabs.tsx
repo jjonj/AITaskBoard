@@ -5,10 +5,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { activateProject, addProject, boardChangeTokens, listProjects, loadBoard, moveTaskBetweenProjects, removeProject, reorderProjects, restoreProject, saveBoardConfig, setProjectFolders, showMainWindow, userQueueProjectIds } from "./api";
 import type { ProjectCatalog, ProjectPriority, ProjectTab } from "./api";
-import type { BoardConfig } from "./types";
+import type { BoardConfig, BoardSnapshot } from "./types";
 
 type Props = {
-  Board: (props: { project: ProjectTab; onInteractionChange: (locked: boolean) => void; requestedReviewId?: string; requestedTask?: {id: string; requestKey: number} }) => React.ReactNode;
+  Board: (props: { project: ProjectTab; onInteractionChange: (locked: boolean) => void; requestedReviewId?: string; requestedTask?: {id: string; requestKey: number}; initialSnapshot?: BoardSnapshot; onSnapshot?: (path: string, snapshot: BoardSnapshot) => void }) => React.ReactNode;
 };
 type DialogMode = "create" | "folders" | null;
 type TabDrop = { id: string; after: boolean };
@@ -33,6 +33,40 @@ const suggestedName = (path: string) => {
 
 export function ProjectTabs({ Board }: Props) {
   const [catalog, setCatalog] = useState<ProjectCatalog | null>(null);
+  // Keep snapshots in memory instead of mounting hidden boards and their timers.
+  const boardCache = useRef(new Map<string, BoardSnapshot>());
+  const activationWrites = useRef<Promise<unknown>>(Promise.resolve());
+  const rememberBoard = (path: string, snapshot: BoardSnapshot) => { boardCache.current.set(path, snapshot); };
+  useEffect(() => {
+    const projects = catalog?.projects ?? [];
+    if (!projects.length) return;
+    let cancelled = false;
+    const pending = projects.filter((project) => project.id !== catalog?.activeId && !boardCache.current.has(project.path));
+    let index = 0;
+    const warm = async () => {
+      while (!cancelled && index < pending.length) {
+        const project = pending[index++];
+        try {
+          const board = await loadBoard(project.path);
+          if (!cancelled && !boardCache.current.has(project.path)) rememberBoard(project.path, board);
+        } catch { /* A failed preload can retry on visit or refresh. */ }
+      }
+    };
+    // Avoid flooding cloud storage while warming unopened tabs.
+    const timer = window.setTimeout(() => { void warm(); void warm(); }, 250);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [catalog?.projects]);
+  useEffect(() => {
+    if (!catalog) return;
+    const selected = catalog.activeId;
+    // Save after painting, serialized so rapid switches cannot persist an older tab.
+    const timer = window.setTimeout(() => {
+      const job = activationWrites.current.catch(() => undefined).then(() => activateProject(selected));
+      activationWrites.current = job;
+      void job.catch((err) => setError(`Unable to remember selected project: ${String(err)}`));
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [catalog?.activeId]);
   useEffect(() => {
     // Show the shell promptly while the cloud-backed board loads.
     const timer = window.setTimeout(() => void showMainWindow().catch(() => undefined), 120);
@@ -291,6 +325,9 @@ export function ProjectTabs({ Board }: Props) {
       setCatalog(next);
       const inactive = next.projects.filter((project) => project.id !== next.activeId);
       const results = await Promise.allSettled(inactive.map((project) => loadBoard(project.path)));
+      results.forEach((result, index) => {
+        if (result.status === "fulfilled") rememberBoard(inactive[index].path, result.value);
+      });
       const failed = results.flatMap((result, index) => result.status === "rejected"
         ? [inactive[index].name] : []);
       if (failed.length) setError(`Unable to refresh: ${failed.join(", ")}`);
@@ -377,19 +414,11 @@ export function ProjectTabs({ Board }: Props) {
     return () => window.removeEventListener("keydown", handleFunctionKey);
   }, [working, locked, dialogMode, catalog]);
 
-  const switchTo = async (id: string) => {
+  const switchTo = (id: string) => {
     if (working || locked || dialogMode || !catalog || catalog.activeId === id) return;
-    setWorking(true);
     setError("");
-    try {
-      const updated = await activateProject(id);
-      setLocked(false);
-      setCatalog(updated);
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setWorking(false);
-    }
+    // Render immediately; save selection independently and refresh cached data.
+    setCatalog((current) => current ? { ...current, activeId: id } : current);
   };
 
   const reorder = async (fromId: string, toId: string, after: boolean) => {
@@ -719,6 +748,7 @@ export function ProjectTabs({ Board }: Props) {
       {(error || catalogError) && !dialogMode && <div className="project-catalog-error" role="alert">{error || catalogError}</div>}
       {active && <div className="project-workspace" id="project-board" role="tabpanel">
         <Board key={active.id} project={active} onInteractionChange={setLocked}
+            initialSnapshot={boardCache.current.get(active.path)} onSnapshot={rememberBoard}
             {...(startupReview && startupReview.path.replace(/\\/g, "/").toLowerCase() === active.path.replace(/\\/g, "/").toLowerCase()
               ? { requestedReviewId: startupReview.taskId } : {})}
             {...(startupTask && startupTask.path.replace(/\\/g, "/").toLowerCase() === active.path.replace(/\\/g, "/").toLowerCase()

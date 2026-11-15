@@ -293,11 +293,13 @@ const randomColumnColor = (used: string[]) => {
   return pool[Math.floor(Math.random() * pool.length)];
 };
 
-function ProjectBoard({ project, onInteractionChange, requestedReviewId, requestedTask }: {
+function ProjectBoard({ project, onInteractionChange, requestedReviewId, requestedTask, initialSnapshot, onSnapshot }: {
   project: ProjectTab;
   onInteractionChange: (locked: boolean) => void;
   requestedReviewId?: string;
   requestedTask?: { id: string; requestKey: number };
+  initialSnapshot?: BoardSnapshot;
+  onSnapshot?: (path: string, snapshot: BoardSnapshot) => void;
 }) {
   const boardPath = project.path;
   // Preserve existing Wartribes UI settings while isolating all other boards.
@@ -310,7 +312,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const blockedInboxFilterKey = storageKey("hideBlockedInboxTasks");
   const hideWaitingKey = storageKey("hideDependencyWaitingTasks");
   const todaysWorkKey = storageKey("todaysWork");
-  const [snapshot, setSnapshot] = useState<BoardSnapshot | null>(null);
+  const [snapshot, setSnapshot] = useState<BoardSnapshot | null>(initialSnapshot ?? null);
   const [query, setQuery] = useState("");
   const [searchResultsOpen, setSearchResultsOpen] = useState(false);
   const [taskFilters, setTaskFilters] = useState<TaskFilterSelection>({
@@ -481,7 +483,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const prepLaunchRef = useRef<Promise<unknown> | null>(null);
   const prepNotified = useRef(new Set<string>());
   const prepNoticeLastAttempt = useRef(new Map<string, number>());
-  const snapshotRef = useRef<BoardSnapshot | null>(null);
+  const snapshotRef = useRef<BoardSnapshot | null>(initialSnapshot ?? null);
   // One throttled refresh per board: backend shares a 30s T3 inventory
   // between claim telemetry and durable notification reconciliation.
   useEffect(() => {
@@ -805,6 +807,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const applySnapshot = (next: BoardSnapshot) => {
     snapshotRef.current = next;
     setSnapshot(next);
+    onSnapshot?.(boardPath, next);
   };
 
   const flashTaskActivity = (
@@ -930,25 +933,28 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   };
 
   useEffect(() => {
+    let mounted = true;
     void (async () => {
       try {
+        // A cached board is immediately usable; verify changes made by agents
+        // while its tab was hidden without blocking tab navigation.
         const next = await loadBoard(boardPath);
+        if (!mounted) return;
         applySnapshot(next);
         setError("");
       } catch (err) {
-        setError(errorText(err));
+        if (mounted) setError(errorText(err));
       } finally {
-        // The native window starts hidden. Give React/WebView2 time to commit
-        // and paint the loaded board (or dark error state) before revealing it.
+        if (!mounted || initialSnapshot) return;
+        // The first cold load may still be the startup view.
         await new Promise((resolve) => window.setTimeout(resolve, 160));
-        void document.documentElement.getBoundingClientRect();
-        try {
-          await showMainWindow();
-        } catch (err) {
-          setError(errorText(err));
+        if (mounted) {
+          void document.documentElement.getBoundingClientRect();
+          void showMainWindow().catch((err) => { if (mounted) setError(errorText(err)); });
         }
       }
     })();
+    return () => { mounted = false; };
   }, []);
 
   // UI-only activity markers survive a window restart but never change the
