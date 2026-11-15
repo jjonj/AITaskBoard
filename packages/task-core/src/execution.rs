@@ -473,11 +473,13 @@ impl FsTaskStore {
         persist(&path, &mapping, &body)
     }
 
-    /// The user's bounded worker lifetime policy: after 3h without observed
-    /// work, release the exact old attempt and mint a fresh queue identity.
-    /// The old reservation and delayed T3 acknowledgments are fenced by CAS.
-    pub fn recover_timed_out_queue_task(
-        &self, root: &Path, id: &str, queue_request: &str, request_id: &str,
+    /// The single FIFO recovery operation for any busy task. Queue phases,
+    /// manually claimed tasks, and In Progress cards share one inactivity rule.
+    /// All identities and timestamps are rechecked under the board lock.
+    pub fn recover_stale_busy_task(
+        &self, root: &Path, id: &str, expected_owner: Option<&str>,
+        expected_queue_request: Option<&str>, expected_reservation: Option<&str>,
+        expected_state: Option<QueueState>, expected_manual_request: Option<&str>,
         last_worker_activity_ms: Option<i64>,
     ) -> Result<ExecutionIntent, TaskStoreError> {
         let _lock = acquire_lock(root)?;
@@ -485,54 +487,76 @@ impl FsTaskStore {
         let path = find_task_path(root, id)?;
         let existing = fs::read_to_string(&path)?;
         let mut task = parse_task(&path, false, &existing)?;
-        let (text, map, _) = load(&path)?;
-        let previous = intent(&map, &text)?;
-        if previous.mode != ExecutionMode::Queue ||
-            previous.queue_request.as_deref() != Some(queue_request) ||
-            previous.queue_reservation_id.as_deref() != Some(request_id) ||
-            !matches!(previous.queue_state, Some(QueueState::Starting | QueueState::Working)) {
-            return Err(TaskStoreError::Conflict(format!("{id}: recovery identity changed")));
-        }
+        let (yaml, _) = split_frontmatter(&existing)?;
+        let old: serde_yaml::Mapping = serde_yaml::from_str(&yaml)
+            .map_err(|e| TaskStoreError::Parse(e.to_string()))?;
+        let previous = intent(&old, &existing)?;
         if task.archived || task.completed.is_some() ||
-            snapshot.config.columns.iter().any(|column| column.terminal && column.id == task.column) {
-            return Err(TaskStoreError::Conflict(format!("{id}: task is terminal")));
+            !matches!(task.kind, TaskKind::Task | TaskKind::Recurring) ||
+            snapshot.config.columns.iter().any(|col| col.terminal && col.id == task.column) ||
+            task.claimed_by.as_deref() != expected_owner ||
+            previous.queue_request.as_deref() != expected_queue_request ||
+            previous.queue_reservation_id.as_deref() != expected_reservation ||
+            previous.queue_state != expected_state ||
+            previous.start_now_request.as_deref() != expected_manual_request {
+            return Err(TaskStoreError::Conflict(format!("{id}: task changed since FIFO inspection")));
         }
-        let entered = previous.queue_state_since.as_deref()
-            .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
-            .map(|v| v.to_utc())
-            .ok_or_else(|| TaskStoreError::Conflict(format!("{id}: no durable start timestamp")))?;
-        let last = last_worker_activity_ms.and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
-            .filter(|t| *t <= chrono::Utc::now())
-            .map_or(entered, |activity| activity.max(entered));
-        if chrono::Utc::now().signed_duration_since(last) < chrono::Duration::hours(3) {
-            return Err(TaskStoreError::Conflict(format!("{id}: worker is still within the recovery timeout")));
+        let busy = task.claimed_by.is_some() || task.column == IN_PROGRESS_COLUMN_ID ||
+            matches!(previous.queue_state, Some(
+                QueueState::Reserved | QueueState::Starting | QueueState::Working | QueueState::RecoveryRequired)) ||
+            (previous.start_now_request.is_some() && previous.start_now_receipt.is_none());
+        if !busy {
+            return Err(TaskStoreError::Conflict(format!("{id}: no longer busy")));
         }
-        let had_claim = task.claimed_by.is_some();
-        if let Some(owner) = task.claimed_by.as_deref() {
-            let Some(session) = previous.queue_session_id.as_deref() else {
-                return Err(TaskStoreError::Conflict(format!("{id}: claimed task lacks session identity")));
-            };
-            if owner != format!("t3:{session}") && owner != format!("t3-browser:{session}") {
-                return Err(TaskStoreError::Conflict(format!("{id}: a different worker owns this task")));
-            }
-            if claim_metadata(&existing, "claim_token")?.is_some() {
-                return Err(TaskStoreError::Conflict(format!("{id}: managed claim cannot be preempted")));
-            }
-            release_to_original(&mut task, &snapshot.config, &existing)?;
+        // An unanswered user question or open visual review is not abandoned
+        // execution. Leave its Inbox state untouched until answered.
+        if task.review_status.as_deref() == Some("open") ||
+            task.question.as_ref().is_some_and(|q| q.answer.is_none() &&
+                q.request_type.as_deref() != Some("queue_recovery")) {
+            return Err(TaskStoreError::Conflict(format!("{id}: awaiting user")));
         }
-        let rendered = if had_claim {
-            stamp_activity(&render_with_claim_token(&task, &existing, None)?, None, true)?
-        } else { existing };
+        let now = Utc::now();
+        let dates = [
+            previous.queue_state_since.as_deref(),
+            old.get(key("last_activity_at")).and_then(serde_yaml::Value::as_str),
+        ];
+        let mut latest = dates.into_iter().flatten()
+            .filter_map(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok().map(|t| t.to_utc()))
+            .max();
+        if let Ok(modified) = fs::metadata(&path).and_then(|m| m.modified()) {
+            let time = chrono::DateTime::<Utc>::from(modified);
+            latest = Some(latest.map_or(time, |v| v.max(time)));
+        }
+        if let Some(at) = last_worker_activity_ms.and_then(chrono::DateTime::<Utc>::from_timestamp_millis)
+            .filter(|at| *at <= now) {
+            latest = Some(latest.map_or(at, |v| v.max(at)));
+        }
+        if latest.is_none_or(|at| now.signed_duration_since(at) < chrono::Duration::hours(crate::BUSY_RECOVERY_IDLE_HOURS)) {
+            return Err(TaskStoreError::Conflict(format!("{id}: not inactive for three hours")));
+        }
+        let previous_owner = task.claimed_by.clone().unwrap_or_else(|| "unassigned".into());
+        release_to_original(&mut task, &snapshot.config, &existing)?;
+        task.description = append_description_update(&task.description, "abandonment",
+            &format!("FIFO recovery: over 3 hours without activity (previous owner: {previous_owner}). Returned to {}.", task.column));
+        let rendered = stamp_activity(&render_with_claim_token(&task, &existing, None)?, None, true)?;
         let (yaml, body) = split_frontmatter(&rendered)?;
         let mut mapping: serde_yaml::Mapping = serde_yaml::from_str(&yaml)
             .map_err(|e| TaskStoreError::Parse(e.to_string()))?;
-        mapping.insert(key("queue_request"), key(&uuid::Uuid::new_v4().to_string()));
-        mapping.insert(key("queue_state"), key("queued"));
-        for field in ["queue_session_id", "queue_reservation_id", "queue_reservation_expires_at"] {
-            mapping.remove(key(field));
+        if previous.mode == ExecutionMode::Queue {
+            mapping.insert(key("queue_request"), key(&uuid::Uuid::new_v4().to_string()));
+            mapping.insert(key("queue_state"), key("queued"));
+            mapping.insert(key("queue_state_since"), key(&now.to_rfc3339_opts(SecondsFormat::Millis, true)));
+            for name in ["queue_reservation_id", "queue_reservation_expires_at", "queue_session_id"] {
+                mapping.remove(key(name));
+            }
         }
-        mapping.insert(key("queue_error"), key("Previous worker exceeded three hours without activity; automatically requeued."));
-        persist(&path, &mapping, &body)
+        mapping.remove(key("start_now_request"));
+        mapping.remove(key("start_now_receipt"));
+        mapping.remove(key("queue_error"));
+        let final_text = format!("---\n{}---\n{}", serde_yaml::to_string(&mapping)
+            .map_err(|e| TaskStoreError::Parse(e.to_string()))?, body);
+        write_text_atomic(&path, &final_text)?;
+        intent(&mapping, &final_text)
     }
 
     /// One-time compatibility migration for incidents written by the obsolete

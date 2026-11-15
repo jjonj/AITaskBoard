@@ -433,16 +433,23 @@ fn timed_out_start_requeues_without_a_human_recovery_flag() {
     let start = uuid::Uuid::new_v4().to_string();
     store.reserve_queue_task(root, &task.id, &request, &start, 180).unwrap();
     let starting = store.start_queue_task(root, &task.id, &start).unwrap();
-    assert!(store.recover_timed_out_queue_task(root, &task.id, &request, &start, None).is_err());
+    assert!(store.recover_stale_busy_task(root, &task.id, None, Some(&request),
+        Some(&start), Some(QueueState::Starting), None, None).is_err());
 
     let path = std::path::Path::new(&task.path);
     let text = std::fs::read_to_string(path).unwrap().replace(
         starting.queue_state_since.as_deref().unwrap(), "2020-01-01T00:00:00.000Z");
+    let text = text.lines().filter(|line| !line.starts_with("last_activity_at:"))
+        .collect::<Vec<_>>().join("\n")+"\n";
     std::fs::write(path, text).unwrap();
-    assert!(store.recover_timed_out_queue_task(root, &task.id, &request, &start,
+    let file=std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.set_modified(std::time::SystemTime::now()-std::time::Duration::from_secs(4*3600)).unwrap();
+    assert!(store.recover_stale_busy_task(root, &task.id, None, Some(&request),
+        Some(&start), Some(QueueState::Starting), None,
         Some(chrono::Utc::now().timestamp_millis())).is_err(),
         "recent worker progress prevents timed-out replacement");
-    let recovered = store.recover_timed_out_queue_task(root, &task.id, &request, &start, None).unwrap();
+    let recovered = store.recover_stale_busy_task(root, &task.id, None, Some(&request),
+        Some(&start), Some(QueueState::Starting), None, None).unwrap();
     assert_eq!(recovered.queue_state, Some(QueueState::Queued));
     assert_ne!(recovered.queue_request.as_deref(), Some(request.as_str()));
     assert!(recovered.queue_reservation_id.is_none());
@@ -464,9 +471,15 @@ fn timed_out_working_claim_releases_original_worker_under_lock() {
     store.start_queue_task(root, &task.id, &start).unwrap();
     let working = store.claim_queue_working(root, &task.id, &request, &start, &session).unwrap();
     let file = std::path::Path::new(&task.path);
-    std::fs::write(file, std::fs::read_to_string(file).unwrap().replace(
-        working.queue_state_since.as_deref().unwrap(), "2020-01-01T00:00:00.000Z")).unwrap();
-    let recovered = store.recover_timed_out_queue_task(root, &task.id, &request, &start, None).unwrap();
+    let text = std::fs::read_to_string(file).unwrap().replace(
+        working.queue_state_since.as_deref().unwrap(), "2020-01-01T00:00:00.000Z");
+    let text = text.lines().filter(|line| !line.starts_with("last_activity_at:"))
+        .collect::<Vec<_>>().join("\n")+"\n";
+    std::fs::write(file, text).unwrap();
+    let f=std::fs::OpenOptions::new().write(true).open(file).unwrap();
+    f.set_modified(std::time::SystemTime::now()-std::time::Duration::from_secs(4*3600)).unwrap();
+    let recovered = store.recover_stale_busy_task(root, &task.id, Some(&format!("t3:{session}")),
+        Some(&request), Some(&start), Some(QueueState::Working), None, None).unwrap();
     assert_eq!(recovered.queue_state, Some(QueueState::Queued));
     assert_ne!(recovered.queue_request.as_deref(), Some(request.as_str()));
     let card = store.load(root).unwrap().tasks.into_iter().find(|t|t.id==task.id).unwrap();
@@ -518,4 +531,41 @@ fn legacy_paused_escalation_reopens_as_starting_without_inbox_prompt() {
     assert_eq!(restored.column, "ai-ready");
     assert!(restored.question.is_none());
     assert!(!restored.attention.contains(&task_core::TaskAttention::NeedsUser));
+}
+
+#[test]
+fn queued_but_still_claimed_requeues_under_same_fiforecovery_rule() {
+    let dir=tempfile::tempdir().unwrap();
+    let root=dir.path();
+    let (store,task,request)=queued_task(root);
+    let start=uuid::Uuid::new_v4().to_string();
+    let session=uuid::Uuid::new_v4().to_string();
+    store.reserve_queue_task(root,&task.id,&request,&start,180).unwrap();
+    store.start_queue_task(root,&task.id,&start).unwrap();
+    store.claim_queue_working(root,&task.id,&request,&start,&session).unwrap();
+    let file=std::path::Path::new(&task.path);
+    let original=std::fs::read_to_string(file).unwrap();
+    let altered=original.lines().filter(|l| !l.starts_with("last_activity_at:") &&
+        !l.starts_with("queue_reservation_id:") && !l.starts_with("queue_session_id:"))
+        .map(|l| if l=="queue_state: working" {"queue_state: queued"} else {l})
+        .map(|l| if l.starts_with("queue_state_since:") {"queue_state_since: 2020-01-01T00:00:00Z"} else {l})
+        .collect::<Vec<_>>().join("\n")+"\n";
+    std::fs::write(file,altered).unwrap();
+    let f=std::fs::OpenOptions::new().write(true).open(file).unwrap();
+    f.set_modified(std::time::SystemTime::now()-std::time::Duration::from_secs(4*3600)).unwrap();
+
+    let owner=format!("t3:{session}");
+    let attempt=store.execution_intent(root,&task.id).unwrap();
+    assert_eq!(attempt.queue_state,Some(QueueState::Queued));
+    assert_eq!(store.load(root).unwrap().tasks.iter()
+        .find(|t|t.id==task.id).unwrap().claimed_by.as_deref(),Some(owner.as_str()));
+    assert!(store.recover_stale_busy_task(root,&task.id,Some(&owner),Some(&request),
+        None,Some(QueueState::Queued),None,Some(chrono::Utc::now().timestamp_millis())).is_err());
+    let recovered=store.recover_stale_busy_task(root,&task.id,Some(&owner),Some(&request),
+        None,Some(QueueState::Queued),None,None).unwrap();
+    assert_eq!(recovered.queue_state,Some(QueueState::Queued));
+    assert_ne!(recovered.queue_request.as_deref(),Some(request.as_str()));
+    let card=store.load(root).unwrap().tasks.into_iter().find(|t|t.id==task.id).unwrap();
+    assert_eq!(card.column,"ai-ready");
+    assert_eq!(card.claimed_by,None);
 }

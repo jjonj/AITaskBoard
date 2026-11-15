@@ -479,50 +479,6 @@ impl FsTaskStore {
         Ok(changed)
     }
 
-    /// On each board read, release In Progress tasks idle beyond their lease,
-    /// whether claimed by T3/external agents or manually started by the user.
-    /// Direct Markdown edits count through their file modification timestamp.
-    fn maintain_abandoned_tasks(&self, root: &Path, snapshot: &BoardSnapshot) -> Result<bool, TaskStoreError> {
-        // Task ownership expires after inactivity even when the agent session
-        // remains recoverable. This does not close or revoke the T3 session.
-        let hours = fs::read(root.join(".agent-resume-policy.json")).ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .and_then(|value| value.get("externalLeaseHours").and_then(|hours| hours.as_i64()))
-            .filter(|hours| (1..=24 * 90).contains(hours))
-            .unwrap_or(ABANDON_AFTER_HOURS);
-        let cutoff = Utc::now() - ChronoDuration::hours(hours);
-        let mut changed = false;
-        for task in snapshot.tasks.iter().filter(|task| !task.archived
-            && matches!(task.kind, TaskKind::Task | TaskKind::Recurring)
-            && task.column == IN_PROGRESS_COLUMN_ID
-            && task.completed.is_none()) {
-            let path = PathBuf::from(&task.path);
-            let existing = fs::read_to_string(&path)?;
-            if revision(&existing) != task.revision { continue; }
-            let persisted = claim_metadata(&existing, "last_activity_at")?
-                .and_then(|stamp| DateTime::parse_from_rfc3339(&stamp).ok())
-                .map(|stamp| stamp.with_timezone(&Utc));
-            let file_activity = fs::metadata(&path)?.modified().ok().map(DateTime::<Utc>::from);
-            let latest = match (persisted, file_activity) {
-                (Some(a), Some(b)) => Some(a.max(b)),
-                (Some(a), None) | (None, Some(a)) => Some(a),
-                (None, None) => None,
-            };
-            if latest.is_none_or(|activity| activity > cutoff) { continue; }
-            let mut abandoned = task.clone();
-            let previous_owner = abandoned.claimed_by.clone().unwrap_or_else(|| "unassigned".into());
-            let origin = claim_metadata(&existing, "in_progress_origin")?;
-            abandoned.column = return_column(&snapshot.config, origin.as_deref());
-            abandoned.claimed_by = None;
-            abandoned.description = append_description_update(&abandoned.description, "abandonment",
-                &format!("In Progress timed out after {hours} hours without task updates (previous owner: {previous_owner}). Claim released; returned to {}.", abandoned.column));
-            let rendered = stamp_activity(&render_with_claim_token(&abandoned, &existing, None)?, None, true)?;
-            write_text_atomic(&path, &rendered)?;
-            changed = true;
-        }
-        Ok(changed)
-    }
-
     /// Uncommitted creation dialogs are saved as user drafts with a marker.
     /// Expire only untouched, unreferenced drafts after 24 hours; manual saves
     /// remove the marker and ordinary user-created drafts are never pruned.
@@ -720,14 +676,6 @@ impl FsTaskStore {
 }
 
 impl FsTaskStore {
-    /// Lightweight periodic sweep: only reclaim expired In Progress claims.
-    /// Unlike `load`, this does not run unrelated board maintenance.
-    pub fn expire_inactive(&self, root: &Path) -> Result<bool, TaskStoreError> {
-        let _lock = acquire_lock(root)?;
-        let snapshot = self.load_unlocked(root)?;
-        self.maintain_abandoned_tasks(root, &snapshot)
-    }
-
     fn load_impl(&self, root: &Path) -> Result<BoardSnapshot, TaskStoreError> {
         let _lock = acquire_lock(root)?;
         let mut snapshot = self.load_unlocked(root)?;
@@ -738,9 +686,6 @@ impl FsTaskStore {
             snapshot = self.load_unlocked(root)?;
         }
         if self.maintain_completed_tasks(root, &snapshot)? {
-            snapshot = self.load_unlocked(root)?;
-        }
-        if self.maintain_abandoned_tasks(root, &snapshot)? {
             snapshot = self.load_unlocked(root)?;
         }
         if self.maintain_dependency_unblocks(&snapshot)? {
@@ -1277,8 +1222,6 @@ fn mirror_local_related_links(
     }
     Ok(())
 }
-
-const ABANDON_AFTER_HOURS: i64 = 4;
 
 /// Human Inbox requests remain in place even when their agent is inactive.
 fn pending_human_request(task: &Task) -> bool {

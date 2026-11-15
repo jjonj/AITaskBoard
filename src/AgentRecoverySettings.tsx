@@ -38,7 +38,7 @@ export function AgentRecoverySettings({boardPath,onClose}:Props) {
     <section role="dialog" aria-modal="true" aria-label="Agent recovery settings"
       className="agent-recovery-dialog" onMouseDown={event=>event.stopPropagation()}>
       <h2>Agent recovery</h2>
-      <p>In Progress tasks automatically return to their ready column after four hours without task updates (or the configured timeout), releasing all claims including T3. Agent sessions are not closed.</p>
+      <p>The TaskBoard FIFO checks busy tasks every 20 seconds. After three hours without task or worker activity, it releases the claim and returns the task to its ready column. Agent sessions are not closed.</p>
       {draft && <div className="agent-recovery-fields">
         {number("resumeWindowHours","Agent Resume Window (hours)",1,168,
           "Idle agents are contacted only if their last verified work falls within this window.")}
@@ -47,10 +47,6 @@ export function AgentRecoverySettings({boardPath,onClose}:Props) {
             onChange={event=>setDraft({...draft,wakeRecentIdle:event.currentTarget.checked})}/>
           <span>Resume a recent idle T3 agent on human feedback</span>
         </label>
-        {number("t3OrphanGraceHours","Confirmed-gone T3 grace (hours)",1,168,
-          "Only starts after an authoritative permanent-gone receipt; errors and unloaded sessions do not start it.")}
-        {number("externalLeaseHours","Task inactivity timeout (hours)",1,2160,
-          "All In Progress tasks, including T3 and manually started tasks. Any task update resets the timer; claims are released when it expires.")}
         {number("technicalRecheckDays","Technical blocker recheck age (days)",1,365,
           "Low-priority reminders, never worker spawning or dependency-only rechecks.")}
       </div>}

@@ -54,48 +54,55 @@ fn abandoned_task_requeues_once_and_preserves_the_timeline() {
     let task = store.create(&root, draft("ai-ready")).unwrap();
     let claimed = store.claim(&root, &task.id, "agent").unwrap();
     age_file(&claimed.path, 5);
+    assert_eq!(store.load(&root).unwrap().tasks.iter().find(|t| t.id == task.id)
+        .unwrap().column, "in-progress");
+    store.recover_stale_busy_task(&root, &task.id, Some("agent"),
+        None, None, None, None, None).unwrap();
     let recovered = store.load(&root).unwrap().tasks.into_iter().find(|t| t.id == task.id).unwrap();
     assert_eq!(recovered.column, "ai-ready");
     assert_eq!(recovered.claimed_by, None);
-    assert!(recovered.description.contains("In Progress timed out after 4 hours"));
+    assert!(recovered.description.contains("FIFO recovery: over 3 hours"));
     let again = store.load(&root).unwrap().tasks.into_iter().find(|t| t.id == task.id).unwrap();
-    assert_eq!(again.description.matches("In Progress timed out").count(), 1);
+    assert_eq!(again.description.matches("FIFO recovery: over 3 hours").count(), 1);
     fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn pending_inbox_preserves_its_question_when_inactive_task_requeues() {
+fn pending_inbox_is_not_treated_as_stale_worker() {
     let (store, root) = board();
     let task = store.create(&root, draft("ai-ready")).unwrap();
     let mut edited = task.clone();
     edited.attention.push(TaskAttention::Question);
     edited.question = Some(TaskQuestion { request_type: Some("decision".into()),
         prompt: "Choose one?".into(), options: vec!["A".into(), "B".into()], answer: None });
-    let mut pending = store.update(&root, edited).unwrap();
-    assert_eq!(pending.column, "ai-ready");
-    // Human manually starts the task without taking an AI claim.
-    pending.column = "in-progress".into();
-    let pending = store.update_as(&root, pending, task_core::MutationActor::Human).unwrap();
+    let pending = store.update(&root, edited).unwrap();
+    assert_eq!(pending.column, "blocked");
     age_file(&pending.path, 5);
     let read = store.load(&root).unwrap().tasks.into_iter().find(|t| t.id == task.id).unwrap();
-    assert_eq!(read.column, "ai-ready");
-    assert_eq!(read.claimed_by, None);
+    assert_eq!(read.column, "blocked");
+    assert!(store.recover_stale_busy_task(&root, &task.id, None, None, None, None, None, None).is_err());
     assert_eq!(read.question.as_ref().unwrap().prompt, "Choose one?");
     fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn recent_and_t3_managed_claims_obey_four_hour_lease() {
+fn recent_and_t3_managed_claims_obey_fifo_inactivity_rule() {
     let (store, root) = board();
     let task = store.create(&root, draft("ai-ready")).unwrap();
     let managed = store.claim_managed(&root, &task.id,
         "t3-browser:8fd23b67-0a26-4082-8972-4425b500164f").unwrap();
-    age_file(&managed.task.path, 3);
+    age_file(&managed.task.path, 2);
+    assert!(store.recover_stale_busy_task(&root, &task.id,
+        Some("t3-browser:8fd23b67-0a26-4082-8972-4425b500164f"),
+        None, None, None, None, None).is_err());
     let recent = store.load(&root).unwrap().tasks.into_iter()
         .find(|t| t.id == task.id).unwrap();
     assert_eq!(recent.column, "in-progress");
     assert!(recent.claimed_by.is_some());
     age_file(&recent.path, 5);
+    store.recover_stale_busy_task(&root, &task.id,
+        Some("t3-browser:8fd23b67-0a26-4082-8972-4425b500164f"),
+        None, None, None, None, None).unwrap();
     let expired = store.load(&root).unwrap().tasks.into_iter()
         .find(|t| t.id == task.id).unwrap();
     assert_eq!(expired.column, "ai-ready");
@@ -103,5 +110,23 @@ fn recent_and_t3_managed_claims_obey_four_hour_lease() {
     assert!(!fs::read_to_string(&expired.path).unwrap().contains("\nclaim_token:"));
     assert!(store.release_managed(&root, &task.id,
         "t3-browser:8fd23b67-0a26-4082-8972-4425b500164f", &managed.claim_token).is_err());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn unclaimed_in_progress_is_monitored_by_same_fifo_rule() {
+    let (store,root)=board();
+    let task=store.create(&root,draft("ai-ready")).unwrap();
+    let mut edited=task.clone();
+    edited.column="in-progress".into();
+    let moved=store.update_as(&root,edited,task_core::MutationActor::Human).unwrap();
+    assert_eq!(moved.claimed_by,None);
+    age_file(&moved.path,5);
+    // Normal reads do not auto-recover; only the FIFO invokes the transition.
+    assert_eq!(store.load(&root).unwrap().tasks.iter().find(|t|t.id==task.id)
+        .unwrap().column,"in-progress");
+    store.recover_stale_busy_task(&root,&task.id,None,None,None,None,None,None).unwrap();
+    let returned=store.load(&root).unwrap().tasks.into_iter().find(|t|t.id==task.id).unwrap();
+    assert_eq!(returned.column,"ai-ready");
     fs::remove_dir_all(root).unwrap();
 }

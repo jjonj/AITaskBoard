@@ -15,3 +15,4 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub const DRAFT_COLUMN_ID: &str = "draft";
 pub const AI_READY_COLUMN_ID: &str = "ai-ready";
 pub const IN_PROGRESS_COLUMN_ID: &str = "in-progress";
+pub const BUSY_RECOVERY_IDLE_HOURS: i64 = 3;

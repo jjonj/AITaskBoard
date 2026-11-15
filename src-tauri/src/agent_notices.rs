@@ -1,10 +1,10 @@
 //! Durable TaskBoard-owned notification outbox. No blind retries after uncertain send.
 //! Entries live with the board, independent of temporary T3 browser identities.
-use std::{collections::HashMap,fs,io::Write,path::{Path,PathBuf},process::{Command,Stdio},sync::{Mutex,OnceLock},time::{Duration,Instant,SystemTime,UNIX_EPOCH}};
+use std::{fs,io::Write,path::{Path,PathBuf},process::{Command,Stdio},sync::{Mutex,OnceLock},time::{SystemTime,UNIX_EPOCH}};
 use serde::{Deserialize,Serialize};
 #[cfg(windows)] use std::os::windows::process::CommandExt;
 use serde_json::{json,Value};
-use task_core::{FsTaskStore,TaskStore,TaskStoreError,MutationActor};
+use task_core::{FsTaskStore,TaskStore,MutationActor};
 
 #[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(rename_all="camelCase")]
@@ -79,24 +79,6 @@ pub(crate) fn task_enqueue_agent_notice(path:String,id:String,owner:String,revis
 }
 fn reconciler_lock()->&'static Mutex<()> { static LOCK:OnceLock<Mutex<()>>=OnceLock::new();LOCK.get_or_init(||Mutex::new(())) }
 
-fn board_busy(error: &TaskStoreError) -> bool {
-    matches!(error, TaskStoreError::Conflict(reason) if reason == "board is busy")
-}
-
-// Orphan-claim recovery is maintenance, not a reason to lock every open board
-// every 30 seconds when there are no agent notices waiting for delivery.
-fn orphan_check_times() -> &'static Mutex<HashMap<PathBuf, Instant>> {
-    static LAST: OnceLock<Mutex<HashMap<PathBuf, Instant>>> = OnceLock::new();
-    LAST.get_or_init(|| Mutex::new(HashMap::new()))
-}
-fn orphan_check_due(root: &Path) -> bool {
-    let entries = orphan_check_times().lock().unwrap_or_else(|poison| poison.into_inner());
-    !entries.get(root).is_some_and(|at| at.elapsed() < Duration::from_secs(300))
-}
-fn mark_orphan_checked(root: &Path) {
-    orphan_check_times().lock().unwrap_or_else(|poison| poison.into_inner())
-      .insert(root.to_path_buf(), Instant::now());
-}
 fn resolve_notice(root:&Path,notice:&mut AgentNotice, t3:&Option<Value>)->Result<(),String>{
     if notice.state!="pending" {return Ok(());}
     let board=FsTaskStore::default().load(root).map_err(|e|e.to_string())?;
@@ -174,31 +156,11 @@ pub(crate) async fn task_reconcile_agent_notices(path:String)->Result<Vec<AgentN
         notices.sort_by_key(|n|n.created_at_ms);
         let has_unresolved = notices.iter().any(|n|
           ["pending", "unknown", "attempting"].contains(&n.state.as_str()));
-        let check_orphans = orphan_check_due(&root);
-        if !has_unresolved && !check_orphans { return Ok(notices); }
-        let has_t3_claims = if check_orphans {
-            match FsTaskStore::default().load(&root) {
-                Ok(board) => board.tasks.iter().any(|task|
-                  task.claimed_by.as_deref().and_then(uuid_owner).is_some()),
-                // A foreground writer has priority. Leave all notices on disk
-                // and retry on the next refresh instead of showing a banner.
-                Err(ref error) if board_busy(error) => return Ok(notices),
-                Err(error) => return Err(error.to_string()),
-            }
-        } else { false };
-        let t3=if has_t3_claims || notices.iter().any(|n|uuid_owner(&n.owner).is_some() &&
+        if !has_unresolved { return Ok(notices); }
+        let t3=if notices.iter().any(|n|uuid_owner(&n.owner).is_some() &&
              ["pending","unknown","attempting"].contains(&n.state.as_str())) {
             shared_t3_inventory()
         }else{None};
-        // Stable claims stay put unless permanently-gone proof AND its grace
-        // period are confirmed. This check is deliberately low-frequency.
-        if check_orphans {
-            if let Err(error) = crate::orphan_recovery::reconcile(&root,t3.as_ref()) {
-                if !error.contains("write conflict: board is busy") { return Err(error); }
-            } else {
-                mark_orphan_checked(&root);
-            }
-        }
         // An uncertain send can only be reconciled by the *same* message ID;
         // never blindly submit the instruction a second time.
         if t3.is_some() {

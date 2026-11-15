@@ -1,13 +1,14 @@
-//! TaskBoard-owned busy-work FIFO. TaskBoard files are the durable source of
-//! membership; the queue holds ordering only and is reconstructed after restart.
+//! The only automatic TaskBoard recovery loop. Busy attempts enter a rotating
+//! FIFO; each inspection uses the same three-hour inactivity rule.
 use std::{collections::{HashMap, HashSet, VecDeque}, path::PathBuf, sync::{Mutex, OnceLock}, time::Duration};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
-use task_core::{ExecutionIntent, ExecutionMode, FsTaskStore, QueueState, TaskStore};
+use task_core::{ExecutionIntent, ExecutionMode, FsTaskStore, QueueState, TaskKind, TaskStore, BUSY_RECOVERY_IDLE_HOURS};
 
-const INTERVAL: Duration = Duration::from_secs(20);
+const TICK: Duration = Duration::from_secs(20);
 const BATCH: usize = 8;
+const INACTIVITY: chrono::Duration = chrono::Duration::hours(BUSY_RECOVERY_IDLE_HOURS);
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct Key { root: PathBuf, task: String, attempt: String }
@@ -18,204 +19,100 @@ struct Busy {
     state: Option<QueueState>,
     intent: ExecutionIntent,
     owner: Option<String>,
-    since: Option<DateTime<Utc>>,
+    last_change: Option<DateTime<Utc>>,
 }
 
 #[derive(Default)]
 struct Fifo { items: VecDeque<Key>, first_seen: HashMap<Key, DateTime<Utc>> }
 impl Fifo {
-    fn sync(&mut self, active: &mut [Busy]) {
-        let now = Utc::now();
-        for row in active.iter_mut() {
-            let first = self.first_seen.entry(row.key.clone()).or_insert(now);
-            row.since = row.since.or(Some(*first));
+    fn sync(&mut self, entries: &[Busy]) {
+        let live: HashSet<_> = entries.iter().map(|v| v.key.clone()).collect();
+        self.items.retain(|k| live.contains(k));
+        self.first_seen.retain(|k, _| live.contains(k));
+        let existing: HashSet<_> = self.items.iter().cloned().collect();
+        let mut added: Vec<_> = entries.iter().filter(|e| !existing.contains(&e.key)).collect();
+        added.sort_by_key(|e| e.last_change);
+        for entry in added {
+            self.first_seen.insert(entry.key.clone(), Utc::now());
+            self.items.push_back(entry.key.clone());
         }
-        let keys: HashSet<_> = active.iter().map(|entry| entry.key.clone()).collect();
-        self.items.retain(|key| keys.contains(key));
-        self.first_seen.retain(|key, _| keys.contains(key));
-        let known: HashSet<_> = self.items.iter().cloned().collect();
-        let mut additions: Vec<_> = active.iter().filter(|row| !known.contains(&row.key)).collect();
-        additions.sort_by_key(|row| row.since);
-        self.items.extend(additions.into_iter().map(|row| row.key.clone()));
     }
-    fn cycle(&mut self, count: usize) -> Vec<Key> {
+    fn next(&mut self, count: usize) -> Vec<Key> {
         let mut result = Vec::new();
         for _ in 0..self.items.len().min(count) {
-            let Some(next) = self.items.pop_front() else { break };
-            self.items.push_back(next.clone());
-            result.push(next);
+            let key = self.items.pop_front().expect("nonempty FIFO");
+            self.items.push_back(key.clone());
+            result.push(key);
         }
         result
     }
-    fn len(&self) -> usize { self.items.len() }
 }
 
-fn timestamp(raw: Option<&str>) -> Option<DateTime<Utc>> {
-    raw.and_then(|s| DateTime::parse_from_rfc3339(s).ok()).map(|v| v.to_utc())
+fn parse_date(value: Option<&str>) -> Option<DateTime<Utc>> {
+    value.and_then(|v| DateTime::parse_from_rfc3339(v).ok()).map(|v| v.to_utc())
 }
-fn age_minutes(row: &Busy, now: DateTime<Utc>) -> Option<i64> {
-    row.since.map(|v| (now - v).num_minutes())
-}
-fn active_state(state: Option<QueueState>) -> bool {
+fn busy(state: Option<QueueState>) -> bool {
     matches!(state, Some(QueueState::Reserved | QueueState::Starting |
         QueueState::Working | QueueState::RecoveryRequired))
 }
-fn normalize(path: &str) -> String { path.replace('/', "\\").trim_end_matches('\\').to_ascii_lowercase() }
-
 fn scan() -> Result<Vec<Busy>, String> {
     let catalog = crate::projects::list_projects_sync()?;
     let store = FsTaskStore::default();
-    let mut active = Vec::new();
+    let mut entries = Vec::new();
     for project in catalog.projects {
         let root = PathBuf::from(project.path);
         if !root.join("_board.md").is_file() { continue; }
-        let board = store.load(&root).map_err(|error| format!("{}: {error}", root.display()))?;
+        let board = match store.load(&root) {
+            Ok(board) => board,
+            Err(err) if err.to_string().contains("board is busy") => continue,
+            Err(err) => return Err(format!("{}: {err}", root.display())),
+        };
         for task in board.tasks.iter().filter(|task| !task.archived && task.completed.is_none() &&
-            !board.config.columns.iter().any(|column| column.terminal && column.id == task.column)) {
-            let intent = store.execution_intent(&root, &task.id).map_err(|error| error.to_string())?;
-            let state = if intent.mode == ExecutionMode::Queue { intent.queue_state } else { None };
-            let pending_manual = intent.start_now_request.is_some() && intent.start_now_receipt.is_none();
-            if !active_state(state) && task.claimed_by.is_none() && !pending_manual { continue; }
-            let attempt = if active_state(state) {
-                format!("queue:{}:{}", intent.queue_request.as_deref().unwrap_or(""),
-                    intent.queue_reservation_id.as_deref().unwrap_or(""))
-            } else {
-                format!("manual:{}", task.claimed_by.as_deref()
-                    .or(intent.start_now_request.as_deref()).unwrap_or(""))
-            };
-            let since = timestamp(intent.queue_state_since.as_deref());
-            active.push(Busy {
-                key: Key { root: root.clone(), task: task.id.clone(), attempt },
-                state, intent, owner: task.claimed_by.clone(), since,
+            matches!(task.kind, TaskKind::Task | TaskKind::Recurring) &&
+            !board.config.columns.iter().any(|c| c.terminal && c.id == task.column)) {
+            let intent = store.execution_intent(&root, &task.id).map_err(|e| e.to_string())?;
+            let state = (intent.mode == ExecutionMode::Queue).then_some(intent.queue_state).flatten();
+            let pending_start = intent.start_now_request.is_some() && intent.start_now_receipt.is_none();
+            if !busy(state) && task.claimed_by.is_none() && task.column != "in-progress" && !pending_start {
+                continue;
+            }
+            let last_change = [parse_date(intent.queue_state_since.as_deref()),
+                parse_date(task.observed_modified_at.as_deref())].into_iter().flatten().max();
+            let attempt = format!("{}:{}:{}:{}",
+                intent.queue_request.as_deref().unwrap_or(""),
+                intent.queue_reservation_id.as_deref().unwrap_or(""),
+                intent.start_now_request.as_deref().unwrap_or(""),
+                task.claimed_by.as_deref().unwrap_or(""));
+            entries.push(Busy {
+                key: Key {root:root.clone(), task:task.id.clone(), attempt},
+                state, intent, owner:task.claimed_by.clone(), last_change,
             });
         }
     }
-    Ok(active)
+    Ok(entries)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Repair { None, Expire, Abandon, Working, NormalizeLegacy, TimedOut, RequeueReleased, ReclaimClosed }
-
-fn field<'a>(session: &'a Value, key: &str) -> Option<&'a str> {
-    session.get(key).and_then(Value::as_str)
-}
-fn closed(session: &Value) -> bool { session.get("closedAt").is_some_and(|v| !v.is_null()) }
-fn no_response(session: &Value) -> bool {
-    session.get("totalTurns").and_then(Value::as_u64).unwrap_or(0) == 0 &&
-    session.get("lastRole").is_none_or(Value::is_null) &&
-    field(session, "conversationId").is_none() &&
-    session.pointer("/bootstrapIdentity/conversationId").is_none_or(Value::is_null)
-}
-fn verified_reply(session: &Value, task: &Busy) -> bool {
-    let conversation = field(session, "conversationId");
-    let expected_board = task.key.root.to_string_lossy();
-    conversation.is_some() &&
-        field(session, "lastRole") == Some("assistant") &&
-        session.get("totalTurns").and_then(Value::as_u64).is_some_and(|n| n > 0) &&
-        session.pointer("/bootstrapIdentity/state").and_then(Value::as_str) == Some("registered") &&
-        session.pointer("/bootstrapIdentity/conversationId").and_then(Value::as_str) == conversation &&
-        session.pointer("/binding/taskRef/id").and_then(Value::as_str) == Some(task.key.task.as_str()) &&
-        session.pointer("/binding/taskRef/board").and_then(Value::as_str)
-            .is_some_and(|board| normalize(board) == normalize(&expected_board))
-}
-fn session_owner<'a>(row: &Busy, sessions: &'a [Value]) -> Vec<&'a Value> {
-    let Some(request) = row.intent.queue_reservation_id.as_deref() else { return vec![] };
-    sessions.iter().filter(|session| field(session, "spawnRequestId") == Some(request) ||
-        field(session, "id") == row.intent.queue_session_id.as_deref()).collect()
-}
-fn decide(row: &Busy, matches: &[&Value], now: DateTime<Utc>) -> Repair {
-    let Some(age) = age_minutes(row, now) else { return Repair::None };
-    if row.state == Some(QueueState::RecoveryRequired) {
-        // Legacy escalation is not terminal: remove the synthetic human
-        // question first, then inspect its ordinary execution phase next pass.
-        return Repair::NormalizeLegacy;
-    }
-    let last_activity = matches.iter()
-        .filter_map(|session| session.get("lastWorkingAt").and_then(Value::as_i64))
+fn t3_activity(row: &Busy, sessions: &[Value]) -> Option<i64> {
+    let owner_id = row.owner.as_deref().and_then(|s|
+        s.strip_prefix("t3:").or_else(|| s.strip_prefix("t3-browser:")));
+    sessions.iter().filter(|s| {
+        let field = |name: &str| s.get(name).and_then(Value::as_str);
+        field("spawnRequestId") == row.intent.queue_reservation_id.as_deref() &&
+            row.intent.queue_reservation_id.is_some() ||
+        field("id") == row.intent.queue_session_id.as_deref() &&
+            row.intent.queue_session_id.is_some() ||
+        field("id") == owner_id && owner_id.is_some()
+    }).filter_map(|s| s.get("lastWorkingAt").and_then(Value::as_i64))
         .filter(|ms| *ms > 0).max()
-        .and_then(DateTime::<Utc>::from_timestamp_millis)
-        .filter(|at| *at <= now);
-    let latest = last_activity.map_or(row.since, |observed| Some(observed.max(row.since.unwrap_or(observed))));
-    if matches!(row.state, Some(QueueState::Starting | QueueState::Working)) &&
-        latest.is_some_and(|when| now.signed_duration_since(when) >= chrono::Duration::hours(3)) {
-        return Repair::TimedOut;
-    }
-    match row.state {
-        Some(QueueState::Reserved) => {
-            if timestamp(row.intent.queue_reservation_expires_at.as_deref()).is_some_and(|time| time <= now) {
-                Repair::Expire
-            } else { Repair::None }
-        }
-        Some(QueueState::Starting) => {
-            if matches.len() == 1 && verified_reply(matches[0], row) {
-                return Repair::Working;
-            }
-            if age >= 30 && (matches.is_empty() ||
-                (matches.len() == 1 && closed(matches[0]) && no_response(matches[0]))) {
-                return Repair::Abandon;
-            }
-            // Uncertain workers keep rotating. There is no escalation or user prompt.
-            Repair::None
-        }
-        Some(QueueState::Working) => {
-            if matches.len() == 1 {
-                let session = matches[0];
-                let same = field(session, "id") == row.intent.queue_session_id.as_deref();
-                if same && closed(session) {
-                    if row.owner.is_none() { return Repair::RequeueReleased; }
-                    if row.owner.as_deref() == row.intent.queue_session_id.as_deref()
-                        .map(|id| format!("t3:{id}")).as_deref() && no_response(session) {
-                        return Repair::ReclaimClosed;
-                    }
-                }
-                if same && !closed(session) && verified_reply(session, row) {
-                    // Idle is not a failure: maintain ownership until positive evidence.
-                    return Repair::None;
-                }
-            }
-            Repair::None
-        }
-        _ => Repair::None, // Manual claims stay monitored; never blindly replace an owner.
-    }
 }
-
-fn inventory() -> Option<Vec<Value>> {
-    let data = crate::agent_notices::shared_t3_inventory()?;
-    let sessions = data.get("sessions")?.as_array()?;
-    if data.get("hasMore").and_then(Value::as_bool) == Some(true) ||
-        data.get("incomplete").and_then(Value::as_bool) == Some(true) ||
-        data.get("total").and_then(Value::as_u64).is_some_and(|n| n != sessions.len() as u64) {
-        return None;
-    }
-    Some(sessions.clone())
-}
-
-fn apply(row: &Busy, action: Repair, matches: &[&Value]) -> Result<(), String> {
-    if action == Repair::None { return Ok(()) }
-    let store = FsTaskStore::default();
-    let root = row.key.root.as_path();
-    let id = row.key.task.as_str();
-    let request = row.intent.queue_request.as_deref().unwrap_or("__missing__");
-    let reservation = row.intent.queue_reservation_id.as_deref().unwrap_or("__missing__");
-    let result = match action {
-        Repair::Expire => store.expire_reserved_queue_task(root, id, request, reservation),
-        Repair::Abandon => store.requeue_failed_start(root, id, request, reservation,
-            "No live original T3 execution verified after 30 minutes"),
-        Repair::Working => store.claim_queue_working(root, id, request, reservation,
-            field(matches[0], "id").ok_or("Session identity missing")?),
-        Repair::NormalizeLegacy => store.normalize_legacy_queue_recovery(root, id, request, reservation),
-        Repair::TimedOut => store.recover_timed_out_queue_task(root, id, request, reservation,
-            matches.iter().filter_map(|session| session.get("lastWorkingAt").and_then(Value::as_i64))
-                .filter(|ms| *ms > 0).max()),
-        Repair::RequeueReleased => store.requeue_released_worker(root, id, request, reservation,
-            row.intent.queue_session_id.as_deref().ok_or("Working session ID missing")?,
-            "Original T3 worker confirmed inactive"),
-        Repair::ReclaimClosed => store.reclaim_closed_queue_worker(root, id, request, reservation,
-            row.intent.queue_session_id.as_deref().ok_or("Working session ID missing")?,
-            "Original unstarted T3 worker explicitly closed"),
-        Repair::None => unreachable!(),
-    };
-    result.map(|_| ()).map_err(|e| e.to_string())
+fn should_recover(row: &Busy, first_seen: Option<DateTime<Utc>>,
+    session_activity_ms: Option<i64>, now: DateTime<Utc>) -> bool {
+    let observed = session_activity_ms.and_then(DateTime::<Utc>::from_timestamp_millis)
+        .filter(|time| *time <= now);
+    // The in-memory FIFO's first observation is only a fallback. Restarting
+    // TaskBoard must never reset the durable inactivity clock.
+    let last = [row.last_change, observed].into_iter().flatten().max().or(first_seen);
+    last.is_some_and(|last| now.signed_duration_since(last) >= INACTIVITY)
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -231,74 +128,63 @@ fn status() -> &'static Mutex<RecoveryStatus> {
 pub(crate) fn current_status() -> RecoveryStatus {
     status().lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
-
 fn tick(fifo: &mut Fifo) -> Result<(), String> {
-    let mut active = scan()?;
-    fifo.sync(&mut active);
-    let due = fifo.cycle(BATCH);
-    let by_key: HashMap<_, _> = active.into_iter().map(|row| (row.key.clone(), row)).collect();
+    let entries = scan()?;
+    fifo.sync(&entries);
+    let due = fifo.next(BATCH);
+    let by_key: HashMap<_, _> = entries.into_iter().map(|entry| (entry.key.clone(), entry)).collect();
     {
         let mut state = status().lock().unwrap_or_else(|e| e.into_inner());
-        state.last_error = None;
-        state.queued = fifo.len();
         state.last_checked_at = Some(Utc::now().to_rfc3339());
+        state.queued = fifo.items.len();
+        state.last_error = None;
     }
     if due.is_empty() { return Ok(()) }
-    let sessions = inventory();
-    if sessions.is_none() {
-        status().lock().unwrap_or_else(|e| e.into_inner()).last_error =
-            Some("T3 session inventory unavailable; retaining busy tasks for the next FIFO pass".into());
-    }
-    let session_proof = serde_json::json!({"sessions": sessions});
-    let mut checked_manual_boards = HashSet::new();
+    let sessions = crate::agent_notices::shared_t3_inventory()
+        .and_then(|data| {
+            let sessions = data.get("sessions")?.as_array()?;
+            if data.get("incomplete").and_then(Value::as_bool) == Some(true) ||
+                data.get("hasMore").and_then(Value::as_bool) == Some(true) { return None; }
+            Some(sessions.clone())
+        }).unwrap_or_default();
+    let store = FsTaskStore::default();
     let now = Utc::now();
     for key in due {
         let Some(row) = by_key.get(&key) else { continue };
-        if row.state == Some(QueueState::Reserved) {
-            let action = decide(row, &[], now);
-            if action != Repair::None && apply(row, action, &[]).is_ok() { break; }
-            continue;
-        }
+        // Old data only; this doesn't create another kind of recovery.
         if row.state == Some(QueueState::RecoveryRequired) {
-            if apply(row, Repair::NormalizeLegacy, &[]).is_ok() { break; }
-            continue;
-        }
-        let Some(sessions) = sessions.as_ref() else { continue };
-        if !active_state(row.state) {
-            if row.owner.is_some() && checked_manual_boards.insert(row.key.root.clone()) {
-                // Existing claim recovery requires explicit permanently-gone T3
-                // evidence and a grace period; idle or unloaded is not gone.
-                crate::orphan_recovery::reconcile(&row.key.root, Some(&session_proof))?;
+            let Some(request) = row.intent.queue_request.as_deref() else { continue };
+            let Some(reservation) = row.intent.queue_reservation_id.as_deref() else { continue };
+            match store.normalize_legacy_queue_recovery(&key.root, &key.task, request, reservation) {
+                Ok(_) => { status().lock().unwrap_or_else(|e| e.into_inner()).last_action =
+                    Some(format!("{}: legacy state cleared",key.task)); break; }
+                Err(err) => {
+                    status().lock().unwrap_or_else(|e| e.into_inner()).last_error =
+                        Some(format!("{}: {err}",key.task));
+                }
             }
             continue;
         }
-        let matches = session_owner(row, &sessions);
-        let action = decide(row, &matches, now);
-        // Never replace an attempt while a different active worker owns the task.
-        if matches!(action, Repair::Abandon | Repair::TimedOut | Repair::RequeueReleased | Repair::ReclaimClosed) &&
-            sessions.iter().any(|session| field(session, "spawnRequestId") != row.intent.queue_reservation_id.as_deref() &&
-                !closed(session) && session.get("lastWorkingAt").and_then(Value::as_i64)
-                    .and_then(DateTime::<Utc>::from_timestamp_millis)
-                    .is_some_and(|time| now.signed_duration_since(time) < chrono::Duration::hours(3)) &&
-                session.pointer("/binding/taskRef/id").and_then(Value::as_str) == Some(&row.key.task) &&
-                session.pointer("/binding/taskRef/board").and_then(Value::as_str).is_some_and(|board|
-                    normalize(board) == normalize(&row.key.root.to_string_lossy()))) {
+        let agent_activity = t3_activity(row, &sessions);
+        if !should_recover(row, fifo.first_seen.get(&key).copied(), agent_activity, now) {
             continue;
         }
-        if action == Repair::None { continue }
-        if let Err(error) = apply(row, action, &matches) {
-            // A concurrently changed task is retried from fresh board state next tick.
-            status().lock().unwrap_or_else(|e| e.into_inner()).last_error =
-                Some(format!("{}: {error}", row.key.task));
-        } else {
-            status().lock().unwrap_or_else(|e| e.into_inner()).last_action =
-                Some(format!("{}: {action:?}", row.key.task));
-            break; // One mutation per sweep, then reread all authoritative state.
+        match store.recover_stale_busy_task(&key.root, &key.task, row.owner.as_deref(),
+            row.intent.queue_request.as_deref(), row.intent.queue_reservation_id.as_deref(),
+            row.intent.queue_state, row.intent.start_now_request.as_deref(), agent_activity) {
+            Ok(_) => {
+                status().lock().unwrap_or_else(|e| e.into_inner()).last_action =
+                    Some(format!("{}: recovered after three idle hours",key.task));
+                break; // Reread authoritative board state next tick.
+            }
+            Err(err) => {
+                status().lock().unwrap_or_else(|e| e.into_inner()).last_error =
+                    Some(format!("{}: {err}",key.task));
+            }
         }
     }
     Ok(())
 }
-
 pub(crate) fn start() {
     std::thread::spawn(|| {
         let mut fifo = Fifo::default();
@@ -307,7 +193,7 @@ pub(crate) fn start() {
             if let Err(error) = tick(&mut fifo) {
                 status().lock().unwrap_or_else(|e| e.into_inner()).last_error = Some(error);
             }
-            std::thread::sleep(INTERVAL);
+            std::thread::sleep(TICK);
         }
     });
 }
@@ -317,78 +203,51 @@ mod tests {
     use super::*;
     use serde_json::json;
     fn work(id: &str, state: QueueState, minutes_old: i64) -> Busy {
-        let when = Utc::now() - chrono::Duration::minutes(minutes_old);
-        Busy {
-            key: Key {root: PathBuf::from("C:/board"), task:id.into(), attempt:format!("attempt-{id}")},
-            state:Some(state), owner:None, since:Some(when),
-            intent: ExecutionIntent {
-                mode:ExecutionMode::Queue, queue_request:Some(uuid::Uuid::new_v4().to_string()),
+        Busy {key:Key{root:PathBuf::from("C:/board"),task:id.into(),attempt:id.into()},
+            state:Some(state),owner:None,
+            last_change:Some(Utc::now()-chrono::Duration::minutes(minutes_old)),
+            intent:ExecutionIntent {
+                mode:ExecutionMode::Queue,queue_state:Some(state),
+                queue_request:Some(uuid::Uuid::new_v4().to_string()),
                 queue_reservation_id:Some(uuid::Uuid::new_v4().to_string()),
-                queue_state:Some(state), queue_state_since:Some(when.to_rfc3339()),
-                queue_attempt:None,queue_receipt:None,queue_retired_receipt:None,
-                queue_reservation_expires_at:None,queue_session_id:None,
-                queue_error:None,start_now_request:None,start_now_receipt:None,revision:String::new(),
-            },
+                queue_state_since:None,queue_attempt:None,queue_receipt:None,
+                queue_retired_receipt:None,queue_reservation_expires_at:None,queue_session_id:None,
+                queue_error:None,start_now_request:None,start_now_receipt:None,revision:String::new()
+            }}
+    }
+    #[test]
+    fn fifo_rotates_all_busy_claims_and_removes_only_finished() {
+        let mut fifo=Fifo::default();
+        let a=work("reserved",QueueState::Reserved,300);
+        let b=work("working",QueueState::Working,300);
+        let c=work("incident",QueueState::RecoveryRequired,300);
+        let mut d=work("claimed_queued",QueueState::Queued,300);
+        d.owner=Some("t3:old".into());
+        fifo.sync(&[a.clone(),b.clone(),c.clone(),d.clone()]);
+        assert_eq!(fifo.next(2),vec![a.key.clone(),b.key.clone()]);
+        assert_eq!(fifo.next(2),vec![c.key.clone(),d.key.clone()]);
+        fifo.sync(&[b.clone(),c.clone(),d.clone()]);
+        assert_eq!(fifo.next(3),vec![b.key.clone(),c.key.clone(),d.key.clone()]);
+    }
+    #[test]
+    fn same_three_hour_rule_applies_regardless_of_state() {
+        let now=Utc::now();
+        for state in [QueueState::Reserved,QueueState::Starting,QueueState::Working,QueueState::Queued] {
+            let row=work("any",state,181);
+            assert!(should_recover(&row,Some(now),None,now),
+                "restart does not reset an already expired durable timestamp");
+            assert!(!should_recover(&row,Some(now-chrono::Duration::minutes(181)),
+                Some((now-chrono::Duration::minutes(5)).timestamp_millis()),now));
         }
     }
     #[test]
-    fn fifo_rotates_every_busy_state_including_recovery_incidents_and_manual_claims() {
-        let mut fifo=Fifo::default();
-        let a=work("reserved", QueueState::Reserved, 90);
-        let b=work("working", QueueState::Working, 60);
-        let c=work("incident", QueueState::RecoveryRequired, 30);
-        let mut manual=work("manual", QueueState::Queued, 10);
-        manual.state=None;manual.owner=Some("agent:123".into());
-        fifo.sync(&mut [a.clone(),b.clone(),c.clone(),manual.clone()]);
-        assert_eq!(fifo.cycle(2),vec![a.key.clone(),b.key.clone()]);
-        assert_eq!(fifo.cycle(2),vec![c.key.clone(),manual.key.clone()]);
-        fifo.sync(&mut [b.clone(),c.clone(),manual.clone()]);
-        assert_eq!(fifo.cycle(4),vec![a.key.clone(),b.key.clone(),c.key.clone(),manual.key.clone()]
-            .into_iter().filter(|k|k!=&a.key).collect::<Vec<_>>());
-    }
-    #[test]
-    fn expired_reserved_requeues_while_recent_reserved_rotates() {
-        let mut old=work("expired", QueueState::Reserved, 10);
-        old.intent.queue_reservation_expires_at=Some((Utc::now()-chrono::Duration::minutes(2)).to_rfc3339());
-        assert_eq!(decide(&old,&[],Utc::now()), Repair::Expire);
-        old.intent.queue_reservation_expires_at=Some((Utc::now()+chrono::Duration::minutes(2)).to_rfc3339());
-        assert_eq!(decide(&old,&[],Utc::now()), Repair::None);
-    }
-    #[test]
-    fn missing_start_requeues_and_ambiguous_start_rotates_until_timeout() {
-        let row=work("starting",QueueState::Starting,46);
-        assert_eq!(decide(&row,&[],Utc::now()), Repair::Abandon);
-        let ambiguous=json!({"id":"guest","status":"loading",
-            "bootstrapIdentity":{"state":"awaiting_marker"},
-            "totalTurns":0,"promptDelivery":"unknown"});
-        assert_eq!(decide(&row,&[&ambiguous],Utc::now()), Repair::None);
-        let mut very_old=work("old",QueueState::Starting,181);
-        very_old.owner=None;
-        assert_eq!(decide(&very_old,&[&ambiguous],Utc::now()), Repair::TimedOut);
-        // Even a loading guest isn't an exception once the inactivity bound expires.
-    }
-    #[test]
-    fn legacy_escalation_is_normalized_regardless_of_old_human_prompt() {
-        let row=work("legacy",QueueState::RecoveryRequired,70);
-        let loading=json!({"id":"guest","status":"loading","closedAt":null,
-            "bootstrapIdentity":{"state":"awaiting_marker"},"totalTurns":0});
-        assert_eq!(decide(&row,&[&loading],Utc::now()), Repair::NormalizeLegacy);
-        assert_eq!(decide(&row,&[],Utc::now()), Repair::NormalizeLegacy);
-        assert!(active_state(row.state));
-    }
-    #[test]
-    fn stale_claimed_worker_requeues_at_three_hours_but_recent_activity_protects_it() {
-        let mut row=work("working",QueueState::Working,181);
-        row.owner=Some("t3:agent".into()); row.intent.queue_session_id=Some("agent".into());
-        let uncertain=json!({"id":"agent","closedAt":null,"bootstrapIdentity":{"state":"registered"}});
-        assert_eq!(decide(&row,&[&uncertain],Utc::now()), Repair::TimedOut);
-        let recent=json!({"id":"agent","closedAt":null,
-            "lastWorkingAt":(Utc::now()-chrono::Duration::minutes(5)).timestamp_millis()});
-        assert_eq!(decide(&row,&[&recent],Utc::now()), Repair::None);
-        row.since=Some(Utc::now()-chrono::Duration::minutes(100));
-        assert_eq!(decide(&row,&[&uncertain],Utc::now()), Repair::None);
-        // Explicit closure without work remains safely recoverable earlier.
-        let gone=json!({"id":"agent","closedAt":"closed","totalTurns":0});
-        assert_eq!(decide(&row,&[&gone],Utc::now()), Repair::ReclaimClosed);
+    fn exact_claimant_session_counts_as_activity_even_with_queued_state() {
+        let mut row=work("mismatch",QueueState::Queued,220);
+        row.owner=Some("t3:agent-123".into());
+        let sessions=vec![json!({"id":"agent-123","lastWorkingAt":
+            (Utc::now()-chrono::Duration::minutes(10)).timestamp_millis()})];
+        let time=t3_activity(&row,&sessions);
+        assert!(time.is_some());
+        assert!(!should_recover(&row,row.last_change,time,Utc::now()));
     }
 }
