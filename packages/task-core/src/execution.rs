@@ -473,6 +473,127 @@ impl FsTaskStore {
         persist(&path, &mapping, &body)
     }
 
+    /// The user's bounded worker lifetime policy: after 3h without observed
+    /// work, release the exact old attempt and mint a fresh queue identity.
+    /// The old reservation and delayed T3 acknowledgments are fenced by CAS.
+    pub fn recover_timed_out_queue_task(
+        &self, root: &Path, id: &str, queue_request: &str, request_id: &str,
+        last_worker_activity_ms: Option<i64>,
+    ) -> Result<ExecutionIntent, TaskStoreError> {
+        let _lock = acquire_lock(root)?;
+        let snapshot = self.load_unlocked(root)?;
+        let path = find_task_path(root, id)?;
+        let existing = fs::read_to_string(&path)?;
+        let mut task = parse_task(&path, false, &existing)?;
+        let (text, map, _) = load(&path)?;
+        let previous = intent(&map, &text)?;
+        if previous.mode != ExecutionMode::Queue ||
+            previous.queue_request.as_deref() != Some(queue_request) ||
+            previous.queue_reservation_id.as_deref() != Some(request_id) ||
+            !matches!(previous.queue_state, Some(QueueState::Starting | QueueState::Working)) {
+            return Err(TaskStoreError::Conflict(format!("{id}: recovery identity changed")));
+        }
+        if task.archived || task.completed.is_some() ||
+            snapshot.config.columns.iter().any(|column| column.terminal && column.id == task.column) {
+            return Err(TaskStoreError::Conflict(format!("{id}: task is terminal")));
+        }
+        let entered = previous.queue_state_since.as_deref()
+            .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+            .map(|v| v.to_utc())
+            .ok_or_else(|| TaskStoreError::Conflict(format!("{id}: no durable start timestamp")))?;
+        let last = last_worker_activity_ms.and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
+            .filter(|t| *t <= chrono::Utc::now())
+            .map_or(entered, |activity| activity.max(entered));
+        if chrono::Utc::now().signed_duration_since(last) < chrono::Duration::hours(3) {
+            return Err(TaskStoreError::Conflict(format!("{id}: worker is still within the recovery timeout")));
+        }
+        let had_claim = task.claimed_by.is_some();
+        if let Some(owner) = task.claimed_by.as_deref() {
+            let Some(session) = previous.queue_session_id.as_deref() else {
+                return Err(TaskStoreError::Conflict(format!("{id}: claimed task lacks session identity")));
+            };
+            if owner != format!("t3:{session}") && owner != format!("t3-browser:{session}") {
+                return Err(TaskStoreError::Conflict(format!("{id}: a different worker owns this task")));
+            }
+            if claim_metadata(&existing, "claim_token")?.is_some() {
+                return Err(TaskStoreError::Conflict(format!("{id}: managed claim cannot be preempted")));
+            }
+            release_to_original(&mut task, &snapshot.config, &existing)?;
+        }
+        let rendered = if had_claim {
+            stamp_activity(&render_with_claim_token(&task, &existing, None)?, None, true)?
+        } else { existing };
+        let (yaml, body) = split_frontmatter(&rendered)?;
+        let mut mapping: serde_yaml::Mapping = serde_yaml::from_str(&yaml)
+            .map_err(|e| TaskStoreError::Parse(e.to_string()))?;
+        mapping.insert(key("queue_request"), key(&uuid::Uuid::new_v4().to_string()));
+        mapping.insert(key("queue_state"), key("queued"));
+        for field in ["queue_session_id", "queue_reservation_id", "queue_reservation_expires_at"] {
+            mapping.remove(key(field));
+        }
+        mapping.insert(key("queue_error"), key("Previous worker exceeded three hours without activity; automatically requeued."));
+        persist(&path, &mapping, &body)
+    }
+
+    /// One-time compatibility migration for incidents written by the obsolete
+    /// watchdog. Preserve exact request/owner and original phase age, but remove
+    /// the synthetic human-recovery question. No replay occurs here.
+    pub fn normalize_legacy_queue_recovery(
+        &self, root: &Path, id: &str, queue_request: &str, request_id: &str,
+    ) -> Result<ExecutionIntent, TaskStoreError> {
+        let _lock = acquire_lock(root)?;
+        let path = find_task_path(root, id)?;
+        let (text, mut mapping, body) = load(&path)?;
+        let previous = intent(&mapping, &text)?;
+        if previous.queue_state != Some(QueueState::RecoveryRequired) ||
+            previous.queue_request.as_deref() != Some(queue_request) ||
+            previous.queue_reservation_id.as_deref() != Some(request_id) {
+            return Err(TaskStoreError::Conflict(format!("{id}: stale recovery attempt")));
+        }
+        let task = parse_task(&path, false, &text)?;
+        if task.archived || task.completed.is_some() {
+            return Err(TaskStoreError::Conflict(format!("{id}: task is terminal")));
+        }
+        let phase = if previous.queue_session_id.is_some() || task.claimed_by.is_some() {
+            QueueState::Working
+        } else {
+            QueueState::Starting
+        };
+        mapping.insert(key("queue_state"), serde_yaml::to_value(phase)
+            .map_err(|e| TaskStoreError::Parse(e.to_string()))?);
+        if mapping.get(key("queue_recovery_attention_added")).and_then(|v| v.as_bool()) == Some(true) ||
+            mapping.get(key("queue_recovery_question_added")).and_then(|v| v.as_bool()) == Some(true) {
+            let mut attention: Vec<TaskAttention> = mapping.get(key("attention"))
+                .map(|v| serde_yaml::from_value(v.clone())
+                    .map_err(|e| TaskStoreError::Parse(e.to_string())))
+                .transpose()?.unwrap_or_default();
+            if mapping.get(key("queue_recovery_attention_added")).and_then(|v| v.as_bool()) == Some(true) {
+                attention.retain(|v| *v != TaskAttention::NeedsUser);
+            }
+            if mapping.get(key("queue_recovery_question_added")).and_then(|v| v.as_bool()) == Some(true) &&
+                task.question.as_ref().is_some_and(|q| q.request_type.as_deref() == Some("queue_recovery")) {
+                mapping.remove(key("question"));
+                attention.retain(|v| *v != TaskAttention::Question);
+            }
+            mapping.insert(key("attention"), serde_yaml::to_value(&attention)
+                .map_err(|e| TaskStoreError::Parse(e.to_string()))?);
+        }
+        mapping.remove(key("queue_recovery_attention_added"));
+        mapping.remove(key("queue_recovery_question_added"));
+        mapping.remove(key("queue_error"));
+        if task.column == BLOCKED_COLUMN_ID &&
+            task.question.as_ref().is_some_and(|q| q.request_type.as_deref() == Some("queue_recovery")) {
+            mapping.insert(key("column"), key(AI_READY_COLUMN_ID));
+            mapping.remove(key("blocked_reason"));
+        }
+        // Do not call persist(): this is a presentation-state migration, not a
+        // new execution attempt, so its original recovery age must not reset.
+        let final_text = format!("---\n{}---\n{}", serde_yaml::to_string(&mapping)
+            .map_err(|e| TaskStoreError::Parse(e.to_string()))?, body);
+        write_text_atomic(&path, &final_text)?;
+        intent(&mapping, &final_text)
+    }
+
     /// Explicit operator resolution for an incident that cannot be proven
     /// safe to retry automatically. A fresh queue_request prevents stale old
     /// session acknowledgements from claiming the new attempt.

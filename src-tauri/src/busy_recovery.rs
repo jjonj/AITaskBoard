@@ -18,9 +18,7 @@ struct Busy {
     state: Option<QueueState>,
     intent: ExecutionIntent,
     owner: Option<String>,
-    paused_by_user: bool,
     since: Option<DateTime<Utc>>,
-    first_observed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Default)]
@@ -31,7 +29,6 @@ impl Fifo {
         for row in active.iter_mut() {
             let first = self.first_seen.entry(row.key.clone()).or_insert(now);
             row.since = row.since.or(Some(*first));
-            row.first_observed_at = Some(*first);
         }
         let keys: HashSet<_> = active.iter().map(|entry| entry.key.clone()).collect();
         self.items.retain(|key| keys.contains(key));
@@ -90,10 +87,6 @@ fn scan() -> Result<Vec<Busy>, String> {
             active.push(Busy {
                 key: Key { root: root.clone(), task: task.id.clone(), attempt },
                 state, intent, owner: task.claimed_by.clone(), since,
-                first_observed_at: None,
-                paused_by_user: task.question.as_ref().is_some_and(|q|
-                    q.request_type.as_deref() == Some("queue_recovery") &&
-                    q.answer.as_deref() == Some("Keep paused")) || task.column == "blocked",
             });
         }
     }
@@ -101,7 +94,7 @@ fn scan() -> Result<Vec<Busy>, String> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Repair { None, Expire, Abandon, Working, RetryIncident, RequeueReleased, ReclaimClosed, Incident }
+enum Repair { None, Expire, Abandon, Working, NormalizeLegacy, TimedOut, RequeueReleased, ReclaimClosed }
 
 fn field<'a>(session: &'a Value, key: &str) -> Option<&'a str> {
     session.get(key).and_then(Value::as_str)
@@ -127,14 +120,25 @@ fn verified_reply(session: &Value, task: &Busy) -> bool {
 }
 fn session_owner<'a>(row: &Busy, sessions: &'a [Value]) -> Vec<&'a Value> {
     let Some(request) = row.intent.queue_reservation_id.as_deref() else { return vec![] };
-    sessions.iter().filter(|session| field(session, "spawnRequestId") == Some(request)).collect()
+    sessions.iter().filter(|session| field(session, "spawnRequestId") == Some(request) ||
+        field(session, "id") == row.intent.queue_session_id.as_deref()).collect()
 }
 fn decide(row: &Busy, matches: &[&Value], now: DateTime<Utc>) -> Repair {
     let Some(age) = age_minutes(row, now) else { return Repair::None };
-    if active_state(row.state) && row.state != Some(QueueState::RecoveryRequired) &&
-        (row.intent.queue_request.as_deref().is_none_or(|id| uuid::Uuid::parse_str(id).is_err()) ||
-         row.intent.queue_reservation_id.as_deref().is_none_or(|id| uuid::Uuid::parse_str(id).is_err())) {
-        return if age >= 15 { Repair::Incident } else { Repair::None };
+    if row.state == Some(QueueState::RecoveryRequired) {
+        // Legacy escalation is not terminal: remove the synthetic human
+        // question first, then inspect its ordinary execution phase next pass.
+        return Repair::NormalizeLegacy;
+    }
+    let last_activity = matches.iter()
+        .filter_map(|session| session.get("lastWorkingAt").and_then(Value::as_i64))
+        .filter(|ms| *ms > 0).max()
+        .and_then(DateTime::<Utc>::from_timestamp_millis)
+        .filter(|at| *at <= now);
+    let latest = last_activity.map_or(row.since, |observed| Some(observed.max(row.since.unwrap_or(observed))));
+    if matches!(row.state, Some(QueueState::Starting | QueueState::Working)) &&
+        latest.is_some_and(|when| now.signed_duration_since(when) >= chrono::Duration::hours(3)) {
+        return Repair::TimedOut;
     }
     match row.state {
         Some(QueueState::Reserved) => {
@@ -142,26 +146,16 @@ fn decide(row: &Busy, matches: &[&Value], now: DateTime<Utc>) -> Repair {
                 Repair::Expire
             } else { Repair::None }
         }
-        Some(QueueState::Starting) | Some(QueueState::RecoveryRequired) => {
-            let incident = row.state == Some(QueueState::RecoveryRequired);
+        Some(QueueState::Starting) => {
             if matches.len() == 1 && verified_reply(matches[0], row) {
                 return Repair::Working;
-            }
-            if incident {
-                if row.paused_by_user { return Repair::None; }
-                // Keep unresolved incidents in the FIFO. A verified closed, blank
-                // guest is safe to retire, but 'loading' is not evidence of closure.
-                if row.owner.is_none() && matches.len() == 1 &&
-                    closed(matches[0]) && no_response(matches[0]) {
-                    return Repair::RetryIncident;
-                }
-                return Repair::None;
             }
             if age >= 30 && (matches.is_empty() ||
                 (matches.len() == 1 && closed(matches[0]) && no_response(matches[0]))) {
                 return Repair::Abandon;
             }
-            if age >= 45 { Repair::Incident } else { Repair::None }
+            // Uncertain workers keep rotating. There is no escalation or user prompt.
+            Repair::None
         }
         Some(QueueState::Working) => {
             if matches.len() == 1 {
@@ -179,15 +173,7 @@ fn decide(row: &Busy, matches: &[&Value], now: DateTime<Utc>) -> Repair {
                     return Repair::None;
                 }
             }
-            if age >= 90 {
-                // A restored T3 guest may temporarily report Loading/Unknown.
-                // Give TaskBoard startup time to restore its session evidence.
-                if row.first_observed_at.is_some_and(|first| (now-first).num_minutes() < 10) {
-                    return Repair::None;
-                }
-                if row.owner.is_none() && matches.is_empty() { Repair::RequeueReleased }
-                else { Repair::Incident }
-            } else { Repair::None }
+            Repair::None
         }
         _ => Repair::None, // Manual claims stay monitored; never blindly replace an owner.
     }
@@ -217,17 +203,16 @@ fn apply(row: &Busy, action: Repair, matches: &[&Value]) -> Result<(), String> {
             "No live original T3 execution verified after 30 minutes"),
         Repair::Working => store.claim_queue_working(root, id, request, reservation,
             field(matches[0], "id").ok_or("Session identity missing")?),
-        Repair::RetryIncident => store.retry_queue_incident(root, id, request, reservation,
-            "Original T3 session explicitly closed without a conversation or assistant reply"),
+        Repair::NormalizeLegacy => store.normalize_legacy_queue_recovery(root, id, request, reservation),
+        Repair::TimedOut => store.recover_timed_out_queue_task(root, id, request, reservation,
+            matches.iter().filter_map(|session| session.get("lastWorkingAt").and_then(Value::as_i64))
+                .filter(|ms| *ms > 0).max()),
         Repair::RequeueReleased => store.requeue_released_worker(root, id, request, reservation,
             row.intent.queue_session_id.as_deref().ok_or("Working session ID missing")?,
             "Original T3 worker confirmed inactive"),
         Repair::ReclaimClosed => store.reclaim_closed_queue_worker(root, id, request, reservation,
             row.intent.queue_session_id.as_deref().ok_or("Working session ID missing")?,
             "Original unstarted T3 worker explicitly closed"),
-        Repair::Incident => store.flag_queue_recovery_required(root, id, request, row.state
-            .ok_or("Execution phase missing")?, reservation,
-            "Execution deadline exceeded without verified T3 progress; retaining original ownership and monitoring"),
         Repair::None => unreachable!(),
     };
     result.map(|_| ()).map_err(|e| e.to_string())
@@ -274,6 +259,10 @@ fn tick(fifo: &mut Fifo) -> Result<(), String> {
             if action != Repair::None && apply(row, action, &[]).is_ok() { break; }
             continue;
         }
+        if row.state == Some(QueueState::RecoveryRequired) {
+            if apply(row, Repair::NormalizeLegacy, &[]).is_ok() { break; }
+            continue;
+        }
         let Some(sessions) = sessions.as_ref() else { continue };
         if !active_state(row.state) {
             if row.owner.is_some() && checked_manual_boards.insert(row.key.root.clone()) {
@@ -286,9 +275,12 @@ fn tick(fifo: &mut Fifo) -> Result<(), String> {
         let matches = session_owner(row, &sessions);
         let action = decide(row, &matches, now);
         // Never replace an attempt while a different active worker owns the task.
-        if matches!(action, Repair::Abandon | Repair::RetryIncident | Repair::RequeueReleased | Repair::ReclaimClosed) &&
+        if matches!(action, Repair::Abandon | Repair::TimedOut | Repair::RequeueReleased | Repair::ReclaimClosed) &&
             sessions.iter().any(|session| field(session, "spawnRequestId") != row.intent.queue_reservation_id.as_deref() &&
-                !closed(session) && session.pointer("/binding/taskRef/id").and_then(Value::as_str) == Some(&row.key.task) &&
+                !closed(session) && session.get("lastWorkingAt").and_then(Value::as_i64)
+                    .and_then(DateTime::<Utc>::from_timestamp_millis)
+                    .is_some_and(|time| now.signed_duration_since(time) < chrono::Duration::hours(3)) &&
+                session.pointer("/binding/taskRef/id").and_then(Value::as_str) == Some(&row.key.task) &&
                 session.pointer("/binding/taskRef/board").and_then(Value::as_str).is_some_and(|board|
                     normalize(board) == normalize(&row.key.root.to_string_lossy()))) {
             continue;
@@ -328,7 +320,7 @@ mod tests {
         let when = Utc::now() - chrono::Duration::minutes(minutes_old);
         Busy {
             key: Key {root: PathBuf::from("C:/board"), task:id.into(), attempt:format!("attempt-{id}")},
-            state:Some(state), owner:None, paused_by_user:false, since:Some(when), first_observed_at:None,
+            state:Some(state), owner:None, since:Some(when),
             intent: ExecutionIntent {
                 mode:ExecutionMode::Queue, queue_request:Some(uuid::Uuid::new_v4().to_string()),
                 queue_reservation_id:Some(uuid::Uuid::new_v4().to_string()),
@@ -363,38 +355,39 @@ mod tests {
         assert_eq!(decide(&old,&[],Utc::now()), Repair::None);
     }
     #[test]
-    fn missing_start_requeues_and_ambiguous_start_escalates_but_remains_busy() {
+    fn missing_start_requeues_and_ambiguous_start_rotates_until_timeout() {
         let row=work("starting",QueueState::Starting,46);
         assert_eq!(decide(&row,&[],Utc::now()), Repair::Abandon);
-        let ambiguous=json!({"id":"guest","spawnRequestId":"start-starting",
-            "status":"loading","bootstrapIdentity":{"state":"awaiting_marker"},
+        let ambiguous=json!({"id":"guest","status":"loading",
+            "bootstrapIdentity":{"state":"awaiting_marker"},
             "totalTurns":0,"promptDelivery":"unknown"});
-        assert_eq!(decide(&row,&[&ambiguous],Utc::now()), Repair::Incident);
-        let mut incident=row.clone();incident.state=Some(QueueState::RecoveryRequired);
-        assert_eq!(decide(&incident,&[&ambiguous],Utc::now()), Repair::None);
-        assert!(active_state(incident.state));
+        assert_eq!(decide(&row,&[&ambiguous],Utc::now()), Repair::None);
+        let mut very_old=work("old",QueueState::Starting,181);
+        very_old.owner=None;
+        assert_eq!(decide(&very_old,&[&ambiguous],Utc::now()), Repair::TimedOut);
+        // Even a loading guest isn't an exception once the inactivity bound expires.
     }
     #[test]
-    fn incident_is_rechecked_and_only_a_verified_closed_blank_guest_is_retried() {
-        let row=work("incident", QueueState::RecoveryRequired, 70);
+    fn legacy_escalation_is_normalized_regardless_of_old_human_prompt() {
+        let row=work("legacy",QueueState::RecoveryRequired,70);
         let loading=json!({"id":"guest","status":"loading","closedAt":null,
             "bootstrapIdentity":{"state":"awaiting_marker"},"totalTurns":0});
-        assert_eq!(decide(&row,&[&loading],Utc::now()), Repair::None);
-        let closed=json!({"id":"guest","closedAt":"closed","totalTurns":0,
-            "bootstrapIdentity":{"state":"awaiting_marker"}});
-        assert_eq!(decide(&row,&[&closed],Utc::now()), Repair::RetryIncident);
-        assert_eq!(decide(&row,&[],Utc::now()), Repair::None);
-        let mut paused = row.clone(); paused.paused_by_user=true;
-        assert_eq!(decide(&paused,&[&closed],Utc::now()), Repair::None);
+        assert_eq!(decide(&row,&[&loading],Utc::now()), Repair::NormalizeLegacy);
+        assert_eq!(decide(&row,&[],Utc::now()), Repair::NormalizeLegacy);
+        assert!(active_state(row.state));
     }
     #[test]
-    fn claimed_worker_is_not_silently_replaced_on_uncertain_session_state() {
-        let mut row=work("working", QueueState::Working, 100);
-        row.owner=Some("t3:agent".into());row.intent.queue_session_id=Some("agent".into());
+    fn stale_claimed_worker_requeues_at_three_hours_but_recent_activity_protects_it() {
+        let mut row=work("working",QueueState::Working,181);
+        row.owner=Some("t3:agent".into()); row.intent.queue_session_id=Some("agent".into());
         let uncertain=json!({"id":"agent","closedAt":null,"bootstrapIdentity":{"state":"registered"}});
-        assert_eq!(decide(&row,&[&uncertain],Utc::now()), Repair::Incident);
-        row.first_observed_at=Some(Utc::now());
+        assert_eq!(decide(&row,&[&uncertain],Utc::now()), Repair::TimedOut);
+        let recent=json!({"id":"agent","closedAt":null,
+            "lastWorkingAt":(Utc::now()-chrono::Duration::minutes(5)).timestamp_millis()});
+        assert_eq!(decide(&row,&[&recent],Utc::now()), Repair::None);
+        row.since=Some(Utc::now()-chrono::Duration::minutes(100));
         assert_eq!(decide(&row,&[&uncertain],Utc::now()), Repair::None);
+        // Explicit closure without work remains safely recoverable earlier.
         let gone=json!({"id":"agent","closedAt":"closed","totalTurns":0});
         assert_eq!(decide(&row,&[&gone],Utc::now()), Repair::ReclaimClosed);
     }

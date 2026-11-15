@@ -424,3 +424,98 @@ fn delayed_verified_worker_resumes_recovery_incident_without_creating_a_new_exec
     assert!(store.claim_queue_working(root, &task.id, &second_request,
         &second_start, &uuid::Uuid::new_v4().to_string()).is_err());
 }
+
+#[test]
+fn timed_out_start_requeues_without_a_human_recovery_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (store, task, request) = queued_task(root);
+    let start = uuid::Uuid::new_v4().to_string();
+    store.reserve_queue_task(root, &task.id, &request, &start, 180).unwrap();
+    let starting = store.start_queue_task(root, &task.id, &start).unwrap();
+    assert!(store.recover_timed_out_queue_task(root, &task.id, &request, &start, None).is_err());
+
+    let path = std::path::Path::new(&task.path);
+    let text = std::fs::read_to_string(path).unwrap().replace(
+        starting.queue_state_since.as_deref().unwrap(), "2020-01-01T00:00:00.000Z");
+    std::fs::write(path, text).unwrap();
+    assert!(store.recover_timed_out_queue_task(root, &task.id, &request, &start,
+        Some(chrono::Utc::now().timestamp_millis())).is_err(),
+        "recent worker progress prevents timed-out replacement");
+    let recovered = store.recover_timed_out_queue_task(root, &task.id, &request, &start, None).unwrap();
+    assert_eq!(recovered.queue_state, Some(QueueState::Queued));
+    assert_ne!(recovered.queue_request.as_deref(), Some(request.as_str()));
+    assert!(recovered.queue_reservation_id.is_none());
+    assert!(store.claim_queue_working(root, &task.id, &request, &start,
+        &uuid::Uuid::new_v4().to_string()).is_err(), "stale receipt must be fenced");
+    let card = store.load(root).unwrap().tasks.into_iter().find(|t|t.id==task.id).unwrap();
+    assert!(card.question.is_none());
+    assert!(!card.attention.contains(&task_core::TaskAttention::NeedsUser));
+}
+
+#[test]
+fn timed_out_working_claim_releases_original_worker_under_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (store, task, request) = queued_task(root);
+    let start = uuid::Uuid::new_v4().to_string();
+    let session = uuid::Uuid::new_v4().to_string();
+    store.reserve_queue_task(root, &task.id, &request, &start, 180).unwrap();
+    store.start_queue_task(root, &task.id, &start).unwrap();
+    let working = store.claim_queue_working(root, &task.id, &request, &start, &session).unwrap();
+    let file = std::path::Path::new(&task.path);
+    std::fs::write(file, std::fs::read_to_string(file).unwrap().replace(
+        working.queue_state_since.as_deref().unwrap(), "2020-01-01T00:00:00.000Z")).unwrap();
+    let recovered = store.recover_timed_out_queue_task(root, &task.id, &request, &start, None).unwrap();
+    assert_eq!(recovered.queue_state, Some(QueueState::Queued));
+    assert_ne!(recovered.queue_request.as_deref(), Some(request.as_str()));
+    let card = store.load(root).unwrap().tasks.into_iter().find(|t|t.id==task.id).unwrap();
+    assert_eq!(card.claimed_by, None);
+    assert_ne!(card.column, "in-progress");
+}
+
+#[test]
+fn legacy_queue_recovery_question_is_removed_without_replaying_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (store, task, request) = queued_task(root);
+    let start = uuid::Uuid::new_v4().to_string();
+    store.reserve_queue_task(root, &task.id, &request, &start, 180).unwrap();
+    store.start_queue_task(root, &task.id, &start).unwrap();
+    let incident = store.flag_queue_recovery_required(root, &task.id, &request,
+        QueueState::Starting, &start, "old watchdog").unwrap();
+    let before = store.load(root).unwrap().tasks.into_iter().find(|t|t.id==task.id).unwrap();
+    assert!(before.question.as_ref().is_some_and(|q|q.request_type.as_deref()==Some("queue_recovery")));
+    let restored = store.normalize_legacy_queue_recovery(root, &task.id, &request, &start).unwrap();
+    assert_eq!(restored.queue_state, Some(QueueState::Starting));
+    assert_eq!(restored.queue_state_since, incident.queue_state_since);
+    assert_eq!(restored.queue_request.as_deref(), Some(request.as_str()));
+    let card = store.load(root).unwrap().tasks.into_iter().find(|t|t.id==task.id).unwrap();
+    assert!(card.question.is_none());
+    assert!(!card.attention.contains(&task_core::TaskAttention::NeedsUser));
+    assert!(!card.attention.contains(&task_core::TaskAttention::Question));
+}
+
+#[test]
+fn legacy_paused_escalation_reopens_as_starting_without_inbox_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (store, task, request) = queued_task(root);
+    let start = uuid::Uuid::new_v4().to_string();
+    store.reserve_queue_task(root, &task.id, &request, &start, 180).unwrap();
+    store.start_queue_task(root, &task.id, &start).unwrap();
+    store.flag_queue_recovery_required(root, &task.id, &request,
+        QueueState::Starting, &start, "old watchdog").unwrap();
+    let mut card = store.load(root).unwrap().tasks.into_iter().find(|t|t.id==task.id).unwrap();
+    card.question.as_mut().unwrap().answer = Some("Keep paused".into());
+    card.column = "ai-ready".into();
+    card.attention.clear();
+    store.update_as(root, card, task_core::MutationActor::Human).unwrap();
+    let parked = store.load(root).unwrap().tasks.into_iter().find(|t|t.id==task.id).unwrap();
+    assert_eq!(parked.column, "blocked");
+    store.normalize_legacy_queue_recovery(root, &task.id, &request, &start).unwrap();
+    let restored = store.load(root).unwrap().tasks.into_iter().find(|t|t.id==task.id).unwrap();
+    assert_eq!(restored.column, "ai-ready");
+    assert!(restored.question.is_none());
+    assert!(!restored.attention.contains(&task_core::TaskAttention::NeedsUser));
+}

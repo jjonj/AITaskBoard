@@ -952,19 +952,8 @@ fn run_task_queue(store: &FsTaskStore, root: &Path, command: &TaskQueueCommand) 
                 .map_err(map_store_error)?;
             Ok(json!({"status":"queued","taskId":args.target,"intent":result}))
         }
-        TaskQueueCommand::Incident(args) => {
-            let state = match args.state.as_str() {
-                "queued" => QueueState::Queued,
-                "reserved" => QueueState::Reserved,
-                "starting" => QueueState::Starting,
-                "working" => QueueState::Working,
-                _ => return Err(CliError::new("invalid", "Incident requires queued, reserved, starting or working")),
-            };
-            let result = store.flag_queue_recovery_required(root, &args.target,
-                &args.queue_request, state, &args.request_id, &args.reason)
-                .map_err(map_store_error)?;
-            Ok(json!({"status":"recovery_required","taskId":args.target,"intent":result}))
-        }
+        TaskQueueCommand::Incident(_) => Err(CliError::new("obsolete",
+            "Recovery Required escalation was removed. TaskBoard's FIFO now handles timeout recovery automatically.")),
         TaskQueueCommand::RetryIncident(args) => {
             if !args.operator_accepts_duplicate_risk {
                 return Err(CliError::new("confirmation_required", "Operator must acknowledge possible duplicate remote work"));
