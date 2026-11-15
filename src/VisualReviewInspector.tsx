@@ -43,6 +43,7 @@ type Props = {
   onTogglePin: () => void;
   addPin: (event: MouseEvent<HTMLDivElement>, artifact?: ReviewArtifact) => void;
   renderArtifact: (artifact: ReviewArtifact) => ReactNode;
+  remoteReviewUrl?: string;
   posterOf: (artifact: ReviewArtifact) => string;
   iframeWidth: number;
   onIframeWidth: (value: number) => void;
@@ -83,7 +84,7 @@ export function VisualReviewInspector(props: Props) {
   const {
     review, round, history, items, selectedKey, onSelectTask, onBack, queueThumbnails, queueModes, queueCounts, onOpenTask, onOpenSession, sessionOpening, onTogglePriority, priorityBusy, allBoards, showResolved,
     onAllBoards, onShowResolved, playable, activeIndex, onFocusArtifact, onChooseArtifact,
-    choice, ranking, pins, setPins, pinning, onTogglePin, addPin, renderArtifact,
+    choice, ranking, pins, setPins, pinning, onTogglePin, addPin, renderArtifact, remoteReviewUrl,
     posterOf, iframeWidth, onIframeWidth, note, setNote, saving,
     outcome, onOutcome, onSkip, onSnooze,
     resolved, awaitingNextRound, error, primaryVerdict, primaryReady, submit, onNoteOnly,
@@ -104,6 +105,7 @@ export function VisualReviewInspector(props: Props) {
   const [imageFullscreen, setImageFullscreen] = useState(false);
   const fullscreenOwned = useRef(false);
   const fullscreenCloseRef = useRef<HTMLButtonElement>(null);
+  const videoResumeTime = useRef(0);
   const stripRef = useRef<HTMLDivElement>(null);
   const active = playable[Math.min(activeIndex, playable.length - 1)];
   const dashboardMode = isDashboard(active, review.path);
@@ -160,13 +162,23 @@ export function VisualReviewInspector(props: Props) {
   const primaryIncomplete = outcome === primaryVerdict && !primaryReady;
 
   const closeImageFullscreen = () => {
+    if (active?.kind === "video") {
+      const full = document.querySelector<HTMLVideoElement>(".review-image-fullscreen video");
+      if (full) { videoResumeTime.current = full.currentTime; full.pause(); }
+      const stage = document.querySelector<HTMLVideoElement>(".review-visual-stage video");
+      if (stage && Number.isFinite(videoResumeTime.current)) stage.currentTime = videoResumeTime.current;
+    }
     setImageFullscreen(false);
     if (fullscreenOwned.current && document.fullscreenElement === document.documentElement)
       void document.exitFullscreen().catch(() => undefined);
     fullscreenOwned.current = false;
   };
   const openImageFullscreen = () => {
-    if (active?.kind !== "image" || pinning) return;
+    if (!active || !["image", "video"].includes(active.kind) || pinning) return;
+    if (active.kind === "video") {
+      const stage = document.querySelector<HTMLVideoElement>(".review-visual-stage video");
+      if (stage) { videoResumeTime.current = stage.currentTime; stage.pause(); }
+    }
     setImageFullscreen(true);
     // Try true screen fullscreen from the click gesture. The portal still fills
     // the TaskBoard window when WebView2 does not grant the Fullscreen API.
@@ -178,6 +190,14 @@ export function VisualReviewInspector(props: Props) {
   useEffect(() => {
     if (!imageFullscreen) return;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    if (active?.kind === "video") {
+      const full = document.querySelector<HTMLVideoElement>(".review-image-fullscreen video");
+      if (full) {
+        const restore = () => { if (Number.isFinite(videoResumeTime.current)) full.currentTime = videoResumeTime.current; };
+        if (full.readyState >= 1) restore();
+        else full.addEventListener("loadedmetadata", restore, { once: true });
+      }
+    }
     fullscreenCloseRef.current?.focus();
     const onFullscreenChange = () => {
       if (fullscreenOwned.current && document.fullscreenElement !== document.documentElement) {
@@ -217,8 +237,10 @@ export function VisualReviewInspector(props: Props) {
           event.stopImmediatePropagation();
           closeImageFullscreen();
         } else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+          // Let focused native video controls seek; arrows elsewhere navigate media.
+          if (active?.kind === "video" && event.target instanceof HTMLMediaElement) return;
           const step = event.key === "ArrowRight" ? 1 : -1;
-          const images = playable.flatMap((artifact, index) => artifact.kind === "image" ? [index] : []);
+          const images = playable.flatMap((artifact, index) => ["image", "video"].includes(artifact.kind) ? [index] : []);
           const next = (step > 0 ? images.find(index => index > activeIndex)
             : images.reverse().find(index => index < activeIndex)) ?? -1;
           if (next >= 0) {
@@ -230,6 +252,7 @@ export function VisualReviewInspector(props: Props) {
         return;
       }
       if (event.ctrlKey || event.altKey || event.metaKey) return;
+      if (active?.kind === "video" && event.target instanceof HTMLMediaElement) return;
       const target = event.target;
       if (target instanceof HTMLElement &&
         (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) {
@@ -266,7 +289,7 @@ export function VisualReviewInspector(props: Props) {
     // Capture before the shared Inbox Escape handler so Focus only exits Focus.
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [focus, imageFullscreen, dashboardMode, gallerySelectedIndex, galleryCount, onBack, onFocusArtifact, activeIndex, playable]);
+  }, [focus, imageFullscreen, dashboardMode, gallerySelectedIndex, galleryCount, onBack, onFocusArtifact, activeIndex, playable, active?.kind]);
 
   const originalAddress = (artifact: ReviewArtifact) => {
     if (artifact.kind === "url") return artifact.path;
@@ -309,7 +332,7 @@ export function VisualReviewInspector(props: Props) {
           openImageFullscreen();
         }
       }}
-      onClick={(event) => { if (pinning) addPin(event, active); else openImageFullscreen(); }}>
+      onClick={(event) => { if (pinning) addPin(event, active); else if (active.kind === "image") openImageFullscreen(); }}>
       <div className={"review-visual-media" + (zoom > 1 ? " enlarged" : "")}
         style={zoom > 1 && active.kind === "image" ? { width: zoom * 100 + "%" } : undefined}>
         {renderArtifact(active)}
@@ -443,6 +466,12 @@ export function VisualReviewInspector(props: Props) {
                   <option value={728}>728px</option>
                   <option value={390}>390px</option>
                 </select>}
+                {active.kind === "video" && <button type="button" className="button secondary"
+                  onClick={openImageFullscreen} title="Open a full-window video player; Esc to return">
+                  ⛶ Full-window video</button>}
+                {active.kind === "video" && remoteReviewUrl && <button type="button" className="button secondary"
+                  title="Open authenticated OmniHub phone review gallery"
+                  onClick={() => void openUrl(remoteReviewUrl)}>Phone link ↗</button>}
                 <button type="button" className="button secondary"
                   onClick={() => void openOriginal(active)}
                   onContextMenu={(event) => showCopyMenu(event, originalAddress(active))}
@@ -584,11 +613,11 @@ export function VisualReviewInspector(props: Props) {
           </div>
         </aside>}
       </div>
-      {imageFullscreen && active?.kind === "image" && createPortal(
+      {imageFullscreen && (active?.kind === "image" || active?.kind === "video") && createPortal(
         <div className="review-image-fullscreen" role="dialog" aria-modal="true"
-          aria-label={"Fullscreen review image: " + (active.label || active.id)}
+          aria-label={"Fullscreen review media: " + (active.label || active.id)}
           onKeyDown={(event) => {
-            if (event.key === "Tab") {
+            if (active.kind === "image" && event.key === "Tab") {
               event.preventDefault();
               fullscreenCloseRef.current?.focus();
             }
@@ -600,7 +629,8 @@ export function VisualReviewInspector(props: Props) {
               onClick={closeImageFullscreen}>× Exit fullscreen</button>
           </header>
           <div className="review-image-fullscreen-media"
-            title="Click to return to the review" onClick={closeImageFullscreen}>
+            title={active.kind === "image" ? "Click to return to the review" : undefined}
+            onClick={active.kind === "image" ? closeImageFullscreen : undefined}>
             {renderArtifact(active)}
           </div>
         </div>, document.body)}

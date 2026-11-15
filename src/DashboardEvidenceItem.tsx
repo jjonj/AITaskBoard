@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { openFileInFomni } from "./InboxRichText";
+import "./DashboardVideo.css";
 
 type DashboardItem = {
   id: string;
@@ -14,6 +15,9 @@ type DashboardItem = {
   capturedAt?: string;
   publishedAt?: string;
   mediaDataUrl?: string;
+  mediaStreamUrl?: string;
+  posterDataUrl?: string;
+  durationSeconds?: number;
   mediaPath?: string;
   mediaUnavailable?: string;
 };
@@ -36,12 +40,26 @@ function isVideo(item: DashboardItem) {
   return item.mediaType === "video" || /\.(?:mp4|webm)$/i.test(item.mediaPath || "");
 }
 
-function DashboardMedia({ item }: { item: DashboardItem }) {
-  if (!item.mediaDataUrl) return <div className="dashboard-evidence-message">
-    {item.mediaUnavailable || "No inline media available."}
+function DashboardMedia({ item, mediaReady }: { item: DashboardItem; mediaReady: boolean }) {
+  const [error, setError] = useState("");
+  if (isVideo(item)) {
+    if (!mediaReady) return <div className="dashboard-evidence-message" role="status">
+      Preparing Dashboard video streaming…
+    </div>;
+    if (!item.mediaStreamUrl) return <div className="dashboard-evidence-message" role="alert">
+      Video location is unavailable; open the original.
+    </div>;
+    return <div className="dashboard-video-wrapper">
+      <video src={item.mediaStreamUrl} poster={item.posterDataUrl} controls playsInline preload="metadata"
+        onError={() => setError("Video unavailable or unsupported; try the H.264 MP4 original.")}
+        onLoadedMetadata={() => setError("")} />
+      {error && <p role="alert">{error}</p>}
+    </div>;
+  }
+  if (!item.mediaDataUrl) return <div className="dashboard-evidence-message" role="alert">
+    {item.mediaUnavailable || "Image preview unavailable."}
   </div>;
-  return isVideo(item) ? <video src={item.mediaDataUrl} controls preload="metadata" /> :
-    <img src={item.mediaDataUrl} alt={item.title + (item.caption ? " — " + item.caption : "")} />;
+  return <img src={item.mediaDataUrl} alt={item.title + (item.caption ? " — " + item.caption : "")} />;
 }
 
 type Props = {
@@ -58,6 +76,8 @@ export function DashboardEvidenceItem({ address, selectedIndex, onSelectedIndexC
   const [railActive, setRailActive] = useState(0);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [mediaReady, setMediaReady] = useState(false);
+  const [streamError, setStreamError] = useState("");
   const railRef = useRef<HTMLDivElement>(null);
   const closeLightboxRef = useRef<HTMLButtonElement>(null);
   const lightboxRef = useRef<HTMLDivElement>(null);
@@ -92,6 +112,16 @@ export function DashboardEvidenceItem({ address, selectedIndex, onSelectedIndexC
     return () => { cancelled = true; };
   }, [address]);
 
+  useEffect(() => {
+    if (!items.some(isVideo)) return;
+    let cancelled = false;
+    setMediaReady(false);
+    setStreamError("");
+    void invoke<string>("ensure_review_media_server")
+      .then(() => { if (!cancelled) setMediaReady(true); })
+      .catch(reason => { if (!cancelled) setStreamError("Video streaming unavailable: " + String(reason)); });
+    return () => { cancelled = true; };
+  }, [items]);
   useEffect(() => {
     onGalleryCountChange?.(items.length);
   }, [items.length, onGalleryCountChange]);
@@ -172,11 +202,11 @@ export function DashboardEvidenceItem({ address, selectedIndex, onSelectedIndexC
       onScroll={syncRailPosition} onKeyDown={railKeyDown}>
       {items.map((item, index) => <article className="dashboard-evidence-card" key={item.id}>
         {isVideo(item) ? <div className="dashboard-evidence-card-media">
-          <DashboardMedia item={item} />
+          <DashboardMedia item={item} mediaReady={mediaReady} />
         </div> : <button type="button" className="dashboard-evidence-card-media"
           aria-label={"Enlarge " + item.title}
           onClick={() => onSelectedIndexChange(index)}>
-          <DashboardMedia item={item} />
+          <DashboardMedia item={item} mediaReady={mediaReady} />
         </button>}
         <div className="dashboard-evidence-card-info">
           <div className="dashboard-evidence-card-heading">
@@ -217,7 +247,7 @@ export function DashboardEvidenceItem({ address, selectedIndex, onSelectedIndexC
                 title="Return to evidence gallery (Esc)" onClick={() => onSelectedIndexChange(null)}>✕ Close</button>
             </div>
           </header>
-          <div className="dashboard-lightbox-media"><DashboardMedia item={chosen} /></div>
+          <div className="dashboard-lightbox-media"><DashboardMedia item={chosen} mediaReady={mediaReady} /></div>
           <footer className="dashboard-lightbox-caption">
             <div>
               {chosen.caption && <p>{chosen.caption}</p>}
@@ -230,6 +260,6 @@ export function DashboardEvidenceItem({ address, selectedIndex, onSelectedIndexC
       </div>,
       document.body,
     )}
-    {error && <div className="error-banner" role="alert">{error}</div>}
+    {(error || streamError) && <div className="error-banner" role="alert">{error || streamError}</div>}
   </section>;
 }

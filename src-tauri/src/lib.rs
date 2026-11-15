@@ -306,6 +306,46 @@ fn review_resolve(path: Option<String>, resolution: ReviewResolution) -> Result<
     FsTaskStore::default().review_resolve(&root(path), resolution).map_err(|e| e.to_string())
 }
 
+/// Start the bounded, loopback-only byte-range media server on first playback.
+/// The separate authenticated OmniHub Gateway can proxy the same service to phones.
+#[tauri::command]
+async fn ensure_review_media_server() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        use std::io::{Read, Write};
+        use std::net::{SocketAddr, TcpStream};
+        use std::time::Duration;
+        fn healthy() -> bool {
+            let addr: SocketAddr = "127.0.0.1:8785".parse().unwrap();
+            let Ok(mut connection) = TcpStream::connect_timeout(&addr, Duration::from_millis(200)) else {
+                return false;
+            };
+            let _ = connection.set_read_timeout(Some(Duration::from_millis(300)));
+            let _ = connection.write_all(b"GET /health HTTP/1.0\r\nHost: localhost\r\n\r\n");
+            let mut response = Vec::new();
+            let _ = connection.read_to_end(&mut response);
+            String::from_utf8_lossy(&response).contains("taskboard-review-media-ok")
+        }
+        if !healthy() {
+            let script = PathBuf::from(r"D:\SSDProjects\Tools\TaskBoard\scripts\review_media_server.py");
+            if !script.is_file() {
+                return Err("TaskBoard media server script is not installed".to_string());
+            }
+            let mut cmd = Command::new("py");
+            cmd.args(["-B", script.to_str().unwrap_or_default(), "--host", "127.0.0.1", "--port", "8785"])
+                .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+            #[cfg(windows)]
+            cmd.creation_flags(0x08000000);
+            cmd.spawn().map_err(|error| format!("Cannot start TaskBoard media server: {error}"))?;
+            for _ in 0..15 {
+                if healthy() { break; }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        if healthy() { Ok("http://127.0.0.1:8785".to_string()) }
+        else { Err("TaskBoard media server unavailable (port 8785 occupied or startup failed)".into()) }
+    }).await.map_err(|error| format!("Media server startup interrupted: {error}"))?
+}
+
 #[tauri::command]
 fn review_asset(path: Option<String>, asset_path: String) -> Result<String, String> {
     let root = root(path);
@@ -512,7 +552,7 @@ async fn dashboard_review_items(ids: Vec<String>, task: Option<String>)
         let mut total_bytes = 0_u64;
         for item in &mut selected {
             let file = item.get("filename").and_then(|v| v.as_str())
-                .ok_or_else(|| "Dashboard capture is missing its media filename".to_string())?;
+                .ok_or_else(|| "Dashboard capture is missing its media filename".to_string())?.to_owned();
             let (hash, ext) = file.rsplit_once('.')
                 .ok_or_else(|| "Invalid Dashboard media filename".to_string())?;
             if hash.len() != 64 || !hash.bytes().all(|c| c.is_ascii_hexdigit()) {
@@ -524,12 +564,34 @@ async fn dashboard_review_items(ids: Vec<String>, task: Option<String>)
                 "mp4" => "video/mp4", "webm" => "video/webm",
                 _ => return Err("Unsupported Dashboard media format".into()),
             };
-            let path = dir.join("media").join(file);
+            let path = dir.join("media").join(&file);
             let size = fs::metadata(&path).map_err(|e|
                 format!("Dashboard capture media is unavailable: {e}"))?.len();
             item["mediaPath"] = serde_json::Value::String(path.to_string_lossy().into_owned());
-            // Keep the IPC payload bounded while retaining metadata and an
-            // original-file affordance for oversized captures or videos.
+            // Videos stream through HTTP Range: never base64-encode full clips
+            // into Tauri IPC. This also enables seeking past the old 12 MiB cap.
+            if mime.starts_with("video/") {
+                item["mediaStreamUrl"] = serde_json::Value::String(
+                    format!("http://127.0.0.1:8785/dashboard-media/{file}"));
+                if let Some(poster) = item.get("posterFilename").and_then(|v| v.as_str()) {
+                    let safe_poster = poster.len() < 80 &&
+                        poster.split_once('.').is_some_and(|(hash, ext)| hash.len() == 64 &&
+                            hash.bytes().all(|c| c.is_ascii_hexdigit()) &&
+                            matches!(ext, "png" | "webp" | "jpg"));
+                    if safe_poster {
+                        let file = dir.join("media").join(poster);
+                        if file.metadata().is_ok_and(|meta| meta.len() <= 2 * 1024 * 1024) {
+                            if let Ok(bytes) = fs::read(file) {
+                                item["posterDataUrl"] = serde_json::Value::String(
+                                    format!("data:image/webp;base64,{}", BASE64.encode(bytes)));
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            // Keep image IPC payload bounded; overlarge originals remain
+            // accessible through the existing file affordance.
             if size > 12 * 1024 * 1024 || total_bytes.saturating_add(size) > 32 * 1024 * 1024 {
                 item["mediaUnavailable"] = serde_json::Value::String(
                     "Capture exceeds the inline preview limit; open the original.".into());
@@ -963,6 +1025,7 @@ pub fn run() {
             highlight_in_fomni,
             open_file_in_fomni,
             dashboard_review_items,
+            ensure_review_media_server,
             open_in_obsidian,
             open_claimed_t3_session,
             task_open_origin_session,

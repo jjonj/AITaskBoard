@@ -144,6 +144,9 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   const [moreOpen, setMoreOpen] = useState(false);
   const [inboxImages, setInboxImages] = useState<Array<{dataUrl:string;mime:string;name:string}>>([]);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const [mediaServer, setMediaServer] = useState("");
+  const [mediaError, setMediaError] = useState("");
+  const [videoError, setVideoError] = useState("");
   const stageRef = useRef<HTMLDivElement>(null);
   const reviewTask = items.find((item) => keyOf(item) === selectedKey);
   const toggleInboxPriority = async (item: QueueItem) => {
@@ -401,7 +404,11 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
     let cancelled = false;
     const list = [...round.artifacts, ...round.references, ...(round.previous ? [round.previous] : [])];
     const paths = [...new Set(list.flatMap((artifact) => [artifact.path, artifact.poster].filter(Boolean) as string[]))];
+    const videos = new Set(list.filter(artifact => artifact.kind === "video").map(a => a.path));
     void Promise.all(paths.map(async (path) => {
+      // Videos must never travel through IPC/base64: the browser obtains byte
+      // ranges on demand from the bounded TaskBoard media server.
+      if (videos.has(path)) return [path, ""] as const;
       if (/^https?:\/\//i.test(path)) return [path, path] as const;
       const source = /^[a-z]:[\\/]/i.test(path) || path.startsWith("/") ? path : reviewTask.path + "/" + path;
       try { return [path, await reviewAsset(source, reviewTask.path)] as const; }
@@ -506,6 +513,26 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   }, []);
 
   const playable = round?.artifacts ?? [];
+  const activeVideo = playable.some(artifact => artifact.kind === "video");
+  useEffect(() => {
+    if (!activeVideo) return;
+    let cancelled = false;
+    setMediaError("");
+    void import("@tauri-apps/api/core").then(({ invoke }) =>
+      invoke<string>("ensure_review_media_server"))
+      .then(base => { if (!cancelled) setMediaServer(base); })
+      .catch(cause => { if (!cancelled) setMediaError("Media streaming unavailable: " + String(cause)); });
+    return () => { cancelled = true; };
+  }, [selectedKey, activeVideo]);
+  const boardName = reviewTask?.path.match(/[\\/]([^\\/]+)[\\/]Tasks[\\/]?$/i)?.[1] || "";
+  const remoteReviewUrl = boardName && reviewTask
+    ? "https://hub.rancorous.online/gateway/tools/taskboard-review-media/review/" +
+      encodeURIComponent(boardName) + "/" + encodeURIComponent(reviewTask.task.id) : "";
+  const videoSrc = (artifact: ReviewArtifact) =>
+    mediaServer && boardName && reviewTask && round
+      ? mediaServer + "/media/" + [boardName, reviewTask.task.id, String(round.number), artifact.id]
+          .map(encodeURIComponent).join("/")
+      : "";
   const activeArtifact = playable[mediaIndex] ?? playable[0];
   const htmlFile = activeArtifact?.kind === "html" ? htmlIndexPath(activeArtifact.path) : "";
   htmlAssetFolderRef.current = htmlFile.slice(0, htmlFile.lastIndexOf("/"));
@@ -929,9 +956,20 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   const pinsFor = (artifact: ReviewArtifact) => pins.filter((pin) => pin.artifact === artifact.id);
   const image = (artifact: ReviewArtifact, className = "") => {
     const src = activeSrc(artifact);
-    if (artifact.kind === "video" && src) return (
-      <video ref={videoRef} controls src={src} className={className} />
-    );
+    if (artifact.kind === "video") {
+      const stream = videoSrc(artifact);
+      if (!stream) return <div className="review-media-missing" role="alert">
+        {mediaError || "Preparing video streaming…"}
+      </div>;
+      return <div className="review-video-playback">
+        <video key={artifact.path} ref={videoRef} controls playsInline preload="metadata"
+          src={stream} poster={artifact.poster ? assets[artifact.poster] : undefined}
+          className={className} onError={() => setVideoError(
+            "This video cannot be loaded or decoded. Check the source clip, MP4/H.264 compatibility and media server."
+          )} onLoadedMetadata={() => setVideoError("")} />
+        {videoError && <p className="review-media-missing" role="alert">{videoError}</p>}
+      </div>;
+    }
     if (artifact.kind === "html" || artifact.kind === "url") {
       const posterSrc = artifact.poster ? assets[artifact.poster] : "";
       const html = htmlDocuments[artifact.path];
@@ -975,7 +1013,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       );
     }
     return src ? <img src={src} alt={artifact.label} className={className} />
-      : <div className="review-media-missing">Media unavailable{artifact.storage === "local" ? " (stored on the PC)" : ""}</div>;
+      : <div className="review-media-missing" role="alert">Media unavailable{artifact.storage === "local" ? " (stored on the PC)" : ""}</div>;
   };
 
   // Any visual review gets the same maximized inspection workspace. Human
@@ -1013,6 +1051,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       onTogglePin={() => setPinMode((current) => !current)}
       addPin={addPin}
       renderArtifact={image}
+      remoteReviewUrl={remoteReviewUrl}
       posterOf={(artifact) => artifact.kind === "image"
         ? activeSrc(artifact) || "" : artifact.poster ? assets[artifact.poster] || "" : ""}
       iframeWidth={iframeWidth}
