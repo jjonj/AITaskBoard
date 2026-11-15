@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type MouseEvent, type ReactNode, type CSSProperties, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { createPortal } from "react-dom";
+import "./ReviewImageFullscreen.css";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { ReviewArtifact, ReviewPin, ReviewRound } from "./reviewApi";
 import type { Task } from "./types";
@@ -99,6 +101,9 @@ export function VisualReviewInspector(props: Props) {
   // The enlarged Dashboard image is a nested viewer, not a separate Inbox item.
   // Keep its selection here so the Inbox-level Escape handler can close it first.
   const [gallerySelectedIndex, setGallerySelectedIndex] = useState<number | null>(null);
+  const [imageFullscreen, setImageFullscreen] = useState(false);
+  const fullscreenOwned = useRef(false);
+  const fullscreenCloseRef = useRef<HTMLButtonElement>(null);
   const stripRef = useRef<HTMLDivElement>(null);
   const active = playable[Math.min(activeIndex, playable.length - 1)];
   const dashboardMode = isDashboard(active, review.path);
@@ -154,6 +159,46 @@ export function VisualReviewInspector(props: Props) {
   const outcomeOptions = reviewOutcomes(round.mode);
   const primaryIncomplete = outcome === primaryVerdict && !primaryReady;
 
+  const closeImageFullscreen = () => {
+    setImageFullscreen(false);
+    if (fullscreenOwned.current && document.fullscreenElement === document.documentElement)
+      void document.exitFullscreen().catch(() => undefined);
+    fullscreenOwned.current = false;
+  };
+  const openImageFullscreen = () => {
+    if (active?.kind !== "image" || pinning) return;
+    setImageFullscreen(true);
+    // Try true screen fullscreen from the click gesture. The portal still fills
+    // the TaskBoard window when WebView2 does not grant the Fullscreen API.
+    if (!document.fullscreenElement && document.documentElement.requestFullscreen)
+      void document.documentElement.requestFullscreen()
+        .then(() => { fullscreenOwned.current = true; })
+        .catch(() => undefined);
+  };
+  useEffect(() => {
+    if (!imageFullscreen) return;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    fullscreenCloseRef.current?.focus();
+    const onFullscreenChange = () => {
+      if (fullscreenOwned.current && document.fullscreenElement !== document.documentElement) {
+        fullscreenOwned.current = false;
+        setImageFullscreen(false);
+      }
+    };
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
+      if (previous?.isConnected) previous.focus();
+    };
+  }, [imageFullscreen]);
+  useEffect(() => () => {
+    if (fullscreenOwned.current && document.fullscreenElement === document.documentElement)
+      void document.exitFullscreen().catch(() => undefined);
+  }, []);
+  useEffect(() => {
+    closeImageFullscreen();
+  }, [selectedKey]);
+
   useEffect(() => {
     setCompare("single");
     setZoom(1);
@@ -166,6 +211,24 @@ export function VisualReviewInspector(props: Props) {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      if (imageFullscreen) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          closeImageFullscreen();
+        } else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+          const step = event.key === "ArrowRight" ? 1 : -1;
+          const images = playable.flatMap((artifact, index) => artifact.kind === "image" ? [index] : []);
+          const next = (step > 0 ? images.find(index => index > activeIndex)
+            : images.reverse().find(index => index < activeIndex)) ?? -1;
+          if (next >= 0) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            onFocusArtifact(next);
+          }
+        }
+        return;
+      }
       if (event.ctrlKey || event.altKey || event.metaKey) return;
       const target = event.target;
       if (target instanceof HTMLElement &&
@@ -203,7 +266,7 @@ export function VisualReviewInspector(props: Props) {
     // Capture before the shared Inbox Escape handler so Focus only exits Focus.
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [focus, dashboardMode, gallerySelectedIndex, galleryCount, onBack, onFocusArtifact, activeIndex, playable.length]);
+  }, [focus, imageFullscreen, dashboardMode, gallerySelectedIndex, galleryCount, onBack, onFocusArtifact, activeIndex, playable]);
 
   const originalAddress = (artifact: ReviewArtifact) => {
     if (artifact.kind === "url") return artifact.path;
@@ -233,9 +296,20 @@ export function VisualReviewInspector(props: Props) {
 
   const imageStage = active && (
     <div className={"review-visual-stage" + (pinning ? " pinning" : "") +
+      (active.kind === "image" && !pinning ? " enlargeable" : "") +
       (isWeb(active) ? " web" : "") + (zoom > 1 ? " zoomed" : "")}
-      role="region" aria-label={"Artifact " + (activeIndex + 1) + " of " + playable.length + ": " + active.label}
-      onClick={(event) => { if (pinning) addPin(event, active); }}>
+      role={active.kind === "image" && !pinning ? "button" : "region"}
+      tabIndex={active.kind === "image" && !pinning ? 0 : undefined}
+      aria-label={"Artifact " + (activeIndex + 1) + " of " + playable.length + ": " + active.label +
+        (active.kind === "image" && !pinning ? ". Enlarge fullscreen" : "")}
+      title={active.kind === "image" && !pinning ? "Click to view fullscreen (Esc to exit)" : undefined}
+      onKeyDown={(event) => {
+        if (active.kind === "image" && !pinning && (event.key === "Enter" || event.key === " ")) {
+          event.preventDefault();
+          openImageFullscreen();
+        }
+      }}
+      onClick={(event) => { if (pinning) addPin(event, active); else openImageFullscreen(); }}>
       <div className={"review-visual-media" + (zoom > 1 ? " enlarged" : "")}
         style={zoom > 1 && active.kind === "image" ? { width: zoom * 100 + "%" } : undefined}>
         {renderArtifact(active)}
@@ -510,6 +584,26 @@ export function VisualReviewInspector(props: Props) {
           </div>
         </aside>}
       </div>
+      {imageFullscreen && active?.kind === "image" && createPortal(
+        <div className="review-image-fullscreen" role="dialog" aria-modal="true"
+          aria-label={"Fullscreen review image: " + (active.label || active.id)}
+          onKeyDown={(event) => {
+            if (event.key === "Tab") {
+              event.preventDefault();
+              fullscreenCloseRef.current?.focus();
+            }
+          }}>
+          <header className="review-image-fullscreen-header">
+            <strong title={active.label}>{active.label || active.id}</strong>
+            <span>{activeIndex + 1} / {playable.length} · Esc to close</span>
+            <button ref={fullscreenCloseRef} type="button" className="button primary"
+              onClick={closeImageFullscreen}>× Exit fullscreen</button>
+          </header>
+          <div className="review-image-fullscreen-media"
+            title="Click to return to the review" onClick={closeImageFullscreen}>
+            {renderArtifact(active)}
+          </div>
+        </div>, document.body)}
       {copyMenu}
     </section>
   );

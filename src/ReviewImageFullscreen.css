@@ -1,0 +1,66 @@
+/* Fullscreen review images are mounted in document.body so they escape the
+   Inbox grid/feedback rails. The browser Fullscreen API expands this to the
+   display when WebView2 permits it; the fixed overlay is the fallback. */
+.review-visual-stage.enlargeable { cursor: zoom-in; }
+.review-visual-stage.enlargeable:focus-visible {
+  outline: 2px solid #9bd6f9;
+  outline-offset: -4px;
+}
+.review-image-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 5000;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  background: #05090e;
+  color: #edf6fa;
+}
+.review-image-fullscreen-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 16px;
+  min-height: 52px;
+  background: #14232e;
+  border-bottom: 1px solid #354b5b;
+}
+.review-image-fullscreen-header strong {
+  min-width: 0;
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 14px;
+}
+.review-image-fullscreen-header span {
+  flex: 0 0 auto;
+  color: #9bb8ca;
+  font-size: 12px;
+}
+.review-image-fullscreen-header .button { flex: 0 0 auto; }
+.review-image-fullscreen-media {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 8px;
+  cursor: zoom-out;
+}
+.review-image-fullscreen-media > img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  object-fit: contain;
+}
+.review-image-fullscreen-media > .review-media-missing {
+  margin: auto;
+}
+@media (max-width: 650px) {
+  .review-image-fullscreen-header { padding: 6px 9px; gap: 7px; }
+  .review-image-fullscreen-header span { display: none; }
+}
