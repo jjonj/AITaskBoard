@@ -25,6 +25,7 @@ import { QueueOverviewPanel } from "./QueueOverviewPanel";
 import { TaskTracePanel } from "./TaskTracePanel";
 import { StaleBlockerPanel } from "./StaleBlockerPanel";
 import { AgentRecoverySettings } from "./AgentRecoverySettings";
+import { TaskAgentPanel } from "./TaskAgentPanel";
 import { TaskFilterPanel, type TaskFilterSelection } from "./TaskFilterPanel";
 import { todaysWorkIds } from "./todaysWork";
 import { mergeTaskEdits } from "./taskMerge";
@@ -4115,6 +4116,9 @@ Details: ${queueRecoveryWarning}`;
                 className="priority-context-action"
                 aria-pressed={contextTask.attention.includes("priority")}
                 onClick={() => {
+          {contextTask.kind !== "epic" && <button type="button" onClick={() => {
+            setContextMenu(null); openEdit(contextTask);
+          }}>Agent controls · Caffy / GMA / Prepfile</button>}
                   const id = contextTask.id;
                   setContextMenu(null);
                   void persistTaskMutation(id, "toggle priority", (task) => ({
@@ -4450,6 +4454,8 @@ Details: ${queueRecoveryWarning}`;
                       return { ...current, draft: {
                         ...current.draft,
                         user_notes: note,
+            {editor.mode === "edit" && editor.original && editor.original.kind !== "epic" &&
+              <TaskAgentPanel path={boardPath} task={editor.original} />}
 
                       } };
                     })} />

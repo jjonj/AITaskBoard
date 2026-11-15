@@ -213,6 +213,19 @@ export const openClaimedT3Session = (claimedBy: string) =>
 export const openTaskSession = (id: string, path?: string, implement = false) =>
   retryBoardBusy(() => invoke<Record<string, unknown>>("open_task_session", { path, id, implement }));
 
+export type TaskGmaRequest = { id: string; sessionId: string; message: string; status: string; nextAt?: number };
+export type TaskAgentStatus = {
+  sessionId: string; title?: string; activity?: string; status?: string;
+  statusObservedAt?: string; lastWorkingAt?: string; url?: string;
+  caffy: Record<string, unknown> | null;
+  attentions: TaskGmaRequest[];
+  gmaUnavailable?: string;
+};
+export const taskAgentStatus = (path: string, id: string) =>
+  invoke<TaskAgentStatus>("task_agent_status", { path, id });
+export const taskAgentAction = (path: string, id: string, command: string, options: Record<string, unknown> = {}) =>
+  invoke<Record<string, unknown>>("task_agent_action", { path, id, command, options });
+
 export type PreparationReceipt = { outcome: "delivered" | "created" | "unknown"; sessionId?: string | null };
 export const startTaskPreparation = (path: string, id: string, requestId: string, title: string, description: string, prepfile = false) =>
   invoke<PreparationReceipt>("start_task_preparation", { path, id, requestId, title, description, prepfile });

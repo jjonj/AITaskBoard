@@ -6,6 +6,7 @@ mod agent_notices;
 mod stale_blockers;
 mod agent_policy;
 mod preparation;
+mod task_agent;
 mod queue_bridge;
 mod busy_recovery;
 mod error_log;
@@ -1010,6 +1011,8 @@ pub fn run() {
             task_open_origin_session,
             task_handoff_bundle,
             open_task_session,
+            task_agent::task_agent_status,
+            task_agent::task_agent_action,
             preparation::start_task_preparation,
             preparation::notify_task_preparation_saved,
             show_main_window
