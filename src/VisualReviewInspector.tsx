@@ -19,6 +19,8 @@ type Props = {
   selectedKey: string;
   onSelectTask: (key: string) => void;
   onBack: () => void;
+  onExitInbox: () => void;
+  hasPreviousItem: boolean;
   queueThumbnails: Record<string, string>;
   queueModes: Record<string, string>;
   queueCounts: Record<string, number>;
@@ -82,7 +84,7 @@ const isDashboard = (artifact: ReviewArtifact | undefined, boardPath: string) =>
  */
 export function VisualReviewInspector(props: Props) {
   const {
-    review, round, history, items, selectedKey, onSelectTask, onBack, queueThumbnails, queueModes, queueCounts, onOpenTask, onOpenSession, sessionOpening, onTogglePriority, priorityBusy, allBoards, showResolved,
+    review, round, history, items, selectedKey, onSelectTask, onBack, onExitInbox, hasPreviousItem, queueThumbnails, queueModes, queueCounts, onOpenTask, onOpenSession, sessionOpening, onTogglePriority, priorityBusy, allBoards, showResolved,
     onAllBoards, onShowResolved, playable, activeIndex, onFocusArtifact, onChooseArtifact,
     choice, ranking, pins, setPins, pinning, onTogglePin, addPin, renderArtifact, remoteReviewUrl,
     posterOf, iframeWidth, onIframeWidth, note, setNote, saving,
@@ -96,7 +98,7 @@ export function VisualReviewInspector(props: Props) {
   const [opacity, setOpacity] = useState(50);
   const [zoom, setZoom] = useState(1);
   const [openError, setOpenError] = useState("");
-  const { showCopyMenu, copyMenu } = useLinkCopyMenu(setOpenError);
+  const { showCopyMenu, copyMenu, copyMenuOpen, dismissCopyMenu } = useLinkCopyMenu(setOpenError);
   const [moreOpen, setMoreOpen] = useState(false);
   const [galleryCount, setGalleryCount] = useState(0);
   // The enlarged Dashboard image is a nested viewer, not a separate Inbox item.
@@ -229,6 +231,18 @@ export function VisualReviewInspector(props: Props) {
     stripRef.current?.querySelector('[aria-current="true"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [active?.id]);
 
+  // Escape and the visible Back control unwind one layer at a time. The
+  // separate Exit Inbox control is always available when a review is open.
+  const navigateBack = () => {
+    if (copyMenuOpen) dismissCopyMenu();
+    else if (moreOpen) setMoreOpen(false);
+    else if (dashboardMode && gallerySelectedIndex !== null) setGallerySelectedIndex(null);
+    else if (focus) setFocus(false);
+    else if (compare !== "single") setCompare("single");
+    else if (pinning) onTogglePin();
+    else onBack();
+  };
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (imageFullscreen) {
@@ -257,14 +271,15 @@ export function VisualReviewInspector(props: Props) {
       if (target instanceof HTMLElement &&
         (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) {
         if (event.key !== "Escape") return;
-        (target as HTMLElement).blur();
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        target.blur(); // First Escape leaves the field without discarding its draft.
+        return;
       }
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopImmediatePropagation();
-        if (dashboardMode && gallerySelectedIndex !== null) setGallerySelectedIndex(null);
-        else if (focus) setFocus(false);
-        else onBack();
+        navigateBack();
       } else if (dashboardMode && gallerySelectedIndex !== null &&
         (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
         event.preventDefault();
@@ -289,7 +304,7 @@ export function VisualReviewInspector(props: Props) {
     // Capture before the shared Inbox Escape handler so Focus only exits Focus.
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [focus, imageFullscreen, dashboardMode, gallerySelectedIndex, galleryCount, onBack, onFocusArtifact, activeIndex, playable, active?.kind]);
+  }, [focus, imageFullscreen, dashboardMode, gallerySelectedIndex, galleryCount, onBack, onFocusArtifact, activeIndex, playable, active?.kind, moreOpen, compare, pinning, onTogglePin, copyMenuOpen]);
 
   const originalAddress = (artifact: ReviewArtifact) => {
     if (artifact.kind === "url") return artifact.path;
@@ -350,11 +365,11 @@ export function VisualReviewInspector(props: Props) {
       className={"review-visual-inspector" + (focus ? " focus" : "") +
       (feedbackExpanded ? "" : " feedback-hidden") + (dashboardMode ? " dashboard-review" : "")}>
       <header className="review-visual-header">
-        <button type="button" className="button secondary"
-          onClick={() => dashboardMode && gallerySelectedIndex !== null ? setGallerySelectedIndex(null) : onBack()}
-          title={dashboardMode && gallerySelectedIndex !== null
-            ? "Return to Dashboard gallery (Esc)" : "Return to previously selected Inbox item (Esc)"}>
-          {dashboardMode && gallerySelectedIndex !== null ? "← All captures" : "← Previous item"}</button>
+        <button type="button" className="button secondary" onClick={navigateBack}
+          title="Go back one navigation step (Esc)">
+          {dashboardMode && gallerySelectedIndex !== null ? "← All captures"
+            : focus ? "← Exit focus" : compare !== "single" ? "← Single view"
+            : pinning ? "← Exit pin mode" : hasPreviousItem ? "← Previous item" : "← Board"}</button>
         <div className="review-visual-title"><small>{review.project} · {review.task.id} · Round {round.number}</small>
           <strong title={review.task.title}>{review.task.title}</strong></div>
         <span className={`inbox-task-column-chip column-${review.task.column}`}>{review.task.column}</span>
@@ -370,6 +385,8 @@ export function VisualReviewInspector(props: Props) {
         </button>
         <span className="review-visual-mode">{round.mode.toUpperCase()}</span>
         <div className="review-visual-header-actions">
+          <button type="button" className="button secondary" onClick={onExitInbox}
+            title="Exit the feedback Inbox and return to the board" aria-label="Close Inbox">× Close Inbox</button>
           {onOpenTask && <button type="button" className="button secondary" onClick={onOpenTask} title="Inspect the full task and return to Inbox on closing">Full task ↗</button>}
           {(review.task.claimed_by || review.task.live?.with_me) && (
             <button type="button" className="button secondary"

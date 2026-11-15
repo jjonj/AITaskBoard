@@ -894,12 +894,13 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        // The visual inspector owns nested navigation (enlarged capture -> gallery
-        // -> previous Inbox item). Never close the entire Inbox from here.
+        // The inspector owns its nested stack. Text Inbox closes its menu first,
+        // then returns to the board, matching the visual Inbox exit behavior.
         if (isVisualReview) return;
         event.preventDefault();
         event.stopImmediatePropagation();
-        onClose();
+        if (moreOpen) setMoreOpen(false);
+        else onClose();
         return;
       }
       if (event.ctrlKey || event.altKey || event.metaKey || !isVisualReview) return;
@@ -932,8 +933,8 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
     return () => window.removeEventListener("keydown", keydown);
   });
 
-  // Clicking into a larger visual review retains the previously selected Inbox
-  // item. Back/Escape returns to that item instead of closing TaskBoard Inbox.
+  // Only explicit Inbox selections create a navigation step. When the history
+  // is exhausted, Back/Escape exits to the board; it must never cycle siblings.
   const navigationHistory = useRef<string[]>([]);
   const selectInboxItem = (key: string) => {
     if (selectedKey && selectedKey !== key) navigationHistory.current.push(selectedKey);
@@ -947,11 +948,9 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
         return;
       }
     }
-    const alternate = items.find(item => keyOf(item) !== selectedKey && !item.task.review_status)
-      ?? items.find(item => keyOf(item) !== selectedKey);
-    if (alternate) setSelectedKey(keyOf(alternate));
-    else onClose();
+    onClose();
   };
+  const hasPreviousItem = navigationHistory.current.some(key => items.some(item => keyOf(item) === key));
 
   const pinsFor = (artifact: ReviewArtifact) => pins.filter((pin) => pin.artifact === artifact.id);
   const image = (artifact: ReviewArtifact, className = "") => {
@@ -1027,6 +1026,8 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       selectedKey={selectedKey}
       onSelectTask={selectInboxItem}
       onBack={returnToPrevious}
+      onExitInbox={onClose}
+      hasPreviousItem={hasPreviousItem}
       queueThumbnails={queueThumbnails}
       queueModes={queueModes}
       queueCounts={queueCounts}

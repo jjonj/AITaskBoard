@@ -39,7 +39,8 @@ export function useLinkCopyMenu(onError?: (message: string) => void) {
     };
     const keydown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        event.stopPropagation();
+        event.preventDefault();
+        event.stopImmediatePropagation(); // Close only this topmost menu, not its parent review.
         setMenu(null);
       }
     };
@@ -94,5 +95,5 @@ export function useLinkCopyMenu(onError?: (message: string) => void) {
     {copied && <div className="link-copy-notice" role="status">Link copied</div>}
   </>, document.body);
 
-  return { showCopyMenu, copyMenu };
+  return { showCopyMenu, copyMenu, copyMenuOpen: menu !== null, dismissCopyMenu: () => setMenu(null) };
 }

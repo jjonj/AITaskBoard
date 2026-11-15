@@ -3152,25 +3152,31 @@ Details: ${queueRecoveryWarning}`;
       const controlTarget = event.target instanceof Element &&
         !!event.target.closest("button, [role='button']");
 
-      if (event.key === "Escape") {
-        if (taskDumpOpen && !busy) {
+      if (event.key === "Escape" && !event.defaultPrevented && !reviewOpen) {
+        // Unwind only the topmost TaskBoard surface. The Inbox owns its deeper
+        // fullscreen/gallery/focus/item history, so the board never steals Esc.
+        const back = (action: () => void) => {
           event.preventDefault();
-          setTaskDumpOpen(false);
+          event.stopImmediatePropagation();
+          action();
+        };
+        if (taskDumpOpen) { if (!busy) back(() => setTaskDumpOpen(false)); return; }
+        if (editor) {
+          if (doneMenuOpen) back(() => setDoneMenuOpen(false));
+          else if (!busy) back(closeEditor);
           return;
         }
+        if (agentSettingsOpen) { back(() => setAgentSettingsOpen(false)); return; }
+        if (staleDrawerOpen) { back(() => setStaleDrawerOpen(false)); return; }
+        if (releasesOpen) { back(() => { setReleasesOpen(false); void refresh(boardPath, false); }); return; }
+        if (queueDrawerOpen) { back(() => setQueueDrawerOpen(false)); return; }
         if (contextMenu || columnContextMenu) {
-          event.preventDefault();
-          setContextMenu(null);
-          setMoveSubmenu(null);
-          setColumnContextMenu(null);
+          back(() => { setContextMenu(null); setMoveSubmenu(null); setColumnContextMenu(null); });
           return;
         }
-        if (editor && !busy) {
-          event.preventDefault();
-          if (doneMenuOpen) setDoneMenuOpen(false);
-          else closeEditor();
-          return;
-        }
+        if (filterPanelOpen) { back(() => setFilterPanelOpen(false)); return; }
+        if (moreMenuOpen) { back(() => setMoreMenuOpen(false)); return; }
+        if (searchResultsOpen) { back(() => setSearchResultsOpen(false)); return; }
       }
 
       if (taskDumpOpen || busy) return;
@@ -3261,25 +3267,21 @@ Details: ${queueRecoveryWarning}`;
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [editor, taskDumpOpen, busy, contextMenu, columnContextMenu, snapshot, boardPath,
-      undoCount, reviewOpen, keyboardSelectedTaskId, query, userQueueTasks, childCounts, doneMenuOpen]);
+      undoCount, reviewOpen, keyboardSelectedTaskId, query, userQueueTasks, childCounts, doneMenuOpen,
+      agentSettingsOpen, staleDrawerOpen, releasesOpen, queueDrawerOpen, filterPanelOpen, moreMenuOpen, searchResultsOpen]);
 
   useEffect(() => {
     if (reviewOpen) setFilterPanelOpen(false);
   }, [reviewOpen]);
 
-  // The More menu closes on outside click or Escape, like the filter panel.
+  // The More menu closes on outside click; the shared Escape stack closes it on keypress.
   useEffect(() => {
     if (!moreMenuOpen) return;
     const closeOutside = (event: PointerEvent) => {
       if (event.target instanceof Node && !moreMenuRef.current?.contains(event.target)) setMoreMenuOpen(false);
     };
-    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") setMoreMenuOpen(false); };
     document.addEventListener("pointerdown", closeOutside);
-    window.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("pointerdown", closeOutside);
-      window.removeEventListener("keydown", closeOnEscape);
-    };
+    return () => document.removeEventListener("pointerdown", closeOutside);
   }, [moreMenuOpen]);
 
   useEffect(() => {
@@ -3300,15 +3302,8 @@ Details: ${queueRecoveryWarning}`;
         setFilterPanelOpen(false);
       }
     };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setFilterPanelOpen(false);
-    };
     document.addEventListener("pointerdown", closeOutside);
-    window.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("pointerdown", closeOutside);
-      window.removeEventListener("keydown", closeOnEscape);
-    };
+    return () => document.removeEventListener("pointerdown", closeOutside);
   }, [filterPanelOpen]);
 
   useEffect(() => {
