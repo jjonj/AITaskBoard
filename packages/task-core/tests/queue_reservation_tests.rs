@@ -376,3 +376,51 @@ fn human_inbox_recovery_decisions_are_actionable_and_cannot_silently_requeue() {
     assert!(!card.attention.contains(&task_core::TaskAttention::NeedsUser));
     assert!(!card.attention.contains(&task_core::TaskAttention::Question));
 }
+
+#[test]
+fn delayed_verified_worker_resumes_recovery_incident_without_creating_a_new_execution() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (store, task, queue_request) = queued_task(root);
+    let reservation = uuid::Uuid::new_v4().to_string();
+    let session = uuid::Uuid::new_v4().to_string();
+    store.reserve_queue_task(root, &task.id, &queue_request, &reservation, 180).unwrap();
+    store.start_queue_task(root, &task.id, &reservation).unwrap();
+    store.flag_queue_recovery_required(root, &task.id, &queue_request,
+        QueueState::Starting, &reservation, "Late T3 acknowledgment").unwrap();
+    let waiting = store.load(root).unwrap().tasks.into_iter()
+        .find(|row| row.id == task.id).unwrap();
+    assert!(waiting.attention.contains(&task_core::TaskAttention::NeedsUser));
+    assert!(waiting.question.as_ref().is_some_and(|q| q.answer.is_none()));
+
+    let restored = store.claim_queue_working(root, &task.id, &queue_request, &reservation, &session).unwrap();
+    assert_eq!(restored.queue_state, Some(QueueState::Working));
+    assert_eq!(restored.queue_request.as_deref(), Some(queue_request.as_str()));
+    assert_eq!(restored.queue_session_id.as_deref(), Some(session.as_str()));
+    let claimed = store.load(root).unwrap().tasks.into_iter()
+        .find(|row| row.id == task.id).unwrap();
+    assert_eq!(claimed.claimed_by.as_deref(), Some(format!("t3:{session}").as_str()));
+    assert!(!claimed.attention.contains(&task_core::TaskAttention::NeedsUser));
+    assert!(!claimed.attention.contains(&task_core::TaskAttention::Question));
+    assert!(claimed.question.is_none());
+
+    // A human decision on a later incident cannot be overridden by a delayed
+    // automatic receipt from the old attempt.
+    store.release_claim(root, &task.id, &format!("t3:{session}")).unwrap();
+    let revision = store.load(root).unwrap().tasks.into_iter()
+        .find(|row| row.id == task.id).unwrap();
+    let second_request = store.execution_intent(root, &task.id).unwrap().queue_request.unwrap();
+    let second_start = uuid::Uuid::new_v4().to_string();
+    assert!(!revision.archived);
+    store.reserve_queue_task(root, &task.id, &second_request, &second_start, 180).unwrap();
+    store.start_queue_task(root, &task.id, &second_start).unwrap();
+    store.flag_queue_recovery_required(root, &task.id, &second_request,
+        QueueState::Starting, &second_start, "Second incident").unwrap();
+    let mut paused = store.load(root).unwrap().tasks.into_iter()
+        .find(|row| row.id == task.id).unwrap();
+    paused.question.as_mut().unwrap().answer = Some("Keep paused".into());
+    paused.column = "ai-ready".into();
+    store.update_as(root, paused, task_core::MutationActor::Human).unwrap();
+    assert!(store.claim_queue_working(root, &task.id, &second_request,
+        &second_start, &uuid::Uuid::new_v4().to_string()).is_err());
+}

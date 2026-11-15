@@ -21,7 +21,7 @@ pub struct ExecutionIntent {
     pub queue_retired_receipt: Option<String>,
     /// One T3-owned lease / idempotency key for a selected task.
     pub queue_state: Option<QueueState>,
-    /// Durable phase entry, used by the generic T3 watchdog across restarts.
+    /// Durable phase entry, used by TaskBoard busy-work FIFO recovery across restarts.
     pub queue_state_since: Option<String>,
     pub queue_reservation_id: Option<String>,
     pub queue_reservation_expires_at: Option<String>,
@@ -201,10 +201,19 @@ impl FsTaskStore {
             task.claimed_by.as_deref() == Some(&format!("t3:{session_id}")) {
             return Ok(previous);
         }
-        if previous.queue_state != Some(QueueState::Starting) {
+        let resolving_incident = previous.queue_state == Some(QueueState::RecoveryRequired);
+        if previous.queue_state != Some(QueueState::Starting) && !resolving_incident {
             return Err(TaskStoreError::Conflict(format!("{id} has not entered starting")));
         }
-        if task.claimed_by.is_some() || !queue_task_ready(&snapshot, &task) || !recurring_due(&task) {
+        if resolving_incident && (mapping.get(key("queue_recovery_question_added")).and_then(|v| v.as_bool()) != Some(true) ||
+            task.question.as_ref().is_none_or(|q|
+                q.request_type.as_deref() != Some("queue_recovery") || q.answer.is_some()) ||
+            task.column == "blocked") {
+            return Err(TaskStoreError::Conflict(format!("{id} has a human-owned recovery decision")));
+        }
+        if task.claimed_by.is_some() || task.archived || task.completed.is_some() ||
+            snapshot.config.columns.iter().any(|column| column.terminal && column.id == task.column) ||
+            (!resolving_incident && (!queue_task_ready(&snapshot, &task) || !recurring_due(&task))) {
             return Err(TaskStoreError::Conflict(format!("{id} is no longer available to this reservation")));
         }
         ensure_dependencies_complete(&snapshot, &task)?;
@@ -226,6 +235,30 @@ impl FsTaskStore {
             &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)));
         mapping.insert(key("queue_session_id"), key(session_id));
         mapping.remove(key("queue_reservation_expires_at"));
+        if resolving_incident {
+            if mapping.get(key("queue_recovery_attention_added")).and_then(|v| v.as_bool()) == Some(true) {
+                let mut attention: Vec<TaskAttention> = mapping.get(key("attention"))
+                    .map(|v| serde_yaml::from_value(v.clone())
+                        .map_err(|error| TaskStoreError::Parse(error.to_string())))
+                    .transpose()?.unwrap_or_default();
+                attention.retain(|flag| *flag != TaskAttention::NeedsUser);
+                mapping.insert(key("attention"), serde_yaml::to_value(&attention)
+                    .map_err(|error| TaskStoreError::Parse(error.to_string()))?);
+            }
+            mapping.remove(key("queue_recovery_attention_added"));
+            if mapping.get(key("queue_recovery_question_added")).and_then(|v| v.as_bool()) == Some(true) {
+                mapping.remove(key("question"));
+                let mut attention: Vec<TaskAttention> = mapping.get(key("attention"))
+                    .map(|v| serde_yaml::from_value(v.clone())
+                        .map_err(|error| TaskStoreError::Parse(error.to_string())))
+                    .transpose()?.unwrap_or_default();
+                attention.retain(|flag| *flag != TaskAttention::Question);
+                mapping.insert(key("attention"), serde_yaml::to_value(&attention)
+                    .map_err(|error| TaskStoreError::Parse(error.to_string()))?);
+            }
+            mapping.remove(key("queue_recovery_question_added"));
+            mapping.remove(key("queue_error"));
+        }
         let final_text = format!("---\n{}---\n{}", serde_yaml::to_string(&mapping)
             .map_err(|error| TaskStoreError::Parse(error.to_string()))?, body);
         write_text_atomic(&path, &final_text)?;

@@ -8,6 +8,7 @@ mod agent_policy;
 mod preparation;
 mod orphan_recovery;
 mod queue_bridge;
+mod busy_recovery;
 mod error_log;
 mod restart_warning;
 
@@ -115,6 +116,11 @@ async fn task_queue_overview(path: Option<String>) -> Result<serde_json::Value, 
 #[tauri::command]
 async fn task_queue_capacity() -> Result<serde_json::Value, String> {
     queue_bridge::capacity().await
+}
+
+#[tauri::command]
+fn task_busy_recovery_status() -> busy_recovery::RecoveryStatus {
+    busy_recovery::current_status()
 }
 
 #[tauri::command]
@@ -939,6 +945,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            busy_recovery::start();
             std::thread::spawn(|| {
                 // Defer cloud-drive maintenance until the first board is visible.
                 std::thread::sleep(std::time::Duration::from_secs(90));
@@ -990,6 +997,7 @@ pub fn run() {
             task_sync_queue,
             task_queue_overview,
             task_queue_capacity,
+            task_busy_recovery_status,
             task_queue_reprioritize,
             task_queue_move,
             task_queue_reconcile,
