@@ -1064,6 +1064,34 @@ impl FsTaskStore {
         task.archived = path.starts_with(root.join(ARCHIVE_DIR));
         task.path = path.to_string_lossy().to_string();
         let previous = parse_task(&path, task.archived, &existing)?;
+        // Recovery incidents are executable human decisions. Never silently
+        // turn a Keep paused answer into an eligible AI Ready task, and never
+        // retry a possibly delivered prompt without the explicit risk choice.
+        let recovery_pending = actor == MutationActor::Human &&
+            claim_metadata(&existing, "queue_state")?.as_deref() == Some("recovery_required") &&
+            !snapshot.config.columns.iter().any(|col| col.id == task.column && col.terminal);
+        let recovery_decision = if recovery_pending &&
+            previous.question.as_ref().is_some_and(|q|
+                q.request_type.as_deref() == Some("queue_recovery") && q.answer.is_none()) {
+            task.question.as_ref().and_then(|q| q.answer.as_deref())
+                .filter(|answer| !answer.trim().is_empty()).map(str::to_owned)
+        } else { None };
+        let retry_recovery = recovery_decision.as_deref() == Some("Retry anyway (may duplicate work)");
+        if recovery_pending {
+            if recovery_decision.is_some() {
+                task.column = if retry_recovery { AI_READY_COLUMN_ID } else { BLOCKED_COLUMN_ID }.into();
+                task.claimed_by = None;
+                task.blocked_reason = None;
+                task.attention.retain(|flag| !matches!(flag, TaskAttention::Question | TaskAttention::Blocked));
+            }
+            if retry_recovery {
+                task.attention.retain(|flag| *flag != TaskAttention::NeedsUser);
+            } else if !task.attention.contains(&TaskAttention::NeedsUser) {
+                // Even an unrelated human edit/answer cannot hide the
+                // unresolved incident from the Inbox.
+                task.attention.push(TaskAttention::NeedsUser);
+            }
+        }
         // Once an agent has interacted, only appended timeline notes may alter
         // Description. Check inside the locked transaction to reject stale edits.
         if actor == MutationActor::Human && previous.agent_interacted &&
@@ -1181,6 +1209,9 @@ impl FsTaskStore {
             render_with_claim_token(&task, &existing, None)?
         } else { render_task(&task, Some(&existing))? };
         let rendered = queue_policy_text(&rendered, &task, &snapshot, Some(&previous))?;
+        let rendered = if retry_recovery {
+            retry_recovery_queue_text(&rendered)?
+        } else { rendered };
         let text = update_activity(&rendered, &existing, &previous, &task, &snapshot.config)?;
         // Any departure from Done starts a fresh queue attempt when this task
         // was previously queued, regardless of actor or reason for reopening.
@@ -2766,6 +2797,31 @@ fn mark_queue_completed_lifecycle(text: &str, task: &Task) -> Result<String, Tas
     }
     mapping.insert(serde_yaml::Value::String("queue_state".into()), serde_yaml::Value::String("completed".into()));
     mapping.remove(serde_yaml::Value::String("queue_reservation_expires_at".into()));
+    Ok(format!("---\n{}---\n{}", serde_yaml::to_string(&mapping)
+        .map_err(|error| TaskStoreError::Parse(error.to_string()))?, body))
+}
+
+/// The existing human Inbox's explicit retry decision resolves an ambiguous
+/// queue attempt atomically with the task update. A fresh queue identity fences
+/// all late acknowledgements from the original, possibly-delivered prompt.
+fn retry_recovery_queue_text(text: &str) -> Result<String, TaskStoreError> {
+    let (yaml, body) = split_frontmatter(text)?;
+    let mut mapping: serde_yaml::Mapping = serde_yaml::from_str(&yaml)
+        .map_err(|error| TaskStoreError::Parse(error.to_string()))?;
+    let key = |field: &str| serde_yaml::Value::String(field.into());
+    if mapping.get(key("queue_state")).and_then(serde_yaml::Value::as_str) != Some("recovery_required") ||
+        mapping.get(key("execution_mode")).and_then(serde_yaml::Value::as_str) != Some("queue") {
+        return Err(TaskStoreError::Conflict("Recovery incident was resolved by another mutation".into()));
+    }
+    mapping.insert(key("queue_state"), key("queued"));
+    mapping.insert(key("queue_request"), key(&uuid::Uuid::new_v4().to_string()));
+    mapping.insert(key("queue_state_since"), key(
+        &Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)));
+    mapping.insert(key("queue_error"), key("Human explicitly accepted possible duplicate remote execution; old attempt fenced."));
+    for field in [
+        "queue_reservation_id", "queue_reservation_expires_at", "queue_session_id",
+        "queue_recovery_attention_added", "queue_recovery_question_added",
+    ] { mapping.remove(key(field)); }
     Ok(format!("---\n{}---\n{}", serde_yaml::to_string(&mapping)
         .map_err(|error| TaskStoreError::Parse(error.to_string()))?, body))
 }

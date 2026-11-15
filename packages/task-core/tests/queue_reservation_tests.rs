@@ -267,3 +267,112 @@ fn queued_task_completion_is_persisted_in_lifecycle() {
     assert_ne!(repaired.queue_request, before.queue_request);
     assert_eq!(store.execution_intent(root, &task.id).unwrap().queue_request, repaired.queue_request);
 }
+
+#[test]
+fn recovery_watchdog_expires_reserved_and_escalates_unknown_start_without_replay() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (store, task, queue_request) = queued_task(root);
+    let request = uuid::Uuid::new_v4().to_string();
+    let reserved = store.reserve_queue_task(root, &task.id, &queue_request, &request, 30).unwrap();
+    assert!(reserved.queue_state_since.is_some());
+
+    let file = std::path::Path::new(&task.path);
+    let text = std::fs::read_to_string(file).unwrap();
+    let expired = text.replace(
+        reserved.queue_reservation_expires_at.as_deref().unwrap(),
+        "2000-01-01T00:00:00.000Z",
+    );
+    std::fs::write(file, expired).unwrap();
+    let restored = store.expire_reserved_queue_task(root, &task.id, &queue_request, &request).unwrap();
+    assert_eq!(restored.queue_state, Some(QueueState::Queued));
+    assert!(restored.queue_reservation_id.is_none());
+
+    let fresh = uuid::Uuid::new_v4().to_string();
+    store.reserve_queue_task(root, &task.id, &queue_request, &fresh, 180).unwrap();
+    let started = store.start_queue_task(root, &task.id, &fresh).unwrap();
+    assert_eq!(started.queue_state, Some(QueueState::Starting));
+    assert!(started.queue_state_since.is_some());
+    let incident = store.flag_queue_recovery_required(root, &task.id, &queue_request,
+        QueueState::Starting, &fresh, "Unknown prompt delivery after maximum watchdog deadline").unwrap();
+    assert_eq!(incident.queue_state, Some(QueueState::RecoveryRequired));
+    assert!(incident.queue_error.as_deref().unwrap().contains("Unknown prompt"));
+    assert_eq!(incident.queue_reservation_id.as_deref(), Some(fresh.as_str()));
+    let task = store.load(root).unwrap().tasks.into_iter().find(|t| t.id == task.id).unwrap();
+    assert!(task.attention.contains(&task_core::TaskAttention::NeedsUser));
+    // A recovery incident is never silently eligible for a second worker.
+    assert!(store.reserve_queue_task(root, &task.id, &queue_request,
+        &uuid::Uuid::new_v4().to_string(), 180).is_err());
+    assert!(store.flag_queue_recovery_required(root, &task.id, &queue_request,
+        QueueState::Starting, &fresh, "another incident").is_err());
+
+    // A deliberate operator override is explicit and rotates request identity;
+    // an old T3 response can never claim the new attempt.
+    let retried = store.retry_queue_incident(root, &task.id, &queue_request,
+        &fresh, "inspected previous guest").unwrap();
+    assert_eq!(retried.queue_state, Some(QueueState::Queued));
+    assert_ne!(retried.queue_request.as_deref(), Some(queue_request.as_str()));
+    assert!(retried.queue_reservation_id.is_none());
+    let after = store.load(root).unwrap().tasks.into_iter().find(|t| t.id == task.id).unwrap();
+    assert!(!after.attention.contains(&task_core::TaskAttention::NeedsUser));
+    assert!(store.reserve_queue_task(root, &task.id, &queue_request,
+        &uuid::Uuid::new_v4().to_string(), 180).is_err());
+}
+
+#[test]
+fn human_inbox_recovery_decisions_are_actionable_and_cannot_silently_requeue() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (store, task, queue_request) = queued_task(root);
+    let request = uuid::Uuid::new_v4().to_string();
+    store.reserve_queue_task(root, &task.id, &queue_request, &request, 180).unwrap();
+    store.start_queue_task(root, &task.id, &request).unwrap();
+    store.flag_queue_recovery_required(root, &task.id, &queue_request,
+        QueueState::Starting, &request, "Unknown first prompt").unwrap();
+    let mut decision = store.load(root).unwrap().tasks.into_iter()
+        .find(|t| t.id == task.id).unwrap();
+    assert_eq!(decision.question.as_ref().unwrap().request_type.as_deref(), Some("queue_recovery"));
+    decision.question.as_mut().unwrap().answer = Some("Keep paused".into());
+    decision.column = "ai-ready".into();
+    decision.attention.clear(); // Inbox can clear flags; backend must restore incident.
+    store.update_as(root, decision, task_core::MutationActor::Human).unwrap();
+    let paused = store.load(root).unwrap().tasks.into_iter()
+        .find(|t| t.id == task.id).unwrap();
+    assert_eq!(paused.column, "blocked");
+    assert!(paused.attention.contains(&task_core::TaskAttention::NeedsUser));
+    assert_eq!(store.execution_intent(root, &task.id).unwrap().queue_state,
+        Some(QueueState::RecoveryRequired));
+
+    // Resolve the parked incident explicitly through the owning CLI method.
+    let retry = store.retry_queue_incident(root, &task.id, &queue_request,
+        &request, "operator approved").unwrap();
+    assert_eq!(retry.queue_state, Some(QueueState::Queued));
+    assert_ne!(retry.queue_request.as_deref(), Some(queue_request.as_str()));
+
+    // The original Inbox retry route is also a one-shot, exact human action.
+    let new_request = retry.queue_request.unwrap();
+    let reservation = uuid::Uuid::new_v4().to_string();
+    let mut ready = store.load(root).unwrap().tasks.into_iter()
+        .find(|t| t.id == task.id).unwrap();
+    ready.column = "ai-ready".into();
+    store.update_as(root, ready, task_core::MutationActor::Human).unwrap();
+    store.reserve_queue_task(root, &task.id, &new_request, &reservation, 180).unwrap();
+    store.start_queue_task(root, &task.id, &reservation).unwrap();
+    store.flag_queue_recovery_required(root, &task.id, &new_request,
+        QueueState::Starting, &reservation, "Another unknown").unwrap();
+    let mut response = store.load(root).unwrap().tasks.into_iter()
+        .find(|t| t.id == task.id).unwrap();
+    response.question.as_mut().unwrap().answer =
+        Some("Retry anyway (may duplicate work)".into());
+    response.column = "ai-ready".into();
+    response.attention.clear();
+    store.update_as(root, response, task_core::MutationActor::Human).unwrap();
+    let recovered = store.execution_intent(root, &task.id).unwrap();
+    assert_eq!(recovered.queue_state, Some(QueueState::Queued));
+    assert_ne!(recovered.queue_request.as_deref(), Some(new_request.as_str()));
+    assert!(recovered.queue_reservation_id.is_none());
+    let card = store.load(root).unwrap().tasks.into_iter()
+        .find(|t| t.id == task.id).unwrap();
+    assert!(!card.attention.contains(&task_core::TaskAttention::NeedsUser));
+    assert!(!card.attention.contains(&task_core::TaskAttention::Question));
+}

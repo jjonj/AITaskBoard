@@ -88,6 +88,12 @@ enum TaskQueueCommand {
     RequeueReleased(TaskQueueRequeueReleasedArgs),
     /// Release a reservation only after a definitive T3 not-created receipt.
     Failed(TaskQueueFailedArgs),
+    /// Release a pre-spawn reservation whose lease definitely expired.
+    Expire(TaskQueueReservationArgs),
+    /// Durable incident for any ambiguous in-flight queue phase.
+    Incident(TaskQueueIncidentArgs),
+    /// Explicit operator override after inspecting the previous session.
+    RetryIncident(TaskQueueRetryIncidentArgs),
     /// Human Start now preempts a queue item only before it enters Starting.
     Preempt(TaskTarget),
 }
@@ -154,6 +160,27 @@ struct TaskQueueFailedArgs {
     #[arg(long)] reason: String,
     #[arg(long = "confirmed-not-created", required = true, action = clap::ArgAction::SetTrue)]
     confirmed_not_created: bool,
+}
+
+#[derive(Args)]
+struct TaskQueueIncidentArgs {
+    target: String,
+    #[arg(long)] queue_request: String,
+    #[arg(long)] request_id: String,
+    /// Exact observed queue phase, checked atomically.
+    #[arg(long)] state: String,
+    #[arg(long)] reason: String,
+}
+
+#[derive(Args)]
+struct TaskQueueRetryIncidentArgs {
+    target: String,
+    #[arg(long)] queue_request: String,
+    #[arg(long)] request_id: String,
+    #[arg(long)] reason: String,
+    /// Never automated: confirms the user accepts possible duplicate remote work.
+    #[arg(long, required = true, action = clap::ArgAction::SetTrue)]
+    operator_accepts_duplicate_risk: bool,
 }
 
 /// Persist live collaboration on the existing task; never creates or sends a session.
@@ -830,6 +857,7 @@ fn run_task_queue(store: &FsTaskStore, root: &Path, command: &TaskQueueCommand) 
                     QueueState::Starting => "starting",
                     QueueState::Working => "working",
                     QueueState::Completed => "completed",
+                    QueueState::RecoveryRequired => "recovery_required",
                 };
                 let priority = if task.attention.contains(&TaskAttention::Priority) { "urgent" } else { "routine" };
                 items.push(json!({
@@ -846,6 +874,7 @@ fn run_task_queue(store: &FsTaskStore, root: &Path, command: &TaskQueueCommand) 
                     "claimedBy": task.claimed_by,
                     "queueRequest": intent.queue_request,
                     "state": state,
+                    "stateSince": intent.queue_state_since,
                     "reservationId": intent.queue_reservation_id,
                     "reservationExpiresAt": intent.queue_reservation_expires_at,
                     "sessionId": intent.queue_session_id,
@@ -913,6 +942,36 @@ fn run_task_queue(store: &FsTaskStore, root: &Path, command: &TaskQueueCommand) 
             }
             let result = store.requeue_failed_start(root, &args.target, &args.queue_request,
                 &args.request_id, &args.reason).map_err(map_store_error)?;
+            Ok(json!({"status":"queued","taskId":args.target,"intent":result}))
+        }
+        TaskQueueCommand::Expire(args) => {
+            let snapshot = store.execution_intent(root, &args.target).map_err(map_store_error)?;
+            let request = snapshot.queue_request
+                .ok_or_else(|| CliError::new("invalid", "Queue request missing"))?;
+            let result = store.expire_reserved_queue_task(root, &args.target, &request, &args.request_id)
+                .map_err(map_store_error)?;
+            Ok(json!({"status":"queued","taskId":args.target,"intent":result}))
+        }
+        TaskQueueCommand::Incident(args) => {
+            let state = match args.state.as_str() {
+                "queued" => QueueState::Queued,
+                "reserved" => QueueState::Reserved,
+                "starting" => QueueState::Starting,
+                "working" => QueueState::Working,
+                _ => return Err(CliError::new("invalid", "Incident requires queued, reserved, starting or working")),
+            };
+            let result = store.flag_queue_recovery_required(root, &args.target,
+                &args.queue_request, state, &args.request_id, &args.reason)
+                .map_err(map_store_error)?;
+            Ok(json!({"status":"recovery_required","taskId":args.target,"intent":result}))
+        }
+        TaskQueueCommand::RetryIncident(args) => {
+            if !args.operator_accepts_duplicate_risk {
+                return Err(CliError::new("confirmation_required", "Operator must acknowledge possible duplicate remote work"));
+            }
+            let result = store.retry_queue_incident(root, &args.target,
+                &args.queue_request, &args.request_id, &args.reason)
+                .map_err(map_store_error)?;
             Ok(json!({"status":"queued","taskId":args.target,"intent":result}))
         }
         TaskQueueCommand::Preempt(args) => {

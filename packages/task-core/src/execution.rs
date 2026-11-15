@@ -8,7 +8,7 @@ pub enum ExecutionMode { #[default] Backlog, Queue }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum QueueState { Queued, Reserved, Starting, Working, Completed }
+pub enum QueueState { Queued, Reserved, Starting, Working, Completed, RecoveryRequired }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionIntent {
@@ -21,6 +21,8 @@ pub struct ExecutionIntent {
     pub queue_retired_receipt: Option<String>,
     /// One T3-owned lease / idempotency key for a selected task.
     pub queue_state: Option<QueueState>,
+    /// Durable phase entry, used by the generic T3 watchdog across restarts.
+    pub queue_state_since: Option<String>,
     pub queue_reservation_id: Option<String>,
     pub queue_reservation_expires_at: Option<String>,
     pub queue_session_id: Option<String>,
@@ -48,6 +50,7 @@ fn intent(mapping: &serde_yaml::Mapping, text: &str) -> Result<ExecutionIntent, 
         queue_state: mapping.get(key("queue_state")).map(|value|
             serde_yaml::from_value(value.clone())
                 .map_err(|error| TaskStoreError::Parse(error.to_string()))).transpose()?,
+        queue_state_since: field("queue_state_since"),
         queue_reservation_id: field("queue_reservation_id"),
         queue_reservation_expires_at: field("queue_reservation_expires_at"),
         queue_session_id: field("queue_session_id"),
@@ -67,11 +70,24 @@ fn load(path: &Path) -> Result<(String, serde_yaml::Mapping, String), TaskStoreE
 }
 
 fn persist(path: &Path, mapping: &serde_yaml::Mapping, body: &str) -> Result<ExecutionIntent, TaskStoreError> {
-    let yaml = serde_yaml::to_string(mapping)
+    let mut mapping = mapping.clone();
+    let current = load(path)?.1;
+    // Every authoritative transition carries a persistent clock; stale
+    // reservations must not become "new" whenever the desktop restarts.
+    if mapping.get(key("queue_state")) != current.get(key("queue_state")) ||
+        mapping.get(key("queue_reservation_id")) != current.get(key("queue_reservation_id")) {
+        mapping.insert(key("queue_state_since"), key(
+            &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)));
+    } else if mapping.get(key("queue_state_since")).is_none() {
+        // Legacy in-flight tasks enter monitoring with a durable first sighting.
+        mapping.insert(key("queue_state_since"), key(
+            &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)));
+    }
+    let yaml = serde_yaml::to_string(&mapping)
         .map_err(|e| TaskStoreError::Parse(e.to_string()))?;
     let text = format!("---\n{yaml}---\n{body}");
     write_text_atomic(path, &text)?;
-    intent(mapping, &text)
+    intent(&mapping, &text)
 }
 
 impl FsTaskStore {
@@ -206,6 +222,8 @@ impl FsTaskStore {
         mapping = serde_yaml::from_str(&yaml).map_err(|error| TaskStoreError::Parse(error.to_string()))?;
         mapping.insert(key("queue_state"), serde_yaml::to_value(QueueState::Working)
             .map_err(|error| TaskStoreError::Parse(error.to_string()))?);
+        mapping.insert(key("queue_state_since"), key(
+            &chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)));
         mapping.insert(key("queue_session_id"), key(session_id));
         mapping.remove(key("queue_reservation_expires_at"));
         let final_text = format!("---\n{}---\n{}", serde_yaml::to_string(&mapping)
@@ -329,6 +347,149 @@ impl FsTaskStore {
         mapping.remove(key("queue_reservation_expires_at"));
         mapping.remove(key("queue_session_id"));
         mapping.insert(key("queue_error"), serde_yaml::Value::String(reason.chars().take(500).collect::<String>()));
+        persist(&path, &mapping, &body)
+    }
+
+    /// Recover a reservation that never entered Starting. No T3 spawn can
+    /// have been authorized from Reserved, so expiration is safe without a
+    /// session close receipt. Idempotent under a board-wide lock.
+    pub fn expire_reserved_queue_task(
+        &self, root: &Path, id: &str, queue_request: &str, request_id: &str,
+    ) -> Result<ExecutionIntent, TaskStoreError> {
+        let _lock = acquire_lock(root)?;
+        let path = find_task_path(root, id)?;
+        let (text, mut mapping, body) = load(&path)?;
+        let previous = intent(&mapping, &text)?;
+        if previous.mode != ExecutionMode::Queue ||
+            previous.queue_request.as_deref() != Some(queue_request) ||
+            previous.queue_reservation_id.as_deref() != Some(request_id) ||
+            previous.queue_state != Some(QueueState::Reserved) {
+            return Err(TaskStoreError::Conflict(format!("{id}: reservation changed")));
+        }
+        let expired = previous.queue_reservation_expires_at.as_deref()
+            .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+            .is_some_and(|expires| expires <= chrono::Utc::now());
+        if !expired {
+            return Err(TaskStoreError::Conflict(format!("{id}: reservation is unexpired or unreadable")));
+        }
+        mapping.insert(key("queue_state"), key("queued"));
+        mapping.remove(key("queue_reservation_id"));
+        mapping.remove(key("queue_reservation_expires_at"));
+        mapping.insert(key("queue_error"), key("Expired pre-spawn reservation returned to Queue."));
+        persist(&path, &mapping, &body)
+    }
+
+    /// Hard upper bound on ambiguous queue phases. An incident is *not*
+    /// permission to replay a possibly-delivered prompt or discard an owner.
+    /// It is a durable, user-visible recovery state with exact identifiers.
+    pub fn flag_queue_recovery_required(
+        &self, root: &Path, id: &str, queue_request: &str,
+        state: QueueState, request_id: &str, reason: &str,
+    ) -> Result<ExecutionIntent, TaskStoreError> {
+        if !matches!(state, QueueState::Queued | QueueState::Reserved | QueueState::Starting | QueueState::Working) {
+            return Err(TaskStoreError::Invalid("Only nonterminal queue phases can be escalated".into()));
+        }
+        let _lock = acquire_lock(root)?;
+        let path = find_task_path(root, id)?;
+        let (text, mut mapping, body) = load(&path)?;
+        let previous = intent(&mapping, &text)?;
+        if previous.mode != ExecutionMode::Queue ||
+            previous.queue_request.as_deref().unwrap_or("__missing__") != queue_request ||
+            previous.queue_state.unwrap_or(QueueState::Queued) != state ||
+            previous.queue_reservation_id.as_deref().unwrap_or("__missing__") != request_id {
+            return Err(TaskStoreError::Conflict(format!("{id}: recovery identity changed")));
+        }
+        let task = parse_task(&path, false, &text)?;
+        if task.completed.is_some() || task.archived {
+            return Err(TaskStoreError::Conflict(format!("{id}: task is terminal")));
+        }
+        mapping.insert(key("queue_state"), key("recovery_required"));
+        mapping.insert(key("queue_error"), key(&reason.chars().take(500).collect::<String>()));
+        let mut attention: Vec<TaskAttention> = mapping.get(key("attention"))
+            .map(|value| serde_yaml::from_value(value.clone())
+                .map_err(|error| TaskStoreError::Parse(error.to_string())))
+            .transpose()?.unwrap_or_default();
+        if !attention.contains(&TaskAttention::NeedsUser) {
+            attention.push(TaskAttention::NeedsUser);
+            mapping.insert(key("queue_recovery_attention_added"), serde_yaml::Value::Bool(true));
+        }
+        mapping.insert(key("attention"), serde_yaml::to_value(attention)
+            .map_err(|error| TaskStoreError::Parse(error.to_string()))?);
+        // Reuse the existing human Inbox instead of inventing a second queue
+        // error UI. A recovery decision is actionable and deliberately asks
+        // permission before a potentially duplicated remote execution.
+        let pending = task.question.as_ref().is_some_and(|q| q.answer.is_none());
+        if !pending {
+            let question = TaskQuestion {
+                request_type: Some("queue_recovery".into()),
+                prompt: format!("Queue recovery cannot prove whether the old session completed. {} The old prompt may still run. Retry creates a new execution and can duplicate work.", reason),
+                options: vec!["Retry anyway (may duplicate work)".into(), "Keep paused".into()],
+                answer: None,
+            };
+            mapping.insert(key("question"), serde_yaml::to_value(question)
+                .map_err(|error| TaskStoreError::Parse(error.to_string()))?);
+            mapping.insert(key("queue_recovery_question_added"), serde_yaml::Value::Bool(true));
+            let mut attention: Vec<TaskAttention> = mapping.get(key("attention"))
+                .map(|value| serde_yaml::from_value(value.clone())
+                    .map_err(|error| TaskStoreError::Parse(error.to_string())))
+                .transpose()?.unwrap_or_default();
+            if !attention.contains(&TaskAttention::Question) { attention.push(TaskAttention::Question); }
+            mapping.insert(key("attention"), serde_yaml::to_value(attention)
+                .map_err(|error| TaskStoreError::Parse(error.to_string()))?);
+        }
+        persist(&path, &mapping, &body)
+    }
+
+    /// Explicit operator resolution for an incident that cannot be proven
+    /// safe to retry automatically. A fresh queue_request prevents stale old
+    /// session acknowledgements from claiming the new attempt.
+    pub fn retry_queue_incident(
+        &self, root: &Path, id: &str, queue_request: &str, request_id: &str,
+        reason: &str,
+    ) -> Result<ExecutionIntent, TaskStoreError> {
+        let _lock = acquire_lock(root)?;
+        let path = find_task_path(root, id)?;
+        let (text, mut mapping, body) = load(&path)?;
+        let previous = intent(&mapping, &text)?;
+        if previous.mode != ExecutionMode::Queue ||
+            previous.queue_state != Some(QueueState::RecoveryRequired) ||
+            previous.queue_request.as_deref().unwrap_or("__missing__") != queue_request ||
+            previous.queue_reservation_id.as_deref().unwrap_or("__missing__") != request_id {
+            return Err(TaskStoreError::Conflict(format!("{id}: incident identity changed")));
+        }
+        let snapshot = self.load_unlocked(root)?;
+        let task = snapshot.tasks.iter().find(|task| task.id == id && !task.archived)
+            .ok_or_else(|| TaskStoreError::NotFound(id.into()))?;
+        if task.completed.is_some() || task.claimed_by.is_some() {
+            return Err(TaskStoreError::Conflict(format!("{id}: active claim/terminal task requires owner reconciliation")));
+        }
+        let mut attention: Vec<TaskAttention> = mapping.get(key("attention"))
+            .map(|value| serde_yaml::from_value(value.clone())
+                .map_err(|error| TaskStoreError::Parse(error.to_string())))
+            .transpose()?.unwrap_or_default();
+        if mapping.get(key("queue_recovery_attention_added")).and_then(|v| v.as_bool()) == Some(true) {
+            attention.retain(|flag| *flag != TaskAttention::NeedsUser);
+        }
+        mapping.insert(key("attention"), serde_yaml::to_value(attention)
+            .map_err(|error| TaskStoreError::Parse(error.to_string()))?);
+        mapping.remove(key("queue_recovery_attention_added"));
+        if mapping.get(key("queue_recovery_question_added")).and_then(|v| v.as_bool()) == Some(true) {
+            mapping.remove(key("question"));
+            let mut attention: Vec<TaskAttention> = mapping.get(key("attention"))
+                .map(|value| serde_yaml::from_value(value.clone())
+                    .map_err(|error| TaskStoreError::Parse(error.to_string())))
+                .transpose()?.unwrap_or_default();
+            attention.retain(|flag| *flag != TaskAttention::Question);
+            mapping.insert(key("attention"), serde_yaml::to_value(attention)
+                .map_err(|error| TaskStoreError::Parse(error.to_string()))?);
+        }
+        mapping.remove(key("queue_recovery_question_added"));
+        mapping.insert(key("queue_request"), key(&uuid::Uuid::new_v4().to_string()));
+        mapping.insert(key("queue_state"), key("queued"));
+        mapping.remove(key("queue_reservation_id"));
+        mapping.remove(key("queue_reservation_expires_at"));
+        mapping.remove(key("queue_session_id"));
+        mapping.insert(key("queue_error"), key(&format!("Operator retry: {}", reason).chars().take(500).collect::<String>()));
         persist(&path, &mapping, &body)
     }
 
