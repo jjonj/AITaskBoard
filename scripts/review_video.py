@@ -9,6 +9,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,34 @@ import time
 FALLBACK_FFMPEG = Path(r"B:\GDrive\Tools\06 Learning\subs2srs\Utils\ffmpeg\ffmpeg.exe")
 FLAGS = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
 LIMIT = 180
+
+
+def process_alive(pid: object) -> bool:
+    """Check a recorder/worker PID without requiring an optional pip package."""
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    if os.name == "nt":
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_process = kernel.OpenProcess
+        open_process.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
+        open_process.restype = ctypes.c_void_p
+        close = kernel.CloseHandle
+        close.argtypes = (ctypes.c_void_p,)
+        wait = kernel.WaitForSingleObject
+        wait.argtypes = (ctypes.c_void_p, ctypes.c_ulong)
+        wait.restype = ctypes.c_ulong
+        handle = open_process(0x00100000, 0, pid)  # SYNCHRONIZE
+        if not handle:
+            return False
+        try:
+            return wait(handle, 0) == 0x00000102  # WAIT_TIMEOUT
+        finally:
+            close(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
 
 
 def ffmpeg():
@@ -108,7 +137,23 @@ def start(args):
     if args.state.is_file():
         old = json.loads(args.state.read_text(encoding="utf-8"))
         if old.get("state") in ("starting", "recording"):
-            raise RuntimeError("Recording state still active; stop it first")
+            if process_alive(old.get("pid")):
+                raise RuntimeError("Recorder worker is still active; stop it first")
+            if process_alive(old.get("recorderPid")):
+                raise RuntimeError("Worker crashed but FFmpeg is still recording; wait for its bounded timeout, then retry")
+            # A crashed worker cannot leave this state locked forever. Preserve
+            # its state and possibly salvageable intermediate instead of
+            # silently overwriting the user's last captured evidence.
+            stamp = int(time.time())
+            previous = args.state.with_name(args.state.name + f".recovered-{stamp}.json")
+            args.state.replace(previous)
+            old_raw = Path(old.get("raw", ""))
+            if old_raw.is_file() and old_raw.stat().st_size:
+                recovered = old_raw.with_name(old_raw.stem + f".recovered-{stamp}" + old_raw.suffix)
+                old_raw.replace(recovered)
+                print(f"Recovered stale recorder state: {previous}; preserved raw: {recovered}", file=sys.stderr)
+            else:
+                print(f"Recovered stale recorder state: {previous}", file=sys.stderr)
     args.state.with_suffix(".stop").unlink(missing_ok=True)
     cmd = [sys.executable, "-B", str(Path(__file__).resolve()), "_worker",
            "--state", str(args.state), "--raw", str(args.raw.resolve()),
@@ -143,6 +188,8 @@ def stop(args):
     state.with_suffix(".stop").write_text("stop", encoding="ascii")
     for _ in range(120):
         current = json.loads(state.read_text(encoding="utf-8"))
+        if current["state"] in ("starting", "recording") and not process_alive(current.get("pid")):
+            raise RuntimeError("Recorder worker crashed before finalizing. The raw Matroska may still be recoverable; rerun 'start' after the FFmpeg process has exited.")
         if current["state"] in ("done", "failed"):
             print(json.dumps(current))
             if current["state"] == "failed":

@@ -118,3 +118,8 @@ Ran the **unchanged production** OmniHub remote proxy module scripts/gateway-rem
 ### Wartribes Dashboard runtime range check
 
 Ran D:/Wartribes/Tools/gateway_web.py on an isolated temporary loopback port 18768 (did not restart the user's active WT web tool), tested published WT-0017 video hash 00a66f73e33d938a8cd4a64b177f5c2c3f500c366ab91c6698f6d84f5ba37f5a.mp4: GET Range bytes=0-4095 returned HTTP **206**, Content-Range bytes 0-4095/262195 and exactly 4096 bytes; Dashboard HTML returned HTTP 200. Temporary server was shut down after validation. This confirms the source-backed Dashboard media transport, not subjective user approval of appearance or physical Android playback.
+
+
+### Recorder crash recovery
+
+Generic scripts/review_video.py start/stop now checks the worker PID before waiting or rejecting a new session. If a prior worker died, it refuses to overwrite an **actively recording orphaned FFmpeg process**, but once both processes have exited it atomically preserves the stale .state.json as .recovered-TIMESTAMP.json and any nonempty raw Matroska as .recovered-TIMESTAMP.mkv before starting a new recording; no manual state deletion is required. Stop reports a crashed worker promptly rather than waiting for a result that will never arrive. Validation: E:/_AgentScratch/Tasks/Misc/MISC-0157/Validation/stale_capture_recovery.py used simulated crashed PIDs and interrupted raw bytes, verified both backups; real crash injection was **not** performed. PID validity check uses native Windows process handles without an optional Python dependency.
