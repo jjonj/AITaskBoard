@@ -3470,7 +3470,7 @@ Details: ${queueRecoveryWarning}`;
             className={`toolbar-toggle${hideWaitingTasks ? " on" : ""}`}
             aria-pressed={hideWaitingTasks}
             onClick={() => setHideWaitingTasks((value) => !value)}
-            title="Hide tasks that cannot start until prerequisites finish. Does not change their status.">
+            title="Hide dependency-waiting tasks, except those recently changed (blue highlight for 10 minutes). Does not change task status.">
             Hide waiting
           </button>}
           <div className="toolbar-icons" role="group" aria-label="Board actions">
@@ -3598,7 +3598,7 @@ Details: ${queueRecoveryWarning}`;
           const columnQueueMixed = queuedColumnCount > 0 && queuedColumnCount < eligibleColumnQueue.length;
           const columnTasks = orderCardsByDependencies(applyCardPlacements(allColumnTasks
             .filter((task) => !(column.id === "blocked" && hideBlockedInboxTasks && isInReviewInbox(task)))
-            .filter((task) => todaysWork || !hideWaitingTasks || taskFilters.readiness.includes("waiting") || isComplete(task.id) || task.column === "in-progress" || readinessOf(task) !== "waiting")
+            .filter((task) => todaysWork || !hideWaitingTasks || !!recentTaskActivity[task.id] || taskFilters.readiness.includes("waiting") || isComplete(task.id) || task.column === "in-progress" || readinessOf(task) !== "waiting")
             .sort((a, b) => column.terminal
               ? completedSortTime(b) - completedSortTime(a) || b.id.localeCompare(a.id)
               : attentionRank(a) - attentionRank(b) ||
