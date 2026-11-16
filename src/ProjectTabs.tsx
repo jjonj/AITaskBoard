@@ -715,17 +715,30 @@ export function ProjectTabs({ Board }: Props) {
   }, [catalog, working, dialogMode]);
 
   const active = catalog?.projects.find((project) => project.id === catalog.activeId);
+  const queueWorkloadTooltip = queueWorkloadError
+    ? "Cannot refresh Keep Busy backlog; previous count may be stale."
+    : globalQueueWorkload
+      ? [
+        `Expected T3 Keep Busy work: ${globalQueueWorkload.count}`,
+        `Ready now: ${globalQueueWorkload.readyNow} · Waiting for dependencies: ${globalQueueWorkload.dependencyWaiting}`,
+        "",
+        "By project (total · ready now · waiting):",
+        ...globalQueueWorkload.projects.map((project) =>
+          `${project.name}: ${project.count} · ${project.readyNow} · ${project.dependencyWaiting}`),
+        ...(globalQueueWorkload.unavailableBoards.length
+          ? ["", `Unavailable boards: ${globalQueueWorkload.unavailableBoards.join(", ")} (total is a minimum)`]
+          : []),
+        "",
+        "Excludes running, unqueued, human-waiting, technically blocked and completed tasks.",
+      ].join("\n")
+      : "Loading all project queues…";
   return (
     <div className="project-shell">
       {switchHint && <div className="project-switch-hint" role="status">Switching to {switchHint} · Ctrl+Tab</div>}
       <div className="project-tabs" ref={tabStrip} role="tablist" aria-label="Project task boards">
         <span className={`global-queue-workload${queueWorkloadError || globalQueueWorkload?.unavailableBoards.length ? " incomplete" : ""}`}
           aria-label={globalQueueWorkload ? `${globalQueueWorkload.count} queued tasks expected for T3 Keep Busy` : "Queued work count loading"}
-          title={queueWorkloadError
-            ? "Cannot refresh Keep Busy backlog; previous count may be stale."
-            : globalQueueWorkload
-              ? `Expected T3 Keep Busy work across all TaskBoards: ${globalQueueWorkload.count}\nReady now: ${globalQueueWorkload.readyNow}\nWaiting on queued or active prerequisites: ${globalQueueWorkload.dependencyWaiting}\nExcludes running, unqueued, human-waiting, technically blocked and completed work.${globalQueueWorkload.unavailableBoards.length ? `\nUnavailable boards: ${globalQueueWorkload.unavailableBoards.join(", ")} (count is a minimum)` : ""}`
-              : "Loading all project queues…"}>
+          title={queueWorkloadTooltip}>
           Queue <strong>{queueWorkloadError ? "?" : globalQueueWorkload
             ? `${globalQueueWorkload.unavailableBoards.length ? "≥" : ""}${globalQueueWorkload.count}`
             : "…"}</strong>

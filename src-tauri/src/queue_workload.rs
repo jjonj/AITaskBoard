@@ -10,7 +10,17 @@ pub(crate) struct QueueWorkload {
     pub count: usize,
     pub ready_now: usize,
     pub dependency_waiting: usize,
+    pub projects: Vec<ProjectWorkload>,
     pub unavailable_boards: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProjectWorkload {
+    pub name: String,
+    pub count: usize,
+    pub ready_now: usize,
+    pub dependency_waiting: usize,
 }
 
 struct WorkItem {
@@ -18,6 +28,7 @@ struct WorkItem {
     queued: bool,
     in_flight: bool,
     dependencies: Vec<String>,
+    project_index: usize,
 }
 
 fn key(root: &str, id: &str) -> String {
@@ -55,6 +66,7 @@ pub(crate) async fn read() -> Result<QueueWorkload, String> {
         let store = FsTaskStore::default();
         let mut all = HashMap::<String, WorkItem>::new();
         let mut unavailable_boards = Vec::new();
+        let mut project_workloads = Vec::<ProjectWorkload>::new();
         let mut seen = HashSet::new();
 
         for project in projects.projects {
@@ -64,11 +76,15 @@ pub(crate) async fn read() -> Result<QueueWorkload, String> {
                 Ok(board) => board,
                 Err(_) => { unavailable_boards.push(project.name); continue; }
             };
+            let project_index = project_workloads.len();
+            project_workloads.push(ProjectWorkload {
+                name: project.name, count: 0, ready_now: 0, dependency_waiting: 0,
+            });
             for task in &snapshot.tasks {
                 let id = key(&root, &task.id);
                 let done = task.archived || task.completed.is_some();
                 if done {
-                    all.insert(id, WorkItem { done: true, queued: false, in_flight: false, dependencies: vec![] });
+                    all.insert(id, WorkItem { done: true, queued: false, in_flight: false, dependencies: vec![], project_index });
                     continue;
                 }
                 if !matches!(task.kind, TaskKind::Task | TaskKind::Recurring) { continue; }
@@ -97,7 +113,7 @@ pub(crate) async fn read() -> Result<QueueWorkload, String> {
                     phase == QueueState::Queued && eligible_column &&
                     !human_waiting && !technical_block && task_core::recurring_due(task);
                 let dependencies = task.depends_on.iter().map(|dep| prerequisite_key(&root, dep)).collect();
-                all.insert(id, WorkItem { done: false, queued, in_flight, dependencies });
+                all.insert(id, WorkItem { done: false, queued, in_flight, dependencies, project_index });
             }
         }
 
@@ -109,13 +125,20 @@ pub(crate) async fn read() -> Result<QueueWorkload, String> {
             let mut visiting = HashSet::new();
             if eventually_executable(id, &all, &mut visiting, &mut memo) {
                 count += 1;
+                project_workloads[item.project_index].count += 1;
                 if item.dependencies.iter().all(|dependency| all.get(dependency).is_some_and(|dep| dep.done)) {
                     ready_now += 1;
+                    project_workloads[item.project_index].ready_now += 1;
                 }
             }
         }
+        for project in &mut project_workloads {
+            project.dependency_waiting = project.count - project.ready_now;
+        }
+        project_workloads.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
         Ok(QueueWorkload {
-            count, ready_now, dependency_waiting: count - ready_now, unavailable_boards,
+            count, ready_now, dependency_waiting: count - ready_now,
+            projects: project_workloads, unavailable_boards,
         })
     }).await.map_err(|error| format!("Global queue scan failed: {error}"))?
 }
