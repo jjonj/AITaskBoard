@@ -33,6 +33,10 @@ export type ReviewManifest = {
   implemented_by?: string; openrig_gate?: string;
   revision: string;
 };
+export type ReviewClose = {
+  task_id: string; note: string;
+  expected_task_revision: string; expected_manifest_revision: string;
+};
 export type ReviewResolution = {
   task_id: string; verdict: string; choices: string[];
   ranking: string[]; pins: ReviewPin[]; note: string;
@@ -45,6 +49,8 @@ export const reviewReconsider = (taskId: string, expectedTaskRevision: string, e
     task_id: taskId, expected_task_revision: expectedTaskRevision,
     expected_manifest_revision: expectedManifestRevision,
   } });
+export const reviewClose = (request: ReviewClose, path: string) =>
+  invoke<ReviewManifest>("review_close", { path, request });
 export const reviewResolve = (resolution: ReviewResolution, path: string) =>
   invoke<ReviewManifest>("review_resolve", { path, resolution });
 export const reviewAsset = (assetPath: string, path: string) =>

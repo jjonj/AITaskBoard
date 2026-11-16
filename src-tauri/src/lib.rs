@@ -17,7 +17,7 @@ use std::{fs, path::PathBuf, process::{Command, Stdio}, io::Write};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use task_core::{
     BoardConfig, BoardSnapshot, FsTaskStore, MutationActor, Task, TaskDraft, TaskIdReservation, TaskKind, TaskStore,
-    ReviewManifest, ReviewRequest, ReviewResolution, ReviewReconsider,
+    ReviewManifest, ReviewRequest, ReviewResolution, ReviewReconsider, ReviewClose,
     ReleaseSummary, ReleaseRecord, SourceRef, ExecutionIntent, ExecutionMode,
 };
 
@@ -311,6 +311,11 @@ fn review_request(path: Option<String>, request: ReviewRequest) -> Result<Review
 #[tauri::command]
 fn review_reconsider(path: Option<String>, request: ReviewReconsider) -> Result<ReviewManifest, String> {
     FsTaskStore::default().review_reconsider(&root(path), request).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn review_close(path: Option<String>, request: ReviewClose) -> Result<ReviewManifest, String> {
+    FsTaskStore::default().review_close(&root(path), request).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1037,6 +1042,7 @@ pub fn run() {
             review_show,
             review_request,
             review_reconsider,
+            review_close,
             review_resolve,
             review_asset,
             update_task,

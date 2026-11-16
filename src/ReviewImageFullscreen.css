@@ -75,6 +75,17 @@
 .review-video-playback > .review-media-missing {
   flex: none; color: #ffb8b8; font-size: 12px;
 }
+.review-selection-guide {
+  display: flex; flex: none; align-items: center; justify-content: space-between;
+  gap: 12px; padding: 8px 13px; font-size: 12px; line-height: 1.4;
+  background: #203749; border-top: 1px solid #537389; color: #e4eff8;
+}
+.review-selection-guide .button { font-size: 11px; padding: 5px 9px; white-space: nowrap; }
+.review-note-saved {
+  margin: 8px 0; padding: 9px 11px; border-radius: 6px;
+  border: 1px solid #4f8a69; background: #1b392e; color: #cbf3dc;
+  font-size: 12px; line-height: 1.5;
+}
 @media (max-width: 650px) {
   .review-image-fullscreen-header { padding: 6px 9px; gap: 7px; }
   .review-image-fullscreen-header span { display: none; }

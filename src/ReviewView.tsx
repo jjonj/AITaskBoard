@@ -3,7 +3,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { archiveTask, listProjects, loadBoard, openTaskSession, readLocalImage, saveTaskImage, taskSyncQueue, updateTask, type ProjectTab } from "./api";
-import { reviewAsset, reviewReconsider, reviewResolve, reviewShow,
+import { reviewAsset, reviewClose, reviewReconsider, reviewResolve, reviewShow,
   type ReviewArtifact, type ReviewManifest, type ReviewPin } from "./reviewApi";
 import type { Task } from "./types";
 import { isUserQueueEligible } from "./userQueueEligibility";
@@ -132,6 +132,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   const [ranking, setRanking] = useState<string[]>([]);
   const [pins, setPins] = useState<ReviewPin[]>([]);
   const [note, setNote] = useState("");
+  const [noteFeedback, setNoteFeedback] = useState("");
   const [pinMode, setPinMode] = useState(false);
   const [gameZoom, setGameZoom] = useState(false);
   const [onion, setOnion] = useState(false);
@@ -373,6 +374,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
 
   useEffect(() => {
     setError("");
+    setNoteFeedback("");
     setLoadedManifest(null);
     setAssets({});
     setHtmlDocuments({});
@@ -800,7 +802,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   const submit = async (verdict: string) => {
     // A rejected/more-variants round stays in an open conversation, but its
     // verdict is immutable. Only a NEW requested round can accept another send.
-    if (!reviewTask || !manifest || !round || saving || manifest.status === "resolved" || round.result) return;
+    if (!reviewTask || !manifest || !round || saving || manifest.status !== "open" || round.result) return;
     if (!reviewOutcomes(round.mode).some((option) => option.value === verdict)) {
       setError("Select a valid response outcome before submitting.");
       return;
@@ -830,10 +832,29 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       onUserTaskUpdated?.();
     });
   };
+  const closeReviewTask = () => {
+    if (!reviewTask || !manifest || !round || saving || manifest.status !== "open" || round.result) return;
+    const item = reviewTask;
+    const taskRevision = item.task.revision;
+    const manifestRevision = manifest.revision;
+    const message = note.trim();
+    submitInBackground(item, async () => {
+      const attachments = await attachInboxImages(item.task.id, item.path);
+      await reviewClose({
+        task_id: item.task.id,
+        note: [message, ...attachments].filter(Boolean).join("\n\n"),
+        expected_task_revision: taskRevision,
+        expected_manifest_revision: manifestRevision,
+      }, item.path);
+      await taskSyncQueue(item.task.id, item.path).catch(() => null);
+      onUserTaskUpdated?.();
+    });
+  };
   const submitNoteOnly = async () => {
     if (!reviewTask || !isVisualReview || !(note.trim() || inboxImages.length) || saving || resolved) return;
     setSaving(true);
     setError("");
+    setNoteFeedback("");
     try {
       const board = await loadBoard(reviewTask.path);
       const latest = board.tasks.find(task => task.id === reviewTask.task.id);
@@ -846,6 +867,8 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       }, reviewTask.path);
       setNote("");
       setInboxImages([]);
+      setNoteFeedback("Note saved to the task. The review is still open; select an outcome or Close task.");
+      onUserTaskUpdated?.();
       await refresh(); // The review remains open; the next verdict uses the updated task revision.
     } catch (cause) {
       setError(`Unable to submit note: ${String(cause)}`);
@@ -862,7 +885,8 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
     : round?.mode === "rank" ? "Submit ranking" : "Send markup";
   const labelOf = (id: string) => playable.find((artifact) => artifact.id === id)?.label || id;
   const awaitingNextRound = manifest?.status === "open" && !!round?.result;
-  const resolved = manifest?.status === "resolved" || !!round?.result;
+  const closedWithoutDecision = manifest?.status === "closed";
+  const resolved = manifest?.status !== "open" || !!round?.result;
   // Markup rounds still open in browse mode so scrolling/dragging an embedded
   // preview cannot accidentally create pins. Pin (P) explicitly enters annotation mode.
   const pinning = pinMode && !resolved;
@@ -1051,6 +1075,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       activeIndex={Math.min(mediaIndex, Math.max(0, playable.length - 1))}
       onFocusArtifact={setMediaIndex}
       onChooseArtifact={choose}
+      onClearRanking={() => setRanking([])}
       choice={choice}
       ranking={ranking}
       pins={pins}
@@ -1066,19 +1091,22 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       htmlFrameRef={htmlFrameRef}
       onIframeWidth={setIframeWidth}
       note={note}
-      setNote={setNote}
+      setNote={(value) => { setNote(value); setNoteFeedback(""); }}
+      noteFeedback={noteFeedback}
       saving={saving}
       outcome={responseOutcome}
       onOutcome={setResponseOutcome}
       onSkip={() => advance(undefined, true)}
       onSnooze={snoozeSelected}
       resolved={resolved}
+      closedWithoutDecision={closedWithoutDecision}
       awaitingNextRound={awaitingNextRound}
       error={backgroundError || error}
       primaryVerdict={primaryVerdict}
       primaryReady={primaryReady}
       submit={submit}
       onNoteOnly={submitNoteOnly}
+      onCloseTask={closeReviewTask}
       onBrowseFiles={() => void browseInboxFiles()}
       imagePreviews={inboxImagePreview}
       imageCount={inboxImages.length}

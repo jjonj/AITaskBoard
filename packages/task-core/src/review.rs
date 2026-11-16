@@ -89,6 +89,8 @@ pub struct ReviewManifest {
     pub archived_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt_prune_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_without_decision_at: Option<String>,
     #[serde(default)]
     pub revision: String,
 }
@@ -128,6 +130,15 @@ pub struct ReviewRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewReconsider {
     pub task_id: String,
+    pub expected_task_revision: String,
+    pub expected_manifest_revision: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewClose {
+    pub task_id: String,
+    #[serde(default)]
+    pub note: String,
     pub expected_task_revision: String,
     pub expected_manifest_revision: String,
 }
@@ -426,7 +437,7 @@ impl FsTaskStore {
             ReviewManifest { schema: 1, task_id: input.task_id.clone(),
                 status: "open".into(), current_round: 0, rounds: Vec::new(),
                 implemented_by: None, openrig_gate: None, archived_at: None,
-                receipt_prune_at: None, revision: String::new() }
+                receipt_prune_at: None, closed_without_decision_at: None, revision: String::new() }
         };
         ensure_expected(input.expected_manifest_revision.as_deref().unwrap_or(""),
             &manifest.revision, "review manifest")?;
@@ -454,6 +465,7 @@ impl FsTaskStore {
         });
         manifest.current_round = number;
         manifest.status = "open".into();
+        manifest.closed_without_decision_at = None;
         manifest.implemented_by = input.implemented_by.or(manifest.implemented_by);
         manifest.openrig_gate = input.openrig_gate.or(manifest.openrig_gate);
         task.review_status = Some("open".into());
@@ -506,6 +518,49 @@ impl FsTaskStore {
             request_type: None, prompt: next.judge.clone(), options: Vec::new(), answer: None,
         });
         manifest.rounds.push(next);
+        save_manifest(&file, &manifest)?;
+        persist_task_review(root, &task)?;
+        parse_manifest(&file)
+    }
+
+    /// Close an unwanted review and its underlying task without inventing a human verdict.
+    /// The latest round stays unanswered in history; this is neither approval nor rejection.
+    pub fn review_close(&self, root: &Path, input: ReviewClose) -> Result<ReviewManifest, TaskStoreError> {
+        let _lock = acquire_lock(root)?;
+        if !valid_id(&input.task_id) { return Err(TaskStoreError::Invalid("invalid review task ID".into())); }
+        let snapshot = self.load_unlocked(root)?;
+        let mut task = find_review_task(&snapshot, &input.task_id)?;
+        ensure_expected(&input.expected_task_revision, &task.revision, &task.id)?;
+        let file = manifest_file(root, &task.id);
+        let mut manifest = parse_manifest(&file)?;
+        ensure_expected(&input.expected_manifest_revision, &manifest.revision, "review manifest")?;
+        if manifest.status != "open" || manifest.rounds.last().is_none_or(|round| round.result.is_some()) {
+            return Err(TaskStoreError::Invalid("only an unanswered open review can be closed without a decision".into()));
+        }
+        if task.kind == TaskKind::Recurring {
+            return Err(TaskStoreError::Invalid("recurring tasks cannot be permanently closed from a review".into()));
+        }
+        let done = snapshot.config.columns.iter().find(|column| column.id == "done" && column.terminal)
+            .or_else(|| snapshot.config.columns.iter().find(|column| column.terminal))
+            .ok_or_else(|| TaskStoreError::Invalid("board has no terminal Done column".into()))?;
+        manifest.status = "closed".into();
+        manifest.closed_without_decision_at = Some(now());
+        task.review_status = Some("resolved".into()); // Preserves the closed review in Inbox history.
+        task.column = done.id.clone();
+        task.claimed_by = None;
+        task.question = None;
+        task.attention.retain(|flag| !matches!(flag,
+            TaskAttention::Question | TaskAttention::NeedsUser | TaskAttention::Blocked));
+        if !input.note.trim().is_empty() {
+            task.user_notes = [task.user_notes.trim(), input.note.trim()].into_iter()
+                .filter(|value| !value.is_empty()).collect::<Vec<_>>().join("\n\n");
+            if !task.attention.contains(&TaskAttention::UserNote) {
+                task.attention.push(TaskAttention::UserNote);
+            }
+        }
+        task.description = append_timeline(&task.description,
+            "Review closed without decision. Task moved to Done; no approval, rejection or ranking recorded.");
+        apply_completion_state(&snapshot.config, &mut task);
         save_manifest(&file, &manifest)?;
         persist_task_review(root, &task)?;
         parse_manifest(&file)
@@ -985,7 +1040,7 @@ mod video_retention_tests {
             schema: 1, task_id: "TEST-0001".into(), status: "open".into(),
             current_round: 2, rounds: vec![first.clone(), second],
             implemented_by: None, openrig_gate: None, archived_at: None,
-            receipt_prune_at: None, revision: String::new(),
+            receipt_prune_at: None, closed_without_decision_at: None, revision: String::new(),
         };
         let protected = protected_review_video_paths(&manifest, clock);
         assert!(protected.contains("approved.mp4"));

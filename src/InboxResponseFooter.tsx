@@ -32,6 +32,7 @@ type Props = {
   onReopen?: () => void;
   onUndoLast?: () => void;
   onNoteOnly?: () => void;
+  onCloseTask?: () => void;
   notePresent?: boolean;
   primaryLabel?: string;
   busy: boolean;
@@ -42,7 +43,7 @@ type Props = {
 
 export function InboxResponseFooter({
   mode, outcomes = [], onOutcome, onSkip, onSnooze, onSubmit,
-  onComplete, completeLabel = "Done", onReopen, onUndoLast, onNoteOnly, notePresent = false, primaryLabel,
+  onComplete, completeLabel = "Done", onReopen, onUndoLast, onNoteOnly, onCloseTask, notePresent = false, primaryLabel,
   busy, disabled = false, submitDisabled = false, summary,
 }: Props) {
   const [snooze, setSnooze] = useState<number>(24 * 60 * 60 * 1000);
@@ -66,12 +67,16 @@ export function InboxResponseFooter({
       {mode === "visual" ? <>
         {notePresent && onNoteOnly && <button className="button secondary" type="button"
           disabled={busy || disabled} onClick={onNoteOnly}
-          title="Send your note without approving or rejecting the pending review">Submit ↵</button>}
+          title="Save your note on the task; the review remains open">Save note only ↵</button>}
+        {onCloseTask && <button className="button secondary" type="button" disabled={busy || disabled}
+          onClick={onCloseTask} title="Move this task to Done without approving, rejecting, picking or ranking any review option">
+          Close task · no decision
+        </button>}
         {outcomes.map((option, index) => <button key={option.value}
           className={index === 0 ? "button primary" : "button secondary"} type="button"
           disabled={busy || disabled || (index === 0 && submitDisabled)}
           onClick={() => { onOutcome(option.value); onSubmit(option.value); }}
-          title={index === 0 && submitDisabled ? "Select a candidate or finish ranking first" : undefined}>
+          title={index === 0 && submitDisabled ? "Choose an option in the filmstrip, or rank every option first" : undefined}>
           {busy ? "Saving…" : index === 0 && primaryLabel ? primaryLabel : option.label}
           {index === 0 && notePresent ? " + note" : ""}
         </button>)}

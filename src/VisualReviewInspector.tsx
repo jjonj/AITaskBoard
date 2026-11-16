@@ -38,6 +38,7 @@ type Props = {
   activeIndex: number;
   onFocusArtifact: (index: number) => void;
   onChooseArtifact: (id: string) => void;
+  onClearRanking: () => void;
   choice: string;
   ranking: string[];
   pins: ReviewPin[];
@@ -59,12 +60,15 @@ type Props = {
   onSkip: () => void;
   onSnooze: (milliseconds: number) => void;
   resolved: boolean;
+  closedWithoutDecision: boolean;
   awaitingNextRound: boolean;
   error: string;
   primaryVerdict: string;
   primaryReady: boolean;
   submit: (verdict: string) => Promise<void>;
   onNoteOnly: () => Promise<void>;
+  onCloseTask: () => void;
+  noteFeedback: string;
   onBrowseFiles: () => void;
   imagePreviews: ReactNode;
   imageCount: number;
@@ -87,11 +91,11 @@ const isDashboard = (artifact: ReviewArtifact | undefined, boardPath: string) =>
 export function VisualReviewInspector(props: Props) {
   const {
     review, round, history, items, selectedKey, onSelectTask, onBack, onExitInbox, hasPreviousItem, queueThumbnails, queueModes, queueCounts, onOpenTask, onOpenSession, sessionOpening, onTogglePriority, priorityBusy, allBoards, showResolved,
-    onAllBoards, onShowResolved, playable, activeIndex, onFocusArtifact, onChooseArtifact,
+    onAllBoards, onShowResolved, playable, activeIndex, onFocusArtifact, onChooseArtifact, onClearRanking,
     choice, ranking, pins, setPins, pinning, onTogglePin, addPin, renderArtifact, remoteReviewUrl,
     posterOf, iframeWidth, htmlFrameRef, onIframeWidth, note, setNote, saving,
     outcome, onOutcome, onSkip, onSnooze,
-    resolved, awaitingNextRound, error, primaryVerdict, primaryReady, submit, onNoteOnly,
+    resolved, closedWithoutDecision, awaitingNextRound, error, primaryVerdict, primaryReady, submit, onNoteOnly, onCloseTask, noteFeedback,
     onBrowseFiles, imagePreviews, imageCount, onPaste, onDrop, onMoveToDraft, onArchive, onReconsider,
   } = props;
   const [feedbackExpanded, setFeedbackExpanded] = useState(true);
@@ -163,7 +167,9 @@ export function VisualReviewInspector(props: Props) {
   const pinCount = active ? pins.filter((pin) => pin.artifact === active.id).length : 0;
   const labelOf = (id: string) => playable.find((value) => value.id === id)?.label || id;
   const outcomeOptions = reviewOutcomes(round.mode);
-  const primaryIncomplete = outcome === primaryVerdict && !primaryReady;
+  // The primary action must not look actionable before a pick/full ranking,
+  // regardless of which verdict the user last hovered or selected.
+  const primaryIncomplete = !primaryReady;
 
   const closeImageFullscreen = () => {
     if (active?.kind === "video") {
@@ -568,6 +574,19 @@ export function VisualReviewInspector(props: Props) {
               }
             </>}
           </div>
+          {!focus && !resolved && (round.mode === "pick" || round.mode === "rank") &&
+            <div className="review-selection-guide" role="status">
+              {round.mode === "pick"
+                ? choice ? `Selected: ${labelOf(choice)}. Click another thumbnail to change it.`
+                  : "Pick an option: click its thumbnail below, then click Pick selected option."
+                : `Rank options: click thumbnails below in preference order (${ranking.length}/${playable.length}). ` +
+                  "Every option needs a rank; click an already-ranked thumbnail to remove it."}
+              {round.mode === "rank" && ranking.length > 0 &&
+                <button type="button" className="button secondary" disabled={saving}
+                  onClick={onClearRanking}>
+                  Clear ranking
+                </button>}
+            </div>}
           {!focus && <nav className="review-visual-filmstrip" ref={stripRef} aria-label="Review artifacts">
             {playable.map((artifact, index) => {
               const selected = index === activeIndex;
@@ -591,6 +610,9 @@ export function VisualReviewInspector(props: Props) {
               </button>;
             })}
           </nav>}
+          {!focus && closedWithoutDecision && <div className="review-reconsider" role="status">
+            Closed without a review decision. The task was moved to Done; no option was approved or rejected.
+          </div>}
           {!focus && awaitingNextRound && <div className="review-reconsider">
             <span>This round was {round.result?.verdict}. The decision is saved, but you can open a new round to change it without erasing history. Missing or moved previews do not prevent your decision.</span>
             <button type="button" className="button secondary" disabled={saving}
@@ -609,10 +631,12 @@ export function VisualReviewInspector(props: Props) {
             primaryLabel={round.mode === "approve" && review.task.column === "done" ? "Done" : undefined}
             notePresent={!!note.trim() || imageCount > 0}
             onNoteOnly={() => void onNoteOnly()}
+            onCloseTask={onCloseTask}
             busy={saving}
             disabled={resolved}
             submitDisabled={primaryIncomplete}
-            summary={resolved ? (awaitingNextRound ? "Awaiting another round" : "Review resolved")
+            summary={closedWithoutDecision ? "Closed without decision · Done"
+              : resolved ? (awaitingNextRound ? "Awaiting another round" : "Review resolved")
               : round.mode === "pick" ? (choice ? "Selected " + labelOf(choice) : "Select an option")
               : round.mode === "rank" ? ranking.length + "/" + playable.length + " ranked"
               : pinCount > 0 ? pinCount + " annotations" : "Inspect artwork and choose an outcome"}
@@ -648,6 +672,11 @@ export function VisualReviewInspector(props: Props) {
                 onChange={(event) => setNote(event.target.value)}
                 placeholder="Tell the agent what to keep or change." />
             </label>
+            {noteFeedback && <p className="review-note-saved" role="status">{noteFeedback}</p>}
+            {!!review.task.user_notes.trim() && <details className="review-visual-references" open={!!noteFeedback}>
+              <summary>Saved task notes</summary>
+              <InboxRichText task={review.task} text={review.task.user_notes} onError={setOpenError} />
+            </details>}
             <button type="button" className="button secondary inbox-attach-button"
               disabled={resolved} onClick={onBrowseFiles}>+ Images / local files…</button>
             {imagePreviews}
