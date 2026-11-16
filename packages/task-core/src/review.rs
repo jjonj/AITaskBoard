@@ -189,6 +189,23 @@ fn save_manifest(path: &Path, manifest: &ReviewManifest) -> Result<(), TaskStore
         .map_err(|e| TaskStoreError::Parse(e.to_string()))?;
     write_text_atomic(path, &(json + "\n"))
 }
+/// An explicit acceptance-contract marker, not a guess based on task title.
+fn requires_playable_video(criteria: &[String]) -> bool {
+    criteria.iter().any(|text|
+        text.trim_start().to_ascii_lowercase().starts_with("video required:"))
+}
+
+fn supplies_playable_video(artifacts: &[ReviewInputArtifact]) -> bool {
+    artifacts.iter().any(|item| {
+        let source = item.source.trim();
+        if source.starts_with("http://") || source.starts_with("https://") {
+            return false;
+        }
+        Path::new(source).extension().and_then(|ext| ext.to_str())
+            .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "mp4" | "webm"))
+    })
+}
+
 fn path_size(path: &Path) -> Result<u64, TaskStoreError> {
     if path.is_file() { return Ok(fs::metadata(path)?.len()); }
     if !path.is_dir() { return Err(TaskStoreError::NotFound(path.display().to_string())); }
@@ -410,6 +427,15 @@ impl FsTaskStore {
         let snapshot = self.load_unlocked(root)?;
         let mut task = find_review_task(&snapshot, &input.task_id)?;
         ensure_expected(input.expected_task_revision.as_deref().unwrap_or(""), &task.revision, &task.id)?;
+        // A required video must not silently turn into a five-frame gallery
+        // after a recording failure. The human can change the task's explicit
+        // acceptance requirement when they intentionally waive video.
+        if requires_playable_video(&task.acceptance_criteria)
+            && !supplies_playable_video(&input.artifacts) {
+            return Err(TaskStoreError::Invalid(
+                "This task requires playable video evidence (VIDEO REQUIRED: acceptance criterion).                  Attach an actual .mp4 or .webm to this review, or ask the human to waive the requirement.                  Still images and generic Dashboard links alone are insufficient.".into()
+            ));
+        }
         let mode = input.mode.as_str();
         if !matches!(mode, "pick" | "approve" | "rank" | "markup") {
             return Err(TaskStoreError::Invalid("review mode must be pick, approve, rank, or markup".into()));
@@ -502,6 +528,13 @@ impl FsTaskStore {
         if !prior.result.as_ref().is_some_and(|result|
             result.verdict == "rejected" || result.verdict == "more-variants") {
             return Err(TaskStoreError::Invalid("only a rejected or more-variants round can be reconsidered".into()));
+        }
+        if requires_playable_video(&task.acceptance_criteria)
+            && !prior.artifacts.iter().any(|artifact|
+                artifact.kind == "video" && !artifact.pruned) {
+            return Err(TaskStoreError::Invalid(
+                "Cannot reconsider a still-only round: VIDEO REQUIRED. Submit a new round with real .mp4/.webm evidence or ask the human to waive the requirement.".into()
+            ));
         }
         let mut next = prior.clone();
         next.number = manifest.current_round + 1;
@@ -1002,6 +1035,22 @@ impl FsTaskStore {
 #[cfg(test)]
 mod video_retention_tests {
     use super::*;
+
+    #[test]
+    fn explicitly_required_video_rejects_stills_and_generic_links() {
+        assert!(requires_playable_video(&["VIDEO REQUIRED: animated gait".to_string()]));
+        assert!(!requires_playable_video(&["Video is optional".to_string()]));
+        let input = |source: &str| ReviewInputArtifact {
+            source: source.into(), label: "evidence".into(),
+        };
+        assert!(!supplies_playable_video(&[
+            input("C:/still.png"), input("https://localhost/dashboard?task=WT-0659"),
+            input("https://server/path/video.mp4"),
+        ]));
+        assert!(supplies_playable_video(&[
+            input("D:/Wartribes/Saved/ReviewEvidence/boar.MP4"),
+        ]));
+    }
 
     fn video(id: &str, path: &str) -> ReviewArtifact {
         ReviewArtifact {
