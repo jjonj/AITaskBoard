@@ -41,7 +41,9 @@ def source(board: str, task: str, round_num: int, artifact_id: str, poster: bool
     entry = next((a for a in round_data["artifacts"] if a["id"] == artifact_id), None)
     if entry is None:
         raise FileNotFoundError("Review artifact was removed")
-    if entry.get("pruned"):
+    # Pruning an answered review video retires the clip, not its thumbnail.
+    # The poster remains addressable for Inbox history and remote Android.
+    if entry.get("pruned") and (not poster or entry.get("kind") != "video"):
         raise FileNotFoundError("Review media was pruned")
     raw = entry.get("poster") if poster else entry["path"]
     if not raw:

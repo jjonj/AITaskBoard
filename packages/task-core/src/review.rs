@@ -4,6 +4,7 @@ use super::*;
 use chrono::SecondsFormat;
 
 const MAX_SYNC_FILE: u64 = 25 * 1024 * 1024;
+const TEMP_REVIEW_VIDEO_RETENTION_DAYS: i64 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewArtifact {
@@ -614,6 +615,40 @@ fn media_path(root: &Path, value: &str) -> PathBuf {
 fn timestamp(value: &str) -> Option<chrono::DateTime<Utc>> {
     chrono::DateTime::parse_from_rfc3339(value).ok().map(|time| time.with_timezone(&Utc))
 }
+/// Video copies in a pending round, or selected as the review's deliverable,
+/// are not temporary recordings. Also protects shared media across reconsidered
+/// rounds which reuse the same artifact path.
+fn protected_review_video_paths(manifest: &ReviewManifest, clock: chrono::DateTime<Utc>) -> HashSet<String> {
+    let mut paths = HashSet::new();
+    for round in &manifest.rounds {
+        let selected: HashSet<&str> = match round.result.as_ref() {
+            None => HashSet::new(),
+            Some(result) if result.verdict == "ranked" =>
+                result.ranking.iter().take(round.top_k).map(String::as_str).collect(),
+            Some(result) if matches!(result.verdict.as_str(), "picked" | "approved") =>
+                result.choices.iter().map(String::as_str).collect(),
+            // Markup is feedback on a temporary recording, not approval.
+            Some(_) => HashSet::new(),
+        };
+        for artifact in &round.artifacts {
+            if artifact.kind == "video" &&
+                (!review_video_due(round, clock) || selected.contains(artifact.id.as_str())) {
+                paths.insert(artifact.path.clone());
+            }
+        }
+    }
+    paths
+}
+
+/// Temporary review videos expire three days after an explicit human verdict.
+/// A pending or unanswered round is never a deletion deadline.
+fn review_video_due(round: &ReviewRound, clock: chrono::DateTime<Utc>) -> bool {
+    round.result.as_ref()
+        .and_then(|answer| timestamp(&answer.resolved_at))
+        .is_some_and(|answered_at|
+            answered_at + ChronoDuration::days(TEMP_REVIEW_VIDEO_RETENTION_DAYS) <= clock)
+}
+
 fn move_to_recycle(path: &Path) -> Result<(), TaskStoreError> {
     if !path.exists() { return Ok(()); }
     #[cfg(windows)]
@@ -791,10 +826,14 @@ impl FsTaskStore {
                     }
                 }
             }
+            let protected_videos = protected_review_video_paths(&manifest, clock);
             for round in &mut manifest.rounds {
                 let eligible = task_archived || round.loser_prune_at.as_deref()
                     .and_then(timestamp).is_some_and(|time| time <= clock);
-                if !eligible { continue; }
+                // Video is governed by the answer time, never archival or the
+                // ordinary 48h loser timer. Unanswered clips remain available.
+                let video_due = review_video_due(round, clock);
+                if !eligible && !video_due { continue; }
                 let chosen: HashSet<String> = if task_archived { HashSet::new() }
                 else if let Some(verdict) = &round.result {
                     if round.number != manifest.current_round { HashSet::new() }
@@ -807,8 +846,19 @@ impl FsTaskStore {
                     } else { HashSet::new() }
                 } else { HashSet::new() };
                 for artifact in &mut round.artifacts {
-                    if artifact.pruned || (!task_archived && chosen.contains(artifact.id.as_str())) { continue; }
-                    for raw in [Some(artifact.path.as_str()), artifact.poster.as_deref()].into_iter().flatten() {
+                    if artifact.pruned { continue; }
+                    if artifact.kind == "video" {
+                        if !video_due || protected_videos.contains(&artifact.path) { continue; }
+                    } else if !eligible || (!task_archived && chosen.contains(artifact.id.as_str())) {
+                        continue;
+                    }
+                    // Keep posters, verdicts and manifest entries after video
+                    // expiration. Only the temporary review MP4/WebM is recycled.
+                    let poster_to_recycle = if artifact.kind == "video" {
+                        None
+                    } else { artifact.poster.as_deref() };
+                    let mut refused_external_path = false;
+                    for raw in [Some(artifact.path.as_str()), poster_to_recycle].into_iter().flatten() {
                         if artifact.storage == "url" && raw == artifact.path { continue; }
                         let path = media_path(root, raw);
                         if !path.exists() { continue; }
@@ -820,9 +870,14 @@ impl FsTaskStore {
                                 .and_then(|cache| cache.parent().and_then(|p| p.canonicalize().ok()))
                                 .is_some_and(|cache| canonical.starts_with(cache))
                         });
-                        if !allowed { result.warnings.push(format!("Unsafe review path not pruned: {}", path.display())); continue; }
+                        if !allowed {
+                            result.warnings.push(format!("Unsafe review path not pruned: {}", path.display()));
+                            refused_external_path = true;
+                            continue;
+                        }
                         result.actions.push(ReviewGcItem { path: path.display().to_string(),
-                            reason: if task_archived { "implementing task archived" }
+                            reason: if artifact.kind == "video" { "temporary video: 72h after answered review" }
+                                else if task_archived { "implementing task archived" }
                                 else { "48h loser / superseded round" }.into(),
                             action: "recycle".into() });
                         if !dry_run {
@@ -830,7 +885,9 @@ impl FsTaskStore {
                             gc_log.push(format!("{}\trecycle\t{}\treview media prune", now(), path.display()));
                         }
                     }
-                    if !dry_run { artifact.pruned = true; changed = true; }
+                    // An external original was deliberately preserved; do not
+                    // falsely mark the corresponding review entry as removed.
+                    if !dry_run && !refused_external_path { artifact.pruned = true; changed = true; }
                 }
             }
             if task_archived {
@@ -883,5 +940,77 @@ impl FsTaskStore {
             for line in gc_log { writeln!(file, "{line}")?; }
         }
         Ok(result)
+    }
+}
+
+
+#[cfg(test)]
+mod video_retention_tests {
+    use super::*;
+
+    fn video(id: &str, path: &str) -> ReviewArtifact {
+        ReviewArtifact {
+            id: id.into(), label: id.into(), kind: "video".into(),
+            storage: "synced".into(), path: path.into(), pruned: false,
+            poster: Some(format!("Reviews/TEST-0001/r1/{id}.poster.webp")),
+        }
+    }
+
+    #[test]
+    fn answered_video_waits_three_days_and_preserves_pending_or_approved_media() {
+        let clock = Utc::now();
+        let answered_at = clock - ChronoDuration::days(3);
+        let mut first = ReviewRound {
+            number: 1, mode: "approve".into(), judge: "Motion".into(),
+            criteria: vec![], artifacts: vec![
+                video("A", "approved.mp4"), video("B", "revision.mp4"),
+            ],
+            references: vec![], previous: None, top_k: 1,
+            requested_at: now(),
+            result: Some(ReviewVerdict {
+                verdict: "approved".into(), choices: vec!["A".into()],
+                ranking: vec![], pins: vec![], note: String::new(),
+                resolved_at: answered_at.to_rfc3339(),
+            }),
+            loser_prune_at: None,
+        };
+        assert!(!review_video_due(&first, clock - ChronoDuration::seconds(1)));
+        assert!(review_video_due(&first, clock));
+
+        let second = ReviewRound {
+            number: 2, result: None, artifacts: vec![video("B", "revision.mp4")],
+            ..first.clone()
+        };
+        let mut manifest = ReviewManifest {
+            schema: 1, task_id: "TEST-0001".into(), status: "open".into(),
+            current_round: 2, rounds: vec![first.clone(), second],
+            implemented_by: None, openrig_gate: None, archived_at: None,
+            receipt_prune_at: None, revision: String::new(),
+        };
+        let protected = protected_review_video_paths(&manifest, clock);
+        assert!(protected.contains("approved.mp4"));
+        assert!(protected.contains("revision.mp4")); // reused by unanswered round
+        assert!(!review_video_due(&manifest.rounds[1], clock));
+
+        first.result.as_mut().unwrap().verdict = "rejected".into();
+        first.result.as_mut().unwrap().choices.clear();
+        manifest.rounds[0] = first;
+        manifest.rounds.pop(); // no remaining open round referencing the video
+        assert!(protected_review_video_paths(&manifest, clock).is_empty());
+
+        // A later rejected round that reused the same file also gets its own
+        // full 72 hours, even when an earlier rejected round is long overdue.
+        let recent = ReviewRound {
+            number: 2,
+            result: Some(ReviewVerdict {
+                verdict: "rejected".into(), choices: vec![], ranking: vec![],
+                pins: vec![], note: String::new(),
+                resolved_at: (clock - ChronoDuration::days(1)).to_rfc3339(),
+            }),
+            artifacts: vec![video("B", "revision.mp4")],
+            ..manifest.rounds[0].clone()
+        };
+        manifest.rounds.push(recent);
+        assert!(protected_review_video_paths(&manifest, clock).contains("revision.mp4"));
     }
 }
