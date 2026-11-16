@@ -1,3 +1,28 @@
+/* Constant-width, always-visible global T3 Keep Busy workload count. */
+.global-queue-workload {
+  position: sticky;
+  left: 0;
+  z-index: 6;
+  align-self: center;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 5px 10px;
+  margin-right: 8px;
+  border: 1px solid #365d57;
+  border-radius: 7px;
+  background: #142826;
+  box-shadow: 6px 0 10px #0c1118;
+  color: #a0cebf;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: help;
+}
+.global-queue-workload strong { color: #c3f2d7; font-size: 14px; font-variant-numeric: tabular-nums; }
+.global-queue-workload.incomplete { border-color: #755937; color: #e3bf88; }
+.global-queue-workload.incomplete strong { color: #f6d29b; }
+
 /* Project tab reordering: a precise insertion edge instead of an ambiguous full-tab target. */
 .project-tab-wrapper {
   position: relative;

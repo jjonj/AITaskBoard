@@ -8,6 +8,7 @@ mod agent_policy;
 mod preparation;
 mod task_agent;
 mod queue_bridge;
+mod queue_workload;
 mod busy_recovery;
 mod error_log;
 mod restart_warning;
@@ -116,6 +117,11 @@ async fn task_queue_overview(path: Option<String>) -> Result<serde_json::Value, 
 #[tauri::command]
 async fn task_queue_capacity() -> Result<serde_json::Value, String> {
     queue_bridge::capacity().await
+}
+
+#[tauri::command]
+async fn task_queue_workload() -> Result<queue_workload::QueueWorkload, String> {
+    queue_workload::read().await
 }
 
 #[tauri::command]
@@ -1013,6 +1019,7 @@ pub fn run() {
             task_sync_queue,
             task_queue_overview,
             task_queue_capacity,
+            task_queue_workload,
             task_busy_recovery_status,
             task_queue_reprioritize,
             task_queue_move,

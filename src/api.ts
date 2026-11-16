@@ -151,6 +151,10 @@ export type QueueCapacity = {
 };
 export const taskQueueCapacity = () =>
   invoke<QueueCapacity>("task_queue_capacity");
+
+export type QueueWorkload = { count: number; readyNow: number; dependencyWaiting: number; unavailableBoards: string[] };
+/** Global estimate of remaining T3 Keep Busy pickup work, including queued dependency chains. */
+export const taskQueueWorkload = () => invoke<QueueWorkload>("task_queue_workload");
 export const taskQueueReprioritize = (id: string, expectedQitem: string,
   priority: "routine" | "urgent" | "critical", path?: string) =>
   invoke<QueueSyncResult>("task_queue_reprioritize", { path, id, expectedQitem, priority });

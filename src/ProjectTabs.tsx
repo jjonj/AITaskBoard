@@ -3,8 +3,8 @@ import "./ProjectTabs.css";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { activateProject, addProject, boardChangeTokens, listProjects, loadBoard, moveTaskBetweenProjects, removeProject, reorderProjects, restoreProject, saveBoardConfig, setProjectFolders, showMainWindow, userQueueProjectIds } from "./api";
-import type { ProjectCatalog, ProjectPriority, ProjectTab } from "./api";
+import { activateProject, addProject, boardChangeTokens, listProjects, loadBoard, moveTaskBetweenProjects, removeProject, reorderProjects, restoreProject, saveBoardConfig, setProjectFolders, showMainWindow, userQueueProjectIds, taskQueueWorkload } from "./api";
+import type { ProjectCatalog, ProjectPriority, ProjectTab, QueueWorkload } from "./api";
 import type { BoardConfig, BoardSnapshot } from "./types";
 
 type Props = {
@@ -157,6 +157,36 @@ export function ProjectTabs({ Board }: Props) {
   const knownBoardTokens = useRef<Record<string, string>>({});
   const manualRefreshPending = useRef(false);
   const [refreshingAll, setRefreshingAll] = useState(false);
+  const [globalQueueWorkload, setGlobalQueueWorkload] = useState<QueueWorkload | null>(null);
+  const [queueWorkloadError, setQueueWorkloadError] = useState(false);
+
+  // T3 Keep Busy backlog is global, independent of the selected project tab.
+  useEffect(() => {
+    let canceled = false;
+    let running = false;
+    const sync = async () => {
+      if (running) return;
+      running = true;
+      try {
+        const value = await taskQueueWorkload();
+        if (!canceled) { setGlobalQueueWorkload(value); setQueueWorkloadError(false); }
+      } catch {
+        if (!canceled) setQueueWorkloadError(true);
+      } finally { running = false; }
+    };
+    void sync();
+    const interval = window.setInterval(() => void sync(), 30000);
+    window.addEventListener("focus", sync);
+    window.addEventListener("taskboard:queue-changed", sync);
+    window.addEventListener("taskboard:refresh-board", sync);
+    return () => {
+      canceled = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", sync);
+      window.removeEventListener("taskboard:queue-changed", sync);
+      window.removeEventListener("taskboard:refresh-board", sync);
+    };
+  }, []);
 
   useEffect(() => {
     if (working || locked || dialogMode) return;
@@ -689,6 +719,17 @@ export function ProjectTabs({ Board }: Props) {
     <div className="project-shell">
       {switchHint && <div className="project-switch-hint" role="status">Switching to {switchHint} · Ctrl+Tab</div>}
       <div className="project-tabs" ref={tabStrip} role="tablist" aria-label="Project task boards">
+        <span className={`global-queue-workload${queueWorkloadError || globalQueueWorkload?.unavailableBoards.length ? " incomplete" : ""}`}
+          aria-label={globalQueueWorkload ? `${globalQueueWorkload.count} queued tasks expected for T3 Keep Busy` : "Queued work count loading"}
+          title={queueWorkloadError
+            ? "Cannot refresh Keep Busy backlog; previous count may be stale."
+            : globalQueueWorkload
+              ? `Expected T3 Keep Busy work across all TaskBoards: ${globalQueueWorkload.count}\nReady now: ${globalQueueWorkload.readyNow}\nWaiting on queued or active prerequisites: ${globalQueueWorkload.dependencyWaiting}\nExcludes running, unqueued, human-waiting, technically blocked and completed work.${globalQueueWorkload.unavailableBoards.length ? `\nUnavailable boards: ${globalQueueWorkload.unavailableBoards.join(", ")} (count is a minimum)` : ""}`
+              : "Loading all project queues…"}>
+          Queue <strong>{queueWorkloadError ? "?" : globalQueueWorkload
+            ? `${globalQueueWorkload.unavailableBoards.length ? "≥" : ""}${globalQueueWorkload.count}`
+            : "…"}</strong>
+        </span>
         {catalog?.projects.map((project) => (
           <div className={`project-tab-wrapper ${project.id === catalog.activeId ? "selected" : ""} ${changedProjects[project.id] ? "changed" : ""} ${draggingTab === project.id ? "project-tab-being-dragged" : ""} ${dropTab?.id === project.id && draggingTab !== project.id ? (dropTab.after ? "project-tab-insert-after" : "project-tab-insert-before") : ""}`}
             key={project.id}
