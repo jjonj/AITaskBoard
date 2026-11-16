@@ -1,0 +1,15 @@
+/* Search sections match the main board search: current project before other boards. */
+.task-link-group-heading {
+  margin: 2px 4px 3px;
+  padding: 4px 5px;
+  color: #94a8bd;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.task-link-group-heading.cross-board {
+  margin-top: 6px;
+  padding-top: 9px;
+  border-top: 1px solid #3b5268;
+}

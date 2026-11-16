@@ -1,5 +1,6 @@
-import { useId, useMemo, useState } from "react";
+import { Fragment, useId, useMemo, useState } from "react";
 import type { Task } from "./types";
+import "./TaskLinkPicker.css";
 
 type Props = {
   label: string;
@@ -46,8 +47,16 @@ export function TaskLinkPicker({ label, values, onChange, tasks, excludeId, allo
       .sort((a, b) => a.rank - b.rank ||
         Number(a.task.archived) - Number(b.task.archived) ||
         a.task.id.localeCompare(b.task.id));
-    return ranked.slice(0, 8).map(({ task }) => task);
+    // Local IDs are plain task IDs; cross-board links use <board path>#<task ID>.
+    // Reserve a few result slots for other boards without letting them outrank locals.
+    const local = ranked.filter(({ task }) => !task.id.includes("#"));
+    const remote = ranked.filter(({ task }) => task.id.includes("#"));
+    const localLimit = remote.length ? 5 : 8;
+    const selectedLocal = local.slice(0, localLimit);
+    return [...selectedLocal, ...remote.slice(0, 8 - selectedLocal.length)]
+      .map(({ task }) => task);
   }, [tasks, values, excludeId, allowEpics, needle]);
+  const localMatchCount = matches.filter((task) => !task.id.includes("#")).length;
 
   const select = (id: string) => {
     if (!values.includes(id)) onChange([...values, id]);
@@ -118,19 +127,27 @@ export function TaskLinkPicker({ label, values, onChange, tasks, excludeId, allo
         </div>
         {focused && needle && (
           <div className="task-link-results" id={resultsId} role="listbox" aria-label={label}>
-            {matches.length ? matches.map((task, index) => (
-              <button type="button" role="option" key={task.id}
-                id={`${resultsId}-${task.id}`}
-                aria-selected={index === highlighted}
-                className={`task-link-result ${index === highlighted ? "highlighted" : ""}`}
-                onMouseEnter={() => setHighlighted(index)}
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => select(task.id)}>
-                <span className="task-link-result-id">{prettyId(task.id)}</span>
-                <span className="task-link-result-title">{task.title}</span>
-                {task.archived && <span className="task-link-result-archived">Archived</span>}
-              </button>
-            )) : <div className="task-link-empty">No matching tasks</div>}
+            {matches.length ? <>
+              {localMatchCount > 0 && <div className="task-link-group-heading">This board</div>}
+              {matches.map((task, index) => (
+                <Fragment key={task.id}>
+                  {index === localMatchCount && <div className={`task-link-group-heading${localMatchCount ? " cross-board" : ""}`}>
+                    Other project boards
+                  </div>}
+                  <button type="button" role="option"
+                    id={`${resultsId}-${task.id}`}
+                    aria-selected={index === highlighted}
+                    className={`task-link-result ${index === highlighted ? "highlighted" : ""}`}
+                    onMouseEnter={() => setHighlighted(index)}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => select(task.id)}>
+                    <span className="task-link-result-id">{prettyId(task.id)}</span>
+                    <span className="task-link-result-title">{task.title}</span>
+                    {task.archived && <span className="task-link-result-archived">Archived</span>}
+                  </button>
+                </Fragment>
+              ))}
+            </> : <div className="task-link-empty">No matching tasks</div>}
           </div>
         )}
       </div>
