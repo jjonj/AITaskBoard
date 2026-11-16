@@ -4101,7 +4101,9 @@ body.card-dragging .project-tab-wrapper:not(.selected):hover {
    evidence instead of occupying persistent left/right rails beside it. */
 .review-visual-body.dashboard-review {
   grid-template-columns: minmax(210px,260px) minmax(0,1fr) minmax(285px,345px);
-  grid-template-rows: minmax(0, calc(var(--dashboard-controls-height, 176px) - 56px)) 56px 10px minmax(0,1fr);
+  /* Let the action row grow when buttons wrap; a fixed 56px track hid
+     approve/reject actions beneath the evidence viewer. */
+  grid-template-rows: minmax(0, calc(var(--dashboard-controls-height, 176px) - 56px)) max-content 10px minmax(0,1fr);
 }
 .review-visual-body.dashboard-review > .review-queue {
   grid-area: 1 / 1 / 3 / 2;
@@ -4178,7 +4180,11 @@ body.card-dragging .project-tab-wrapper:not(.selected):hover {
   padding:5px 10px;
   min-height:0;
   gap:6px;
-  overflow:hidden;
+  align-content:center;
+}
+.review-visual-body.dashboard-review .inbox-response-right {
+  flex-wrap:wrap;
+  justify-content:flex-end;
 }
 .review-visual-body.dashboard-review .inbox-response-footer .button {
   min-height:30px;
@@ -4275,7 +4281,7 @@ body.card-dragging .project-tab-wrapper:not(.selected):hover {
   .review-visual-body:not(.dashboard-review),
   .review-visual-body.dashboard-review {grid-template-columns:minmax(0,1fr);}
   .review-visual-body > .review-queue {display:none;}
-  .review-visual-body.dashboard-review {grid-template-rows:minmax(0, calc(var(--dashboard-controls-height, 176px) - 82px)) 82px 10px minmax(0,1fr);}
+  .review-visual-body.dashboard-review {grid-template-rows:minmax(0, calc(var(--dashboard-controls-height, 176px) - 82px)) max-content 10px minmax(0,1fr);}
   .review-visual-body.dashboard-review .review-visual-toolbar {grid-area:1 / 1 / 2 / 2;}
   .review-visual-body.dashboard-review .inbox-response-footer {grid-area:2 / 1 / 3 / 2;}
   .review-visual-body.dashboard-review .dashboard-review-resizer {grid-area:3 / 1 / 4 / 2;}
