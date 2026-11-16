@@ -1,14 +1,13 @@
 //! The only automatic TaskBoard recovery loop. Busy attempts enter a rotating
-//! FIFO; each inspection uses the same three-hour inactivity rule.
+//! FIFO; Starting uses 10 minutes, while other busy work uses three hours.
 use std::{collections::{HashMap, HashSet, VecDeque}, path::PathBuf, sync::{Mutex, OnceLock}, time::Duration};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
-use task_core::{ExecutionIntent, ExecutionMode, FsTaskStore, QueueState, TaskKind, TaskStore, BUSY_RECOVERY_IDLE_HOURS};
+use task_core::{busy_recovery_idle_threshold, ExecutionIntent, ExecutionMode, FsTaskStore, QueueState, TaskKind, TaskStore};
 
 const TICK: Duration = Duration::from_secs(20);
 const BATCH: usize = 8;
-const INACTIVITY: chrono::Duration = chrono::Duration::hours(BUSY_RECOVERY_IDLE_HOURS);
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct Key { root: PathBuf, task: String, attempt: String }
@@ -112,7 +111,7 @@ fn should_recover(row: &Busy, first_seen: Option<DateTime<Utc>>,
     // The in-memory FIFO's first observation is only a fallback. Restarting
     // TaskBoard must never reset the durable inactivity clock.
     let last = [row.last_change, observed].into_iter().flatten().max().or(first_seen);
-    last.is_some_and(|last| now.signed_duration_since(last) >= INACTIVITY)
+    last.is_some_and(|last| now.signed_duration_since(last) >= busy_recovery_idle_threshold(row.state))
 }
 
 #[derive(Clone, Default, Serialize)]
@@ -174,7 +173,8 @@ fn tick(fifo: &mut Fifo) -> Result<(), String> {
             row.intent.queue_state, row.intent.start_now_request.as_deref(), agent_activity) {
             Ok(_) => {
                 status().lock().unwrap_or_else(|e| e.into_inner()).last_action =
-                    Some(format!("{}: recovered after three idle hours",key.task));
+                    Some(format!("{}: recovered after {} idle",key.task,
+                        if row.state == Some(QueueState::Starting) { "10 minutes" } else { "three hours" }));
                 break; // Reread authoritative board state next tick.
             }
             Err(err) => {
@@ -230,13 +230,19 @@ mod tests {
         assert_eq!(fifo.next(3),vec![b.key.clone(),c.key.clone(),d.key.clone()]);
     }
     #[test]
-    fn same_three_hour_rule_applies_regardless_of_state() {
+    fn starting_uses_ten_minutes_while_other_busy_work_uses_three_hours() {
         let now=Utc::now();
-        for state in [QueueState::Reserved,QueueState::Starting,QueueState::Working,QueueState::Queued] {
+        let starting=work("starting",QueueState::Starting,11);
+        assert!(should_recover(&starting,Some(now),None,now));
+        assert!(!should_recover(&work("recent",QueueState::Starting,9),None,None,now));
+        assert!(!should_recover(&starting,None,
+            Some((now-chrono::Duration::minutes(5)).timestamp_millis()),now));
+        for state in [QueueState::Reserved,QueueState::Working,QueueState::Queued] {
             let row=work("any",state,181);
             assert!(should_recover(&row,Some(now),None,now),
                 "restart does not reset an already expired durable timestamp");
-            assert!(!should_recover(&row,Some(now-chrono::Duration::minutes(181)),
+            assert!(!should_recover(&work("recent",state,11),None,None,now));
+            assert!(!should_recover(&row,None,
                 Some((now-chrono::Duration::minutes(5)).timestamp_millis()),now));
         }
     }

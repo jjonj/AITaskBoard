@@ -474,7 +474,7 @@ impl FsTaskStore {
     }
 
     /// The single FIFO recovery operation for any busy task. Queue phases,
-    /// manually claimed tasks, and In Progress cards share one inactivity rule.
+    /// Starting uses 10 idle minutes; other claimed and in-progress work uses 3 hours.
     /// All identities and timestamps are rechecked under the board lock.
     pub fn recover_stale_busy_task(
         &self, root: &Path, id: &str, expected_owner: Option<&str>,
@@ -531,13 +531,15 @@ impl FsTaskStore {
             .filter(|at| *at <= now) {
             latest = Some(latest.map_or(at, |v| v.max(at)));
         }
-        if latest.is_none_or(|at| now.signed_duration_since(at) < chrono::Duration::hours(crate::BUSY_RECOVERY_IDLE_HOURS)) {
-            return Err(TaskStoreError::Conflict(format!("{id}: not inactive for three hours")));
+        let idle_threshold = crate::busy_recovery_idle_threshold(previous.queue_state);
+        let idle_label = if previous.queue_state == Some(QueueState::Starting) { "10 minutes" } else { "3 hours" };
+        if latest.is_none_or(|at| now.signed_duration_since(at) < idle_threshold) {
+            return Err(TaskStoreError::Conflict(format!("{id}: not inactive for {idle_label}")));
         }
         let previous_owner = task.claimed_by.clone().unwrap_or_else(|| "unassigned".into());
         release_to_original(&mut task, &snapshot.config, &existing)?;
         task.description = append_description_update(&task.description, "abandonment",
-            &format!("FIFO recovery: over 3 hours without activity (previous owner: {previous_owner}). Returned to {}.", task.column));
+            &format!("FIFO recovery: over {idle_label} without activity (previous owner: {previous_owner}). Returned to {}.", task.column));
         let rendered = stamp_activity(&render_with_claim_token(&task, &existing, None)?, None, true)?;
         let (yaml, body) = split_frontmatter(&rendered)?;
         let mut mapping: serde_yaml::Mapping = serde_yaml::from_str(&yaml)

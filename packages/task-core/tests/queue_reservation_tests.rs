@@ -443,7 +443,11 @@ fn timed_out_start_requeues_without_a_human_recovery_flag() {
         .collect::<Vec<_>>().join("\n")+"\n";
     std::fs::write(path, text).unwrap();
     let file=std::fs::OpenOptions::new().write(true).open(path).unwrap();
-    file.set_modified(std::time::SystemTime::now()-std::time::Duration::from_secs(4*3600)).unwrap();
+    file.set_modified(std::time::SystemTime::now()-std::time::Duration::from_secs(9*60)).unwrap();
+    assert!(store.recover_stale_busy_task(root, &task.id, None, Some(&request),
+        Some(&start), Some(QueueState::Starting), None, None).is_err(),
+        "starting must not recover before 10 minutes");
+    file.set_modified(std::time::SystemTime::now()-std::time::Duration::from_secs(11*60)).unwrap();
     assert!(store.recover_stale_busy_task(root, &task.id, None, Some(&request),
         Some(&start), Some(QueueState::Starting), None,
         Some(chrono::Utc::now().timestamp_millis())).is_err(),
@@ -458,6 +462,7 @@ fn timed_out_start_requeues_without_a_human_recovery_flag() {
     let card = store.load(root).unwrap().tasks.into_iter().find(|t|t.id==task.id).unwrap();
     assert!(card.question.is_none());
     assert!(!card.attention.contains(&task_core::TaskAttention::NeedsUser));
+    assert!(card.description.contains("FIFO recovery: over 10 minutes"));
 }
 
 #[test]
