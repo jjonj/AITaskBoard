@@ -102,7 +102,11 @@ export function InboxRichText({ task, text, className = "", onError }: Props) {
     <a key={key} href={href} className="inbox-resource-link"
       title={decodeLink(href) + "\nRight-click to copy link"}
       onClick={(event) => { event.preventDefault(); launch(href); }}
-      onContextMenu={(event) => showCopyMenu(event, copyableAddress(href, task))}>{label}</a>;
+      onContextMenu={(event) => {
+        const address = copyableAddress(href, task);
+        showCopyMenu(event, address, /^(?:[a-z]:[\\/]|\\\\)/i.test(address)
+          ? { fomniFile: address } : undefined);
+      }}>{label}</a>;
   // Convert bare local paths into anchors within their original sentence, never
   // detached chips. Explicit Markdown links are handled by the <a> renderer.
   const inlineText = (children: ReactNode) => Children.map(children, (child) => {

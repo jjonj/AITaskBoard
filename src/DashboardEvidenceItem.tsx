@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { openFileInFomni } from "./InboxRichText";
+import { useLinkCopyMenu } from "./LinkCopyMenu";
 import "./DashboardVideo.css";
 
 type DashboardItem = {
@@ -75,6 +76,7 @@ export function DashboardEvidenceItem({ address, selectedIndex, onSelectedIndexC
   const [items, setItems] = useState<DashboardItem[]>([]);
   const [railActive, setRailActive] = useState(0);
   const [error, setError] = useState("");
+  const { showCopyMenu, copyMenu } = useLinkCopyMenu(setError);
   const [loading, setLoading] = useState(false);
   const [mediaReady, setMediaReady] = useState(false);
   const [streamError, setStreamError] = useState("");
@@ -126,6 +128,10 @@ export function DashboardEvidenceItem({ address, selectedIndex, onSelectedIndexC
     onGalleryCountChange?.(items.length);
   }, [items.length, onGalleryCountChange]);
 
+  const showMediaMenu = (event: React.MouseEvent<HTMLElement>, item: DashboardItem) => {
+    if (!item.mediaPath) return;
+    showCopyMenu(event, item.mediaPath, { fomniFile: item.mediaPath });
+  };
   const openSource = (item: DashboardItem) => {
     if (!item.mediaPath) return;
     void openFileInFomni(item.mediaPath).catch(reason => setError(String(reason)));
@@ -200,7 +206,8 @@ export function DashboardEvidenceItem({ address, selectedIndex, onSelectedIndexC
     <div ref={railRef} className="dashboard-evidence-gallery"
       tabIndex={0} role="region" aria-label="Scrollable Wartribes Dashboard evidence"
       onScroll={syncRailPosition} onKeyDown={railKeyDown}>
-      {items.map((item, index) => <article className="dashboard-evidence-card" key={item.id}>
+      {items.map((item, index) => <article className="dashboard-evidence-card" key={item.id}
+        onContextMenu={(event) => showMediaMenu(event, item)}>
         {isVideo(item) ? <div className="dashboard-evidence-card-media">
           <DashboardMedia item={item} mediaReady={mediaReady} />
         </div> : <button type="button" className="dashboard-evidence-card-media"
@@ -247,7 +254,9 @@ export function DashboardEvidenceItem({ address, selectedIndex, onSelectedIndexC
                 title="Return to evidence gallery (Esc)" onClick={() => onSelectedIndexChange(null)}>✕ Close</button>
             </div>
           </header>
-          <div className="dashboard-lightbox-media"><DashboardMedia item={chosen} mediaReady={mediaReady} /></div>
+          <div className="dashboard-lightbox-media" onContextMenu={(event) => showMediaMenu(event, chosen)}>
+            <DashboardMedia item={chosen} mediaReady={mediaReady} />
+          </div>
           <footer className="dashboard-lightbox-caption">
             <div>
               {chosen.caption && <p>{chosen.caption}</p>}
@@ -261,5 +270,6 @@ export function DashboardEvidenceItem({ address, selectedIndex, onSelectedIndexC
       document.body,
     )}
     {(error || streamError) && <div className="error-banner" role="alert">{error || streamError}</div>}
+    {copyMenu}
   </section>;
 }

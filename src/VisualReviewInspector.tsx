@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type MouseEvent, type ReactNode, type CSSProperties, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type MouseEvent, type ReactNode, type RefObject, type CSSProperties, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import "./ReviewImageFullscreen.css";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -6,6 +6,7 @@ import type { ReviewArtifact, ReviewPin, ReviewRound } from "./reviewApi";
 import type { Task } from "./types";
 import { InboxResponseFooter, reviewOutcomes } from "./InboxResponseFooter";
 import { InboxRichText, openFileInFomni } from "./InboxRichText";
+import { highlightInFomni } from "./api";
 import { InboxQueueSidebar } from "./InboxQueueSidebar";
 import { DashboardEvidenceItem } from "./DashboardEvidenceItem";
 import { useLinkCopyMenu } from "./LinkCopyMenu";
@@ -48,6 +49,7 @@ type Props = {
   remoteReviewUrl?: string;
   posterOf: (artifact: ReviewArtifact) => string;
   iframeWidth: number;
+  htmlFrameRef: RefObject<HTMLIFrameElement | null>;
   onIframeWidth: (value: number) => void;
   note: string;
   setNote: (note: string) => void;
@@ -87,7 +89,7 @@ export function VisualReviewInspector(props: Props) {
     review, round, history, items, selectedKey, onSelectTask, onBack, onExitInbox, hasPreviousItem, queueThumbnails, queueModes, queueCounts, onOpenTask, onOpenSession, sessionOpening, onTogglePriority, priorityBusy, allBoards, showResolved,
     onAllBoards, onShowResolved, playable, activeIndex, onFocusArtifact, onChooseArtifact,
     choice, ranking, pins, setPins, pinning, onTogglePin, addPin, renderArtifact, remoteReviewUrl,
-    posterOf, iframeWidth, onIframeWidth, note, setNote, saving,
+    posterOf, iframeWidth, htmlFrameRef, onIframeWidth, note, setNote, saving,
     outcome, onOutcome, onSkip, onSnooze,
     resolved, awaitingNextRound, error, primaryVerdict, primaryReady, submit, onNoteOnly,
     onBrowseFiles, imagePreviews, imageCount, onPaste, onDrop, onMoveToDraft, onArchive, onReconsider,
@@ -98,7 +100,7 @@ export function VisualReviewInspector(props: Props) {
   const [opacity, setOpacity] = useState(50);
   const [zoom, setZoom] = useState(1);
   const [openError, setOpenError] = useState("");
-  const { showCopyMenu, copyMenu, copyMenuOpen, dismissCopyMenu } = useLinkCopyMenu(setOpenError);
+  const { showCopyMenu, showCopyMenuAt, copyMenu, copyMenuOpen, dismissCopyMenu } = useLinkCopyMenu(setOpenError);
   const [moreOpen, setMoreOpen] = useState(false);
   const [galleryCount, setGalleryCount] = useState(0);
   // The enlarged Dashboard image is a nested viewer, not a separate Inbox item.
@@ -314,6 +316,45 @@ export function VisualReviewInspector(props: Props) {
       ? source : review.path.replace(/[\\/]$/, "") + "/" + source;
   };
 
+  // A website has no local file to reveal; if it has a synced poster,
+  // Fomni selects that preview instead. Native HTML/images/videos select
+  // their actual review files, including local-only media.
+  const fomniFile = (artifact?: ReviewArtifact): string | undefined => {
+    if (!artifact) return undefined;
+    if (artifact.kind === "url") {
+      const poster = artifact.poster;
+      return poster ? originalAddress({ ...artifact, kind: "image", path: poster }) : undefined;
+    }
+    return originalAddress(artifact);
+  };
+  const showArtifactMenu = (event: MouseEvent<HTMLElement>, artifact: ReviewArtifact) => {
+    const file = fomniFile(artifact);
+    showCopyMenu(event, originalAddress(artifact),
+      file ? { fomniFile: file,
+        fomniLabel: artifact.kind === "url" ? "Open poster in Fomni" : "Open in Fomni" } : undefined);
+  };
+
+  // Opaque-origin HTML previews forward right-click coordinates via the review
+  // bridge. The source check prevents unrelated embedded websites from invoking
+  // Fomni or replacing the current review's menu.
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      const frame = htmlFrameRef.current;
+      if (active?.kind !== "html" || !frame ||
+          event.source !== frame.contentWindow ||
+          event.data?.type !== "taskboard-review-contextmenu") return;
+      const x = Number(event.data.x), y = Number(event.data.y);
+      const rect = frame.getBoundingClientRect();
+      if (!Number.isFinite(x) || !Number.isFinite(y) ||
+          x < 0 || y < 0 || x > rect.width || y > rect.height) return;
+      const file = fomniFile(active);
+      showCopyMenuAt(rect.left + x, rect.top + y, originalAddress(active),
+        file ? { fomniFile: file } : undefined);
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [active, htmlFrameRef, review.path, showCopyMenuAt]);
+
   const openOriginal = async (artifact?: ReviewArtifact) => {
     if (!artifact) return;
     setOpenError("");
@@ -347,7 +388,8 @@ export function VisualReviewInspector(props: Props) {
           openImageFullscreen();
         }
       }}
-      onClick={(event) => { if (pinning) addPin(event, active); else if (active.kind === "image") openImageFullscreen(); }}>
+      onClick={(event) => { if (pinning) addPin(event, active); else if (active.kind === "image") openImageFullscreen(); }}
+      onContextMenu={(event) => showArtifactMenu(event, active)}>
       <div className={"review-visual-media" + (zoom > 1 ? " enlarged" : "")}
         style={zoom > 1 && active.kind === "image" ? { width: zoom * 100 + "%" } : undefined}>
         {renderArtifact(active)}
@@ -483,6 +525,13 @@ export function VisualReviewInspector(props: Props) {
                   <option value={728}>728px</option>
                   <option value={390}>390px</option>
                 </select>}
+                {isWeb(active) && fomniFile(active) && <button type="button" className="button secondary"
+                  title={active.kind === "url" ? "Reveal the website poster in Fomni" : "Reveal the HTML file in Fomni"}
+                  onClick={() => {
+                    const file = fomniFile(active);
+                    if (file) void highlightInFomni(file).catch(reason =>
+                      setOpenError("Unable to reveal media in Fomni: " + String(reason)));
+                  }}>▤ Fomni folder</button>}
                 {active.kind === "video" && <button type="button" className="button secondary"
                   onClick={openImageFullscreen} title="Open a full-window video player; Esc to return">
                   ⛶ Full-window video</button>}
@@ -491,18 +540,23 @@ export function VisualReviewInspector(props: Props) {
                   onClick={() => void openUrl(remoteReviewUrl)}>Phone link ↗</button>}
                 <button type="button" className="button secondary"
                   onClick={() => void openOriginal(active)}
-                  onContextMenu={(event) => showCopyMenu(event, originalAddress(active))}
-                  title="Open the original in its default application · right-click to copy link">
+                  onContextMenu={(event) => showArtifactMenu(event, active)}
+                  title="Open original · right-click to reveal file in Fomni">
                   ↗ Open original</button>
               </div>
               {compareMode === "single" ? imageStage :
                 <div className={"review-visual-comparison " + compareMode}>
                   {compareMode === "side" ? <>
-                    <div><span>Previous</span>{round.previous && renderArtifact(round.previous)}</div>
-                    <div><span>Proposed</span>{renderArtifact(active)}</div>
+                    <div onContextMenu={(event) => round.previous && showArtifactMenu(event, round.previous)}>
+                      <span>Previous</span>{round.previous && renderArtifact(round.previous)}</div>
+                    <div onContextMenu={(event) => showArtifactMenu(event, active)}>
+                      <span>Proposed</span>{renderArtifact(active)}</div>
                   </> : <>
-                    <div className="review-visual-comparison-old">{round.previous && renderArtifact(round.previous)}</div>
-                    <div className="review-visual-comparison-new" style={{ opacity: opacity / 100 }}>
+                    <div className="review-visual-comparison-old"
+                      onContextMenu={(event) => round.previous && showArtifactMenu(event, round.previous)}>
+                      {round.previous && renderArtifact(round.previous)}</div>
+                    <div className="review-visual-comparison-new" style={{ opacity: opacity / 100 }}
+                      onContextMenu={(event) => showArtifactMenu(event, active)}>
                       {renderArtifact(active)}
                     </div>
                     <label className="review-visual-opacity">
@@ -526,6 +580,7 @@ export function VisualReviewInspector(props: Props) {
                 aria-pressed={round.mode === "pick" ? picked :
                   round.mode === "rank" ? rank >= 0 : undefined}
                 onClick={() => onChooseArtifact(artifact.id)}
+                onContextMenu={(event) => showArtifactMenu(event, artifact)}
                 title={(picked ? "Picked · " : rank >= 0 ? "Rank " + (rank + 1) + " · " : "") + artifact.label}>
                 {thumbnail(artifact)}
                 <span><em>{index + 1}. {artifact.label || artifact.id}</em>
@@ -621,10 +676,10 @@ export function VisualReviewInspector(props: Props) {
               <summary>References · {round.references.length + (round.previous ? 1 : 0)}</summary>
               {round.previous && <button className="inbox-resource-link" type="button"
                 onClick={() => void openOriginal(round.previous)}
-                onContextMenu={(event) => showCopyMenu(event, originalAddress(round.previous!))}>Previous: {round.previous.label} ↗</button>}
+                onContextMenu={(event) => showArtifactMenu(event, round.previous!)}>Previous: {round.previous.label} ↗</button>}
               {round.references.map((reference) => <button className="inbox-resource-link" type="button"
                 key={reference.id} onClick={() => void openOriginal(reference)}
-                onContextMenu={(event) => showCopyMenu(event, originalAddress(reference))}>{reference.label} ↗</button>)}
+                onContextMenu={(event) => showArtifactMenu(event, reference)}>{reference.label} ↗</button>)}
               {!round.previous && round.references.length === 0 && <p>No references supplied.</p>}
             </details>
           </div>
@@ -646,6 +701,7 @@ export function VisualReviewInspector(props: Props) {
               onClick={closeImageFullscreen}>× Exit fullscreen</button>
           </header>
           <div className="review-image-fullscreen-media"
+            onContextMenu={(event) => showArtifactMenu(event, active)}
             title={active.kind === "image" ? "Click to return to the review" : undefined}
             onClick={active.kind === "image" ? closeImageFullscreen : undefined}>
             {renderArtifact(active)}

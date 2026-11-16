@@ -64,6 +64,13 @@ const HTML_REVIEW_BRIDGE = `
     pending.delete(ref);
     resolveImages();
   });
+  // This iframe has an opaque sandbox origin: its native context menu never
+  // bubbles to TaskBoard. Forward the pointer location to the parent so users
+  // can reveal the original HTML file in Fomni without intercepting left-clicks.
+  addEventListener('contextmenu', event => {
+    event.preventDefault();
+    parent.postMessage({ type: 'taskboard-review-contextmenu', x: event.clientX, y: event.clientY }, '*');
+  }, true);
   addEventListener('click', event => {
     const anchor = event.target instanceof Element && event.target.closest('a[href]');
     const href = anchor?.getAttribute('href') || '';
@@ -1056,6 +1063,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       posterOf={(artifact) => artifact.kind === "image"
         ? activeSrc(artifact) || "" : artifact.poster ? assets[artifact.poster] || "" : ""}
       iframeWidth={iframeWidth}
+      htmlFrameRef={htmlFrameRef}
       onIframeWidth={setIframeWidth}
       note={note}
       setNote={setNote}

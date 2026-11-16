@@ -1,8 +1,9 @@
 import { useEffect, useState, type MouseEvent } from "react";
 import { createPortal } from "react-dom";
+import { highlightInFomni } from "./api";
 import "./LinkCopyMenu.css";
 
-type LinkMenu = { address: string; x: number; y: number };
+type LinkMenu = { address: string; x: number; y: number; fomniFile?: string; fomniLabel?: string };
 
 /** Copy a user-visible resource address, including desktop-only custom URL schemes. */
 async function copyAddress(address: string): Promise<void> {
@@ -63,16 +64,23 @@ export function useLinkCopyMenu(onError?: (message: string) => void) {
     return () => window.clearTimeout(timer);
   }, [copied]);
 
-  const showCopyMenu = (event: MouseEvent<HTMLElement>, address: string) => {
-    event.preventDefault();
-    event.stopPropagation();
+  const showCopyMenuAt = (x: number, y: number, address: string,
+    options?: { fomniFile?: string; fomniLabel?: string }) => {
     if (!address) return;
     setCopied(false);
     setMenu({
       address,
-      x: Math.max(8, Math.min(event.clientX, window.innerWidth - 188)),
-      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 48)),
+      fomniFile: options?.fomniFile,
+      fomniLabel: options?.fomniLabel,
+      x: Math.max(8, Math.min(x, window.innerWidth - 210)),
+      y: Math.max(8, Math.min(y, window.innerHeight - (options?.fomniFile ? 92 : 48))),
     });
+  };
+  const showCopyMenu = (event: MouseEvent<HTMLElement>, address: string,
+    options?: { fomniFile?: string; fomniLabel?: string }) => {
+    event.preventDefault();
+    event.stopPropagation();
+    showCopyMenuAt(event.clientX, event.clientY, address, options);
   };
 
   const copy = async () => {
@@ -87,13 +95,26 @@ export function useLinkCopyMenu(onError?: (message: string) => void) {
     }
   };
 
+  const revealInFomni = async () => {
+    const file = menu?.fomniFile;
+    if (!file) return;
+    setMenu(null);
+    try {
+      await highlightInFomni(file);
+    } catch (error) {
+      onError?.(`Could not reveal file in Fomni: ${String(error)}`);
+    }
+  };
+
   const copyMenu = typeof document === "undefined" ? null : createPortal(<>
     {menu && <div className="link-copy-menu" role="menu"
       style={{ left: menu.x, top: menu.y }}>
+      {menu.fomniFile && <button type="button" role="menuitem"
+        onClick={() => void revealInFomni()}>{menu.fomniLabel || "Open in Fomni"}</button>}
       <button type="button" role="menuitem" onClick={() => void copy()}>Copy link address</button>
     </div>}
     {copied && <div className="link-copy-notice" role="status">Link copied</div>}
   </>, document.body);
 
-  return { showCopyMenu, copyMenu, copyMenuOpen: menu !== null, dismissCopyMenu: () => setMenu(null) };
+  return { showCopyMenu, showCopyMenuAt, copyMenu, copyMenuOpen: menu !== null, dismissCopyMenu: () => setMenu(null) };
 }

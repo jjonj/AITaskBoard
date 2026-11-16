@@ -24,7 +24,7 @@ export const imageAttachmentPaths = (description: string): string[] =>
 export function TaskImageGallery({ description, boardPath, pending, onRemovePending }: Props) {
   const paths = useMemo(() => imageAttachmentPaths(description), [description]);
   const [savedImages, setSavedImages] = useState<Record<string, string>>({});
-  const { showCopyMenu, copyMenu } = useLinkCopyMenu();
+  const { showCopyMenu, copyMenu } = useLinkCopyMenu((message) => window.alert(message));
   const pathKey = paths.join("\n");
 
   useEffect(() => {
@@ -51,8 +51,11 @@ export function TaskImageGallery({ description, boardPath, pending, onRemovePend
         {paths.map((path) => (
           <div className="task-image-thumb" key={path}>
             {savedImages[path] ? (
-              <a href={savedImages[path]} target="_blank" rel="noreferrer" title="Open full image · right-click to copy file path"
-                onContextMenu={(event) => showCopyMenu(event, boardPath.replace(/[\\/]$/, "") + "/" + path)}>
+              <a href={savedImages[path]} target="_blank" rel="noreferrer" title="Open full image · right-click to reveal in Fomni"
+                onContextMenu={(event) => {
+                  const file = boardPath.replace(/[\\/]$/, "") + "/" + path;
+                  showCopyMenu(event, file, { fomniFile: file });
+                }}>
                 <img src={savedImages[path]} alt="Task attachment" />
               </a>
             ) : (

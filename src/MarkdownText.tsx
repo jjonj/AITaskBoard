@@ -9,6 +9,9 @@ import type { Task } from "./types";
 /** Read-only Markdown without raw HTML; task text stays editable as plain Markdown. */
 export function MarkdownText({ text, className = "", task }: { text: string; className?: string; task?: Task }) {
   const { showCopyMenu, copyMenu } = useLinkCopyMenu();
+  const menuFor = (event: React.MouseEvent<HTMLElement>, address: string) =>
+    showCopyMenu(event, address, /^(?:[a-z]:[\\/]|\\\\)/i.test(address)
+      ? { fomniFile: address } : undefined);
   if (task) return <InboxRichText task={task} text={text} className={className}
     onError={(message) => window.alert(message)} />;
   return <div className={`markdown-content ${className}`}>
@@ -18,16 +21,16 @@ export function MarkdownText({ text, className = "", task }: { text: string; cla
     } components={{
       a: ({ node: _node, ...props }) => /^wartribes-tour:\/\//i.test(props.href ?? "")
         ? <a {...props} href={props.href}
-          onContextMenu={(event) => showCopyMenu(event, props.href ?? "")}
+          onContextMenu={(event) => menuFor(event, props.href ?? "")}
           onClick={(event) => {
             if (!("__TAURI_INTERNALS__" in window) || !props.href) return;
             event.preventDefault();
             void openUrl(props.href).catch(error => window.alert(String(error)));
           }} />
         : <a {...props} target="_blank" rel="noopener noreferrer"
-            onContextMenu={(event) => showCopyMenu(event, props.href ?? "")} />,
+            onContextMenu={(event) => menuFor(event, props.href ?? "")} />,
       img: ({ node: _node, ...props }) => <img {...props}
-        onContextMenu={(event) => showCopyMenu(event, props.src ?? "")} />,
+        onContextMenu={(event) => menuFor(event, props.src ?? "")} />,
     }}>{text}</ReactMarkdown>
     {copyMenu}
   </div>;
