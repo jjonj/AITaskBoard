@@ -3887,7 +3887,7 @@ Details: ${queueRecoveryWarning}`;
         })}
       </section>
 
-      {reviewOpen && <div className="review-unified-backdrop" role="dialog" aria-modal="true"
+      {reviewOpen && <div className="review-unified-backdrop" role="dialog" aria-modal="false"
           aria-label="Unified human feedback queue">
           <ReviewView project={project}
             onClose={() => { setReviewOpen(false); setInboxResumeId(undefined); }}
