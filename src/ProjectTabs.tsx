@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import "./ProjectTabs.css";
 import { QueueIntelligence } from "./QueueIntelligence";
+import { isInboxItemSnoozed, readInboxSnoozes } from "./inboxSnoozes";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -9,7 +10,7 @@ import type { ProjectCatalog, ProjectPriority, ProjectTab, QueueWorkload } from 
 import type { BoardConfig, BoardSnapshot } from "./types";
 
 type Props = {
-  Board: (props: { project: ProjectTab; onInteractionChange: (locked: boolean) => void; requestedReviewId?: string; requestedTask?: {id: string; requestKey: number}; initialSnapshot?: BoardSnapshot; onSnapshot?: (path: string, snapshot: BoardSnapshot) => void }) => React.ReactNode;
+  Board: (props: { project: ProjectTab; onInteractionChange: (locked: boolean) => void; requestedReviewId?: string; requestedTask?: {id: string; requestKey: number}; initialSnapshot?: BoardSnapshot; onSnapshot?: (path: string, snapshot: BoardSnapshot) => void; onInboxCount?: (path: string, count: number) => void }) => React.ReactNode;
 };
 type DialogMode = "create" | "folders" | null;
 type TabDrop = { id: string; after: boolean };
@@ -155,6 +156,11 @@ export function ProjectTabs({ Board }: Props) {
   const [dropTab, setDropTab] = useState<TabDrop | null>(null);
   const [changedProjects, setChangedProjects] = useState<Record<string, boolean>>({});
   const [inboxIdsByPath, setInboxIdsByPath] = useState<Record<string, { eligibleIds: string[]; reviewIds: string[] }>>({});
+  // The mounted board owns the live Inbox count; unmounted tabs use the backend scan.
+  const [liveInboxCounts, setLiveInboxCounts] = useState<Record<string, number>>({});
+  const rememberInboxCount = (path: string, count: number) => {
+    setLiveInboxCounts((current) => current[path] === count ? current : { ...current, [path]: count });
+  };
   const knownBoardTokens = useRef<Record<string, string>>({});
   const manualRefreshPending = useRef(false);
   const [refreshingAll, setRefreshingAll] = useState(false);
@@ -319,13 +325,13 @@ export function ProjectTabs({ Board }: Props) {
       ? "taskboard.userQueueSnoozes"
       : `taskboard.project.${project.id}.userQueueSnoozes`;
     let userSnoozes: Record<string, number> = {};
-    let inboxSnoozes: Record<string, number> = {};
+    const inboxSnoozes = readInboxSnoozes();
     try { userSnoozes = JSON.parse(window.localStorage.getItem(key) || "{}"); }
     catch { /* A corrupted local snooze entry must not hide tasks. */ }
-    try { inboxSnoozes = JSON.parse(window.localStorage.getItem("taskboard.inboxSnoozes") || "{}"); }
-    catch { /* A corrupted Inbox snooze entry must not hide reviews. */ }
+
+
     const now = Date.now();
-    const notSnoozedInInbox = (id: string) => !(Number(inboxSnoozes[`${project.path}|${id}`]) > now);
+    const notSnoozedInInbox = (id: string) => !isInboxItemSnoozed(inboxSnoozes, project.path, id, now);
     return reviewIds.filter(notSnoozedInInbox).length +
       eligibleIds.filter((id) => notSnoozedInInbox(id) && !(Number(userSnoozes[id]) > now)).length;
   };
@@ -721,7 +727,10 @@ export function ProjectTabs({ Board }: Props) {
       {switchHint && <div className="project-switch-hint" role="status">Switching to {switchHint} · Ctrl+Tab</div>}
       <div className="project-tabs" ref={tabStrip} role="tablist" aria-label="Project task boards">
         <QueueIntelligence data={globalQueueWorkload} error={queueWorkloadError} />
-        {catalog?.projects.map((project) => (
+        {catalog?.projects.map((project) => {
+          const inboxCount = project.id === catalog.activeId && liveInboxCounts[project.path] !== undefined
+            ? liveInboxCounts[project.path] : visibleInboxCount(project);
+          return (
           <div className={`project-tab-wrapper ${project.id === catalog.activeId ? "selected" : ""} ${changedProjects[project.id] ? "changed" : ""} ${draggingTab === project.id ? "project-tab-being-dragged" : ""} ${dropTab?.id === project.id && draggingTab !== project.id ? (dropTab.after ? "project-tab-insert-after" : "project-tab-insert-before") : ""}`}
             key={project.id}
             data-project-tab-id={project.id}
@@ -750,9 +759,9 @@ export function ProjectTabs({ Board }: Props) {
               disabled={working || locked || !!dialogMode}
               onClick={() => void switchTo(project.id)}
             >{project.name}
-              {visibleInboxCount(project) > 0 && <span className="project-tab-user-count"
-                aria-label={`${visibleInboxCount(project)} tasks in the user inbox`}
-                title={`${visibleInboxCount(project)} tasks waiting for you`}>{visibleInboxCount(project)}</span>}
+              {inboxCount > 0 && <span className="project-tab-user-count"
+                aria-label={`${inboxCount} tasks in the user inbox`}
+                title={`${inboxCount} tasks waiting for you`}>{inboxCount}</span>}
             </button>
             <button type="button" className="project-tab-settings"
               aria-label={`Edit ${project.name} settings`}
@@ -761,7 +770,8 @@ export function ProjectTabs({ Board }: Props) {
               onClick={() => void startEditFolders(project)}>⚙</button>
 
           </div>
-        ))}
+          );
+        })}
         <button type="button" className="project-tab-add"
           title="Add a project with its own TaskBoard tasks"
           disabled={working || locked || !!dialogMode || !catalog}
@@ -781,6 +791,7 @@ export function ProjectTabs({ Board }: Props) {
       {active && <div className="project-workspace" id="project-board" role="tabpanel">
         <Board key={active.id} project={active} onInteractionChange={setLocked}
             initialSnapshot={boardCache.current.get(active.path)} onSnapshot={rememberBoard}
+            onInboxCount={rememberInboxCount}
             {...(startupReview && startupReview.path.replace(/\\/g, "/").toLowerCase() === active.path.replace(/\\/g, "/").toLowerCase()
               ? { requestedReviewId: startupReview.taskId } : {})}
             {...(startupTask && startupTask.path.replace(/\\/g, "/").toLowerCase() === active.path.replace(/\\/g, "/").toLowerCase()

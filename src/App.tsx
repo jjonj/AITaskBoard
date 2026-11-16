@@ -14,6 +14,7 @@ import { TaskImageGallery, type PendingClipboardImage } from "./TaskImageGallery
 import { ReviewView } from "./ReviewView";
 import { useRememberedInbox } from "./useRememberedInbox";
 import { isUserQueueEligible } from "./userQueueEligibility";
+import { isInboxItemSnoozed, readInboxSnoozes } from "./inboxSnoozes";
 import { attachImagesToDescription, parseDescriptionTimeline, prepareTaskDraftForSave, updateInitialDescription } from "./descriptionTimeline";
 import { applyCardPlacements, orderCardsByDependencies } from "./dependencyLayout";
 import { withEpicProxyRows } from "./epicProxyRows";
@@ -294,13 +295,14 @@ const randomColumnColor = (used: string[]) => {
   return pool[Math.floor(Math.random() * pool.length)];
 };
 
-function ProjectBoard({ project, onInteractionChange, requestedReviewId, requestedTask, initialSnapshot, onSnapshot }: {
+function ProjectBoard({ project, onInteractionChange, requestedReviewId, requestedTask, initialSnapshot, onSnapshot, onInboxCount }: {
   project: ProjectTab;
   onInteractionChange: (locked: boolean) => void;
   requestedReviewId?: string;
   requestedTask?: { id: string; requestKey: number };
   initialSnapshot?: BoardSnapshot;
   onSnapshot?: (path: string, snapshot: BoardSnapshot) => void;
+  onInboxCount?: (path: string, count: number) => void;
 }) {
   const boardPath = project.path;
   // Preserve existing Wartribes UI settings while isolating all other boards.
@@ -674,6 +676,19 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const [queueExpanded, setQueueExpanded] = useState(false);
   const [followupQueueReturn, setFollowupQueueReturn] = useState<UserQueueReview | null>(null);
   const [userQueueSnoozes, setUserQueueSnoozes] = useState<UserQueueSnoozes>(() => loadUserQueueSnoozes(snoozesKey));
+  const [inboxSnoozes, setInboxSnoozes] = useState(readInboxSnoozes);
+  useEffect(() => {
+    const reload = () => setInboxSnoozes(readInboxSnoozes());
+    window.addEventListener("focus", reload);
+    return () => window.removeEventListener("focus", reload);
+  }, []);
+  useEffect(() => {
+    const nextExpiry = Math.min(...Object.values(inboxSnoozes).filter((until) => Number(until) > Date.now()));
+    if (!Number.isFinite(nextExpiry)) return;
+    const timer = window.setTimeout(() => setInboxSnoozes(readInboxSnoozes()),
+      Math.max(1, Math.min(2147483647, nextExpiry - Date.now() + 20)));
+    return () => window.clearTimeout(timer);
+  }, [inboxSnoozes]);
   const [keyboardSelectedTaskId, setKeyboardSelectedTaskId] = useState<string | null>(null);
   const [dragId, setDragId] = useState<string | null>(null);
   const [dragSourceColumn, setDragSourceColumn] = useState<string | null>(null);
@@ -1211,6 +1226,14 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       : [],
     [activeTasks, snapshot, userQueueSnoozes],
   );
+  // Match the actual Inbox queue: locally snoozed reviews/requests are not pending.
+  const inboxCount = activeTasks.filter((task) => task.review_status === "open" &&
+    !isInboxItemSnoozed(inboxSnoozes, boardPath, task.id)).length +
+    userQueueTasks.filter((task) => !isInboxItemSnoozed(inboxSnoozes, boardPath, task.id)).length;
+  useEffect(() => {
+    if (snapshot) onInboxCount?.(boardPath, inboxCount);
+  }, [boardPath, inboxCount, onInboxCount, snapshot]);
+
   // The Inbox contains open visual reviews and actionable For user cards.
   // Filtering the Blocked column never changes their underlying task state.
   const isInReviewInbox = (task: Task) => task.review_status === "open" ||
@@ -3324,8 +3347,6 @@ Details: ${queueRecoveryWarning}`;
     );
   }
 
-  const inboxCount = activeTasks.filter((task) => task.review_status === "open").length + userQueueTasks.length;
-
   return (
     <main
       className="app-shell"
@@ -3899,6 +3920,8 @@ Details: ${queueRecoveryWarning}`;
               void loadBoard(boardPath).then(applySnapshot).catch((cause) => setError(String(cause)));
             }}
             onSnoozeUserTask={(task, path, until) => {
+              setInboxSnoozes((current) => ({ ...current, [`${path}|${task.id}`]: until }));
+              window.dispatchEvent(new Event("taskboard:queue-changed"));
               if (path === boardPath) {
                 setUserQueueSnoozes((current) => ({
                   ...current, [task.id]: until,
