@@ -490,7 +490,6 @@ export function VisualReviewInspector(props: Props) {
           title={`TaskBoard workflow column: ${review.task.column}. This is not a review decision.`}>
           {review.task.column.replace(/-/g, " ")}
         </span>
-        <span className="review-instrument-mode" title={modeDetails.explanation}>{modeDetails.label}</span>
         <div className="review-instrument-actions" role="group" aria-label="Review controls">
           <button type="button" className={"review-instrument-action" + (focus ? " active" : "")}
             onClick={() => setFocus((value) => !value)} aria-pressed={focus}

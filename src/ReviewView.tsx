@@ -1343,7 +1343,6 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
             <header className="review-heading">
               <div><small>{reviewTask.project} · {reviewTask.task.id} · Round {round.number}</small>
                 <h2>{reviewTask.task.title}</h2><p>{round.judge}</p></div>
-              <span className="review-mode-label">{round.mode.toUpperCase()}</span>
             </header>
             {round.criteria.length > 0 &&
               <div className="review-criteria" aria-label="Review criteria">{round.criteria.map((text, i) => <span key={i}>{text}</span>)}</div>}
