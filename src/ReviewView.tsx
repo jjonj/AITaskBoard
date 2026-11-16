@@ -408,6 +408,30 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
     return () => { cancelled = true; };
   }, [selectedKey]);
 
+  // Captures can be published while an unanswered Inbox review is already
+  // open (e.g. the verified boar gait video after its still-image round).
+  // Refresh only the manifest, preserving the user's draft answer and pins.
+  useEffect(() => {
+    if (!reviewTask?.task.review_status || !selectedKey) return;
+    let cancelled = false;
+    let pending = false;
+    const reload = () => {
+      if (pending || cancelled) return;
+      pending = true;
+      void reviewShow(reviewTask.task.id, reviewTask.path).then((value) => {
+        if (cancelled) return;
+        setLoadedManifest((current) => {
+          if (!current || current.key !== selectedKey ||
+              current.value.revision === value.revision) return current;
+          return { key: selectedKey, value };
+        });
+      }).catch(() => { /* A transient write does not erase the active review. */ })
+        .finally(() => { pending = false; });
+    };
+    const interval = window.setInterval(reload, 8000);
+    return () => { cancelled = true; window.clearInterval(interval); };
+  }, [selectedKey, reviewTask?.task.id, reviewTask?.path, reviewTask?.task.review_status]);
+
   useEffect(() => {
     if (!round || !reviewTask) return;
     let cancelled = false;
