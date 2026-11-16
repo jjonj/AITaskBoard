@@ -152,10 +152,19 @@ export type QueueCapacity = {
 export const taskQueueCapacity = () =>
   invoke<QueueCapacity>("task_queue_capacity");
 
-export type ProjectQueueWorkload = { name: string; count: number; readyNow: number; dependencyWaiting: number };
+export type ProjectQueueWorkload = {
+  name: string; count: number; readyNow: number; dependencyWaiting: number;
+  openTasks: number; closedAllTime: number; closed7: number; closedPrev7: number;
+  closed30: number; created7: number; created30: number; oldestQueueTaskDays: number | null;
+};
+export type WorkloadPulse = {
+  openTasks: number; closedAllTime: number; closed7: number; closedPrev7: number;
+  closed30: number; created7: number; createdPrev7: number; created30: number;
+  daily: { day: string; closed: number; created: number }[];
+};
 export type QueueWorkload = {
   count: number; readyNow: number; dependencyWaiting: number;
-  projects: ProjectQueueWorkload[]; unavailableBoards: string[];
+  projects: ProjectQueueWorkload[]; pulse: WorkloadPulse; unavailableBoards: string[];
 };
 /** Global estimate of remaining T3 Keep Busy pickup work, including queued dependency chains. */
 export const taskQueueWorkload = () => invoke<QueueWorkload>("task_queue_workload");

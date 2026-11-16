@@ -2,6 +2,7 @@
 //! Dependency gates are evaluated transitively, including cross-board links.
 use std::collections::{HashMap, HashSet};
 use serde::Serialize;
+use chrono::{DateTime, Duration, Local, NaiveDate};
 use task_core::{ExecutionMode, FsTaskStore, QueueState, TaskAttention, TaskKind, TaskStore};
 
 #[derive(Serialize)]
@@ -11,6 +12,7 @@ pub(crate) struct QueueWorkload {
     pub ready_now: usize,
     pub dependency_waiting: usize,
     pub projects: Vec<ProjectWorkload>,
+    pub pulse: WorkloadPulse,
     pub unavailable_boards: Vec<String>,
 }
 
@@ -21,6 +23,56 @@ pub(crate) struct ProjectWorkload {
     pub count: usize,
     pub ready_now: usize,
     pub dependency_waiting: usize,
+    pub open_tasks: usize,
+    pub closed_all_time: usize,
+    pub closed_7: usize,
+    pub closed_prev_7: usize,
+    pub closed_30: usize,
+    pub created_7: usize,
+    pub created_30: usize,
+    /// Age is measured from task creation, not time spent in the queue.
+    pub oldest_queue_task_days: Option<i64>,
+}
+
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorkloadPulse {
+    pub open_tasks: usize,
+    pub closed_all_time: usize,
+    pub closed_7: usize,
+    pub closed_prev_7: usize,
+    pub closed_30: usize,
+    pub created_7: usize,
+    pub created_prev_7: usize,
+    pub created_30: usize,
+    pub daily: Vec<DailyFlow>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DailyFlow {
+    pub day: String,
+    pub closed: usize,
+    pub created: usize,
+}
+
+fn task_day(raw: &str) -> Option<NaiveDate> {
+    let date = raw.get(..10)?;
+    NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()
+}
+
+fn completion_day(task: &task_core::Task) -> Option<NaiveDate> {
+    if task.completed.is_none() { return None; }
+    // RFC3339 timestamps are UTC. Attribute completed work to the user's
+    // local day; legacy date-only records stay on their recorded day.
+    task.completed_at.as_deref()
+        .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
+        .map(|datetime| datetime.with_timezone(&Local).date_naive())
+        .or_else(|| task.completed.as_deref().and_then(task_day))
+}
+
+fn recent(date: NaiveDate, today: NaiveDate, days: i64) -> bool {
+    date <= today && date >= today - Duration::days(days - 1)
 }
 
 struct WorkItem {
@@ -67,6 +119,16 @@ pub(crate) async fn read() -> Result<QueueWorkload, String> {
         let mut all = HashMap::<String, WorkItem>::new();
         let mut unavailable_boards = Vec::new();
         let mut project_workloads = Vec::<ProjectWorkload>::new();
+        let today = Local::now().date_naive();
+        let mut pulse = WorkloadPulse {
+            daily: (0..30).rev().map(|days_ago| DailyFlow {
+                day: (today - Duration::days(days_ago)).to_string(),
+                closed: 0,
+                created: 0,
+            }).collect(),
+            ..WorkloadPulse::default()
+        };
+        let mut queued_creation_dates = HashMap::<String, Option<NaiveDate>>::new();
         let mut seen = HashSet::new();
 
         for project in projects.projects {
@@ -79,8 +141,49 @@ pub(crate) async fn read() -> Result<QueueWorkload, String> {
             let project_index = project_workloads.len();
             project_workloads.push(ProjectWorkload {
                 name: project.name, count: 0, ready_now: 0, dependency_waiting: 0,
+                open_tasks: 0, closed_all_time: 0, closed_7: 0, closed_prev_7: 0,
+                closed_30: 0, created_7: 0, created_30: 0, oldest_queue_task_days: None,
             });
             for task in &snapshot.tasks {
+                // Flow metrics measure task records, not queue events. Exclude
+                // epics/reviews and do not count archived-but-unfinished as closed.
+                if matches!(task.kind, TaskKind::Task | TaskKind::Recurring) {
+                    let stats = &mut project_workloads[project_index];
+                    if task.completed.is_some() {
+                        stats.closed_all_time += 1;
+                        pulse.closed_all_time += 1;
+                    } else if !task.archived {
+                        stats.open_tasks += 1;
+                        pulse.open_tasks += 1;
+                    }
+                    if let Some(created) = task_day(&task.created) {
+                        if recent(created, today, 30) {
+                            stats.created_30 += 1;
+                            pulse.created_30 += 1;
+                            pulse.daily[(29 - (today - created).num_days()) as usize].created += 1;
+                        }
+                        if recent(created, today, 7) {
+                            stats.created_7 += 1;
+                            pulse.created_7 += 1;
+                        } else if created >= today - Duration::days(13) && created < today - Duration::days(6) {
+                            pulse.created_prev_7 += 1;
+                        }
+                    }
+                    if let Some(closed) = completion_day(task) {
+                        if recent(closed, today, 30) {
+                            stats.closed_30 += 1;
+                            pulse.closed_30 += 1;
+                            pulse.daily[(29 - (today - closed).num_days()) as usize].closed += 1;
+                        }
+                        if recent(closed, today, 7) {
+                            stats.closed_7 += 1;
+                            pulse.closed_7 += 1;
+                        } else if closed >= today - Duration::days(13) && closed < today - Duration::days(6) {
+                            stats.closed_prev_7 += 1;
+                            pulse.closed_prev_7 += 1;
+                        }
+                    }
+                }
                 let id = key(&root, &task.id);
                 let done = task.archived || task.completed.is_some();
                 if done {
@@ -113,6 +216,7 @@ pub(crate) async fn read() -> Result<QueueWorkload, String> {
                     phase == QueueState::Queued && eligible_column &&
                     !human_waiting && !technical_block && task_core::recurring_due(task);
                 let dependencies = task.depends_on.iter().map(|dep| prerequisite_key(&root, dep)).collect();
+                if queued { queued_creation_dates.insert(id.clone(), task_day(&task.created)); }
                 all.insert(id, WorkItem { done: false, queued, in_flight, dependencies, project_index });
             }
         }
@@ -125,7 +229,13 @@ pub(crate) async fn read() -> Result<QueueWorkload, String> {
             let mut visiting = HashSet::new();
             if eventually_executable(id, &all, &mut visiting, &mut memo) {
                 count += 1;
-                project_workloads[item.project_index].count += 1;
+                let stats = &mut project_workloads[item.project_index];
+                stats.count += 1;
+                // Age is only a rough prioritization signal, not queue wait time.
+                if let Some(task) = queued_creation_dates.get(id).and_then(|day| *day) {
+                    let age = (today - task).num_days().max(0);
+                    stats.oldest_queue_task_days = Some(stats.oldest_queue_task_days.unwrap_or(0).max(age));
+                }
                 if item.dependencies.iter().all(|dependency| all.get(dependency).is_some_and(|dep| dep.done)) {
                     ready_now += 1;
                     project_workloads[item.project_index].ready_now += 1;
@@ -138,7 +248,7 @@ pub(crate) async fn read() -> Result<QueueWorkload, String> {
         project_workloads.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
         Ok(QueueWorkload {
             count, ready_now, dependency_waiting: count - ready_now,
-            projects: project_workloads, unavailable_boards,
+            projects: project_workloads, pulse, unavailable_boards,
         })
     }).await.map_err(|error| format!("Global queue scan failed: {error}"))?
 }
