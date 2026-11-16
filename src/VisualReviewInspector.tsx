@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type MouseEvent, type ReactNode, type RefObject, type CSSProperties, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import "./ReviewImageFullscreen.css";
+import "./ReviewInstrumentHeader.css";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { ReviewArtifact, ReviewPin, ReviewRound } from "./reviewApi";
 import type { Task } from "./types";
@@ -12,6 +13,25 @@ import { DashboardEvidenceItem } from "./DashboardEvidenceItem";
 import { useLinkCopyMenu } from "./LinkCopyMenu";
 
 type Item = { path: string; project: string; task: Task };
+
+function ReviewHeaderIcon({ name }: { name: "previous" | "close" | "focus" | "feedback" | "more" }) {
+  const paths = {
+    previous: <><path d="m14.5 5.5-6.5 6.5 6.5 6.5" /><path d="M8.5 12H21" /></>,
+    close: <path d="M6 6l12 12M18 6 6 18" />,
+    focus: <path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" />,
+    feedback: <path d="M4 5h16M4 12h10M4 19h14M18 12h2" />,
+    more: <><circle cx="5" cy="12" r="1.1" fill="currentColor" /><circle cx="12" cy="12" r="1.1" fill="currentColor" /><circle cx="19" cy="12" r="1.1" fill="currentColor" /></>,
+  };
+  return <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
+}
+
+const reviewModeDetails: Record<ReviewRound["mode"], { label: string; explanation: string }> = {
+  approve: { label: "Approval review", explanation: "Approval review: you are being asked whether to approve or reject this work. Nothing is approved yet." },
+  pick: { label: "Pick review", explanation: "Pick review: choose one of the proposed options; no selection has been accepted yet." },
+  rank: { label: "Ranking review", explanation: "Ranking review: order all proposed options before submitting a decision." },
+  markup: { label: "Markup review", explanation: "Markup review: annotate the proposed work before submitting feedback." },
+};
 type Props = {
   review: Item;
   round: ReviewRound;
@@ -90,7 +110,7 @@ const isDashboard = (artifact: ReviewArtifact | undefined, boardPath: string) =>
  */
 export function VisualReviewInspector(props: Props) {
   const {
-    review, round, history, items, selectedKey, onSelectTask, onBack, onExitInbox, hasPreviousItem, queueThumbnails, queueModes, queueCounts, onOpenTask, onOpenSession, sessionOpening, onTogglePriority, priorityBusy, allBoards, showResolved,
+    review, round, history, items, selectedKey, onSelectTask, onBack, onExitInbox, queueThumbnails, queueModes, queueCounts, onOpenTask, onOpenSession, sessionOpening, onTogglePriority, priorityBusy, allBoards, showResolved,
     onAllBoards, onShowResolved, playable, activeIndex, onFocusArtifact, onChooseArtifact, onClearRanking,
     choice, ranking, pins, setPins, pinning, onTogglePin, addPin, renderArtifact, remoteReviewUrl,
     posterOf, iframeWidth, htmlFrameRef, onIframeWidth, note, setNote, saving,
@@ -167,6 +187,12 @@ export function VisualReviewInspector(props: Props) {
   const pinCount = active ? pins.filter((pin) => pin.artifact === active.id).length : 0;
   const labelOf = (id: string) => playable.find((value) => value.id === id)?.label || id;
   const outcomeOptions = reviewOutcomes(round.mode);
+  const modeDetails = reviewModeDetails[round.mode];
+  const previousIndex = items.findIndex((item) => `${item.path}|${item.task.id}` === selectedKey) - 1;
+  const previousItem = previousIndex >= 0 ? items[previousIndex] : undefined;
+  const goPreviousItem = () => {
+    if (previousItem) onSelectTask(`${previousItem.path}|${previousItem.task.id}`);
+  };
   // The primary action must not look actionable before a pick/full ranking,
   // regardless of which verdict the user last hovered or selected.
   const primaryIncomplete = !primaryReady;
@@ -273,6 +299,20 @@ export function VisualReviewInspector(props: Props) {
         }
         return;
       }
+      // Header shortcuts are real actions, not merely labels in hover tooltips.
+      // Modifier combinations are distinct from the unmodified media/decision keys.
+      if (!event.ctrlKey && !event.metaKey && event.altKey && !event.repeat) {
+        const key = event.key.toLowerCase();
+        if (key === "x") { event.preventDefault(); event.stopImmediatePropagation(); onExitInbox(); return; }
+        if (key === "d" && !saving) {
+          event.preventDefault(); event.stopImmediatePropagation();
+          setMoreOpen(false); void onMoveToDraft(); return;
+        }
+        if (key === "a" && !saving) {
+          event.preventDefault(); event.stopImmediatePropagation();
+          setMoreOpen(false); void onArchive(); return;
+        }
+      }
       if (event.ctrlKey || event.altKey || event.metaKey) return;
       if (active?.kind === "video" && event.target instanceof HTMLMediaElement) return;
       const target = event.target;
@@ -295,6 +335,23 @@ export function VisualReviewInspector(props: Props) {
         const direction = event.key === "ArrowLeft" ? -1 : 1;
         setGallerySelectedIndex((current) => current === null ? null :
           Math.min(Math.max(0, galleryCount - 1), Math.max(0, current + direction)));
+      } else if (!event.repeat && event.key.toLowerCase() === "k" && previousItem) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        goPreviousItem();
+      } else if (!event.repeat && event.key.toLowerCase() === "b") {
+        event.preventDefault(); event.stopImmediatePropagation();
+        setFeedbackExpanded((value) => !value);
+      } else if (!event.repeat && event.key.toLowerCase() === "g") {
+        event.preventDefault(); event.stopImmediatePropagation();
+        setMoreOpen((value) => !value);
+      } else if (!event.repeat && event.key.toLowerCase() === "t" && onOpenTask && !saving) {
+        event.preventDefault(); event.stopImmediatePropagation(); setMoreOpen(false); onOpenTask();
+      } else if (!event.repeat && event.key.toLowerCase() === "s" &&
+        (review.task.claimed_by || review.task.live?.with_me) && !sessionOpening && !saving) {
+        event.preventDefault(); event.stopImmediatePropagation(); setMoreOpen(false); onOpenSession();
+      } else if (!event.repeat && event.key.toLowerCase() === "u" && !priorityBusy) {
+        event.preventDefault(); event.stopImmediatePropagation(); setMoreOpen(false); onTogglePriority();
       } else if (event.key.toLowerCase() === "f" && gallerySelectedIndex === null) {
         event.preventDefault();
         event.stopImmediatePropagation();
@@ -312,7 +369,7 @@ export function VisualReviewInspector(props: Props) {
     // Capture before the shared Inbox Escape handler so Focus only exits Focus.
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [focus, imageFullscreen, dashboardMode, gallerySelectedIndex, galleryCount, onBack, onFocusArtifact, activeIndex, playable, active?.kind, moreOpen, compare, pinning, onTogglePin, copyMenuOpen]);
+  }, [focus, imageFullscreen, dashboardMode, gallerySelectedIndex, galleryCount, onBack, onFocusArtifact, activeIndex, playable, active?.kind, moreOpen, compare, pinning, onTogglePin, copyMenuOpen, previousItem, onSelectTask, onExitInbox, onMoveToDraft, onArchive, saving, onOpenTask, onOpenSession, sessionOpening, review.task.claimed_by, review.task.live?.with_me, priorityBusy, onTogglePriority]);
 
   const originalAddress = (artifact: ReviewArtifact) => {
     if (artifact.kind === "url") return artifact.path;
@@ -410,53 +467,73 @@ export function VisualReviewInspector(props: Props) {
 
   return (
     <section onPaste={onPaste} onDragOver={event => event.preventDefault()} onDrop={onDrop}
-      className={"review-visual-inspector" + (focus ? " focus" : "") +
+      className={"review-visual-inspector instrument-review" + (focus ? " focus" : "") +
       (feedbackExpanded ? "" : " feedback-hidden") + (dashboardMode ? " dashboard-review" : "")}>
-      <header className="review-visual-header">
-        <button type="button" className="button secondary" onClick={navigateBack}
-          title="Go back one navigation step (Esc)">
-          {dashboardMode && gallerySelectedIndex !== null ? "← All captures"
-            : focus ? "← Exit focus" : compare !== "single" ? "← Single view"
-            : pinning ? "← Exit pin mode" : hasPreviousItem ? "← Previous item" : "← Board"}</button>
-        <div className="review-visual-title"><small>{review.project} · {review.task.id} · Round {round.number}</small>
-          <strong title={review.task.title}>{review.task.title}</strong></div>
-        <span className={`inbox-task-column-chip column-${review.task.column}`}>{review.task.column}</span>
-        <button type="button" className={"inbox-priority-button" +
-          (review.task.attention.includes("priority") ? " is-priority" : "")}
-          aria-pressed={review.task.attention.includes("priority")}
-          aria-label={review.task.attention.includes("priority")
-            ? "Remove Priority from " + review.task.id : "Mark " + review.task.id + " as Priority"}
-          title={review.task.attention.includes("priority")
-            ? "Priority enabled · click to remove" : "Mark Priority so agents handle this task sooner"}
-          disabled={priorityBusy} onClick={onTogglePriority}>
-          <span aria-hidden="true">!</span> {review.task.attention.includes("priority") ? "Priority" : "Prioritize"}
-        </button>
-        <span className="review-visual-mode">{round.mode.toUpperCase()}</span>
-        <div className="review-visual-header-actions">
-          <button type="button" className="button secondary" onClick={onExitInbox}
-            title="Exit the feedback Inbox and return to the board" aria-label="Close Inbox">× Close Inbox</button>
-          {onOpenTask && <button type="button" className="button secondary" onClick={onOpenTask} title="Inspect the full task and return to Inbox on closing">Full task ↗</button>}
-          {(review.task.claimed_by || review.task.live?.with_me) && (
-            <button type="button" className="button secondary"
-              aria-label={`Open session for ${review.task.id}`}
-              disabled={sessionOpening} onClick={onOpenSession}>
-              {sessionOpening ? "Opening…" : "Open Session"}
-            </button>
-          )}
-          <div className="inbox-more-wrap">
-            <button type="button" className="button secondary" aria-label="More Inbox actions"
-              aria-expanded={moreOpen} onClick={() => setMoreOpen(open => !open)}>⋯</button>
-            {moreOpen && <div className="inbox-more-menu">
-              <button disabled={saving} type="button" onClick={() => { setMoreOpen(false); void onMoveToDraft(); }}>Move to Draft</button>
-              <button disabled={saving} type="button" onClick={() => { setMoreOpen(false); void onArchive(); }}>Archive</button>
+      <header className="review-visual-header review-instrument-header">
+        <div className="review-instrument-navigation" role="group" aria-label="Inbox navigation">
+          <button type="button" className="review-instrument-icon" onClick={goPreviousItem}
+            aria-disabled={!previousItem} aria-label="Previous inbox item"
+            title={previousItem ? "Previous inbox item (K)" : "No previous inbox item (K)"}>
+            <ReviewHeaderIcon name="previous" />
+          </button>
+          <button type="button" className="review-instrument-icon exit" onClick={onExitInbox}
+            aria-label="Close Inbox" title="Close Inbox and return to the board (Alt+X) · Task remains unchanged">
+            <ReviewHeaderIcon name="close" />
+          </button>
+        </div>
+        <span className="review-instrument-id"
+          title={`${review.project} · ${review.task.id} · Round ${round.number}`}>{review.task.id}</span>
+        <div className="review-instrument-title">
+          <strong title={review.task.title}>{review.task.title}</strong>
+        </div>
+        <span className={`review-instrument-state inbox-task-column-chip column-${review.task.column}`}
+          title={`TaskBoard workflow column: ${review.task.column}. This is not a review decision.`}>
+          {review.task.column.replace(/-/g, " ")}
+        </span>
+        <span className="review-instrument-mode" title={modeDetails.explanation}>{modeDetails.label}</span>
+        <div className="review-instrument-actions" role="group" aria-label="Review controls">
+          <button type="button" className={"review-instrument-action" + (focus ? " active" : "")}
+            onClick={() => setFocus((value) => !value)} aria-pressed={focus}
+            aria-label={focus ? "Exit focus mode" : "Focus artwork"}
+            title={(focus ? "Exit focus mode" : "Focus artwork") + " (F)"}>
+            <ReviewHeaderIcon name="focus" />
+          </button>
+          <button type="button" className={"review-instrument-action" + (feedbackExpanded ? " active" : "")}
+            onClick={() => setFeedbackExpanded((value) => !value)} aria-pressed={feedbackExpanded}
+            aria-label={feedbackExpanded ? "Hide feedback" : "Show feedback"}
+            title={(feedbackExpanded ? "Hide feedback" : "Show feedback") + " (B)"}>
+            <ReviewHeaderIcon name="feedback" />
+          </button>
+          <div className="inbox-more-wrap review-instrument-more">
+            <button type="button" className="review-instrument-action" aria-label="More review actions"
+              aria-expanded={moreOpen} aria-haspopup="menu" title="More review actions (G)"
+              onClick={() => setMoreOpen((value) => !value)}><ReviewHeaderIcon name="more" /></button>
+            {moreOpen && <div className="inbox-more-menu review-instrument-menu" role="menu">
+              <div className="review-instrument-menu-caption">{modeDetails.explanation}</div>
+              <button role="menuitem" type="button" disabled={!onOpenTask || saving}
+                title={onOpenTask ? "Open full task (T)" : "Full task unavailable in this project"}
+                onClick={() => { setMoreOpen(false); onOpenTask?.(); }}>
+                Full task <kbd>T</kbd>
+              </button>
+              <button role="menuitem" type="button"
+                disabled={sessionOpening || saving || !(review.task.claimed_by || review.task.live?.with_me)}
+                title={(review.task.claimed_by || review.task.live?.with_me)
+                  ? "Open active task session (S)" : "No active task session"}
+                onClick={() => { setMoreOpen(false); onOpenSession(); }}>
+                {sessionOpening ? "Opening session…" : "Open session"} <kbd>S</kbd>
+              </button>
+              <button role="menuitem" type="button" disabled={priorityBusy}
+                title={(review.task.attention.includes("priority") ? "Remove" : "Set") + " task priority (U)"}
+                onClick={() => { setMoreOpen(false); onTogglePriority(); }}>
+                {review.task.attention.includes("priority") ? "★ Remove priority" : "☆ Prioritize"} <kbd>U</kbd>
+              </button>
+              <div className="review-instrument-menu-divider" />
+              <button role="menuitem" type="button" disabled={saving} title="Move task to Draft (Alt+D)"
+                onClick={() => { setMoreOpen(false); void onMoveToDraft(); }}>Move to Draft <kbd>Alt+D</kbd></button>
+              <button role="menuitem" type="button" disabled={saving} title="Archive task (Alt+A)"
+                onClick={() => { setMoreOpen(false); void onArchive(); }}>Archive <kbd>Alt+A</kbd></button>
             </div>}
           </div>
-          <button type="button" className={"button " + (feedbackExpanded ? "primary" : "secondary")}
-            onClick={() => setFeedbackExpanded((value) => !value)} aria-pressed={feedbackExpanded}>
-            ☷ Feedback</button>
-          <button type="button" className={"button " + (focus ? "primary" : "secondary")}
-            onClick={() => setFocus((value) => !value)} aria-pressed={focus}
-            title="Focus artwork (F)">{focus ? "Exit focus" : "⛶ Focus"} <kbd>F</kbd></button>
         </div>
       </header>
 

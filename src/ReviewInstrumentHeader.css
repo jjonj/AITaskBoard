@@ -1,0 +1,192 @@
+/* Dense instrument-bar variant for the visual Review Inbox.
+   Scoped independently so the rest of TaskBoard and other Inbox views are unchanged. */
+.review-visual-inspector.instrument-review {
+  grid-template-rows: 50px minmax(0, 1fr);
+}
+.review-visual-inspector.instrument-review > .review-instrument-header {
+  min-width: 0;
+  min-height: 50px;
+  height: 50px;
+  padding: 6px 11px;
+  gap: 9px;
+  border-bottom: 1px solid #405c6d;
+  background: #1a2935;
+}
+.review-instrument-navigation {
+  display: inline-flex;
+  align-items: stretch;
+  flex: none;
+  border: 1px solid #526b7d;
+  border-radius: 7px;
+  overflow: hidden;
+  background: #1c3041;
+}
+.review-visual-inspector .review-instrument-icon {
+  width: 36px;
+  height: 34px;
+  min-width: 36px;
+  display: inline-grid;
+  place-items: center;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  color: #d9e9f4;
+  background: transparent;
+  cursor: pointer;
+}
+.review-visual-inspector .review-instrument-icon + .review-instrument-icon {
+  border-left: 1px solid #496175;
+}
+.review-instrument-icon svg,
+.review-instrument-action svg {
+  width: 17px;
+  height: 17px;
+  display: block;
+  flex: none;
+}
+.review-instrument-icon:hover:not([aria-disabled="true"]),
+.review-instrument-action:hover {
+  background: #345369;
+}
+.review-instrument-icon.exit:hover { background: #62414b; color: #ffdee1; }
+.review-instrument-icon[aria-disabled="true"] {
+  color: #758b9b;
+  cursor: default;
+}
+.review-instrument-icon:focus-visible,
+.review-instrument-action:focus-visible,
+.review-instrument-menu button:focus-visible {
+  outline: 2px solid #a6dcf4;
+  outline-offset: -2px;
+}
+.review-instrument-id {
+  flex: none;
+  padding: 0 10px 0 3px;
+  border-right: 1px solid #506779;
+  color: #b9d3e5;
+  font-size: 11px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+.review-instrument-title {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+.review-instrument-title > strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #eef5fc;
+  font-size: 13px;
+  font-weight: 730;
+  line-height: 1.25;
+}
+.review-visual-inspector .review-instrument-state {
+  flex: none;
+  padding: 3px 7px;
+  border-radius: 5px;
+  font-size: 10px;
+  text-transform: none;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+.review-instrument-mode {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  padding: 5px 7px;
+  border: 1px solid #7b6443;
+  border-radius: 5px;
+  background: #3b3023;
+  color: #f3d0a0;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+}
+.review-instrument-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  padding: 3px;
+  border: 1px solid #465f72;
+  border-radius: 8px;
+  background: #213747;
+}
+.review-visual-inspector .review-instrument-action {
+  width: 32px;
+  min-width: 32px;
+  height: 30px;
+  min-height: 30px;
+  display: inline-grid;
+  place-items: center;
+  border: none;
+  border-radius: 5px;
+  padding: 0;
+  color: #cbdce8;
+  background: transparent;
+  cursor: pointer;
+}
+.review-visual-inspector .review-instrument-action.active {
+  background: #cbe5f1;
+  color: #163247;
+}
+.review-visual-inspector .review-instrument-action.active:hover {
+  background: #e0f1fa;
+}
+.review-instrument-more .review-instrument-menu {
+  min-width: 235px;
+  padding: 6px;
+  background: #223646;
+  border-color: #617f94;
+}
+.review-instrument-menu-caption {
+  color: #aac3d2;
+  font-size: 11px;
+  line-height: 1.45;
+  padding: 7px 9px 11px;
+  border-bottom: 1px solid #4a6173;
+  margin-bottom: 4px;
+  max-width: 260px;
+}
+.review-instrument-more .review-instrument-menu button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 32px;
+  font-size: 11px;
+}
+.review-instrument-menu kbd {
+  flex: none;
+  font: inherit;
+  font-size: 10px;
+  color: #adcadd;
+  border: 1px solid #48697f;
+  background: #1c2d3c;
+  border-radius: 4px;
+  padding: 3px 5px;
+}
+.review-instrument-menu-divider {
+  height: 1px;
+  background: #435b6c;
+  margin: 5px 6px;
+}
+@media (max-width: 1120px) {
+  .review-visual-inspector .review-instrument-state { display: none; }
+}
+@media (max-width: 800px) {
+  .review-instrument-mode { display: none; }
+  .review-instrument-id { padding-right: 5px; }
+  .review-visual-inspector.instrument-review > .review-instrument-header { gap: 6px; padding: 5px 7px; }
+  .review-instrument-title > strong { font-size: 11px; }
+}
+@media (max-width: 525px) {
+  .review-instrument-id { display: none; }
+  .review-visual-inspector .review-instrument-icon { width: 33px; min-width: 33px; }
+  .review-instrument-title > strong { font-size: 10px; }
+}
