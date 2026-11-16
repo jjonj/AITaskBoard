@@ -465,27 +465,71 @@ fn verify_release_member(path: Option<String>, release: String, attempt: u32, ta
     FsTaskStore::default().release_verify_member(&root(path), &release, attempt, &task, passed, &evidence).map_err(|e| e.to_string())
 }
 
+/// Launch Fomni through the Windows shell. Command::spawn returned Win32
+/// ERROR_NOT_SUPPORTED (50) in TaskBoard despite Fomni being executable.
+/// ShellExecuteW succeeds from the desktop process and forwards CLI arguments
+/// to Fomni's existing instance. Fomni's --select mode highlights
+/// the file within its explorer rather than opening a file tab.
+#[cfg(windows)]
+fn launch_fomni(path: &std::path::Path, select: bool) -> Result<(), String> {
+    use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn ShellExecuteW(
+            hwnd: isize, operation: *const u16, file: *const u16,
+            parameters: *const u16, directory: *const u16, show: i32,
+        ) -> isize;
+    }
+    if !std::path::Path::new(FOMNI_EXE).is_file() {
+        return Err(format!("Fomni executable is missing: {FOMNI_EXE}"));
+    }
+    let exe: Vec<u16> = OsStr::new(FOMNI_EXE).encode_wide().chain([0]).collect();
+    let path = path.to_string_lossy();
+    let parameters = if select {
+        format!("--select \"{path}\"")
+    } else {
+        format!("\"{path}\"")
+    };
+    let args: Vec<u16> = OsStr::new(&parameters).encode_wide().chain([0]).collect();
+    let code = unsafe { ShellExecuteW(
+        0, std::ptr::null(), exe.as_ptr(), args.as_ptr(), std::ptr::null(), 1,
+    ) };
+    if code <= 32 {
+        Err(format!("Windows shell could not launch Fomni (ShellExecuteW code {code})"))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn launch_fomni(_path: &std::path::Path, _select: bool) -> Result<(), String> {
+    Err("Fomni's Windows explorer integration is unavailable on this platform".into())
+}
+
+/// Fomni expects a normal drive or UNC path. fs::canonicalize on Windows
+/// returns extended-length \\?\ paths, which Fomni incorrectly treats as
+/// separate "/ ? / B:" breadcrumbs instead of a drive letter.
+fn fomni_target(file: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(file);
+    if !path.is_absolute() {
+        return Err(format!("Fomni needs an absolute file path: {file}"));
+    }
+    if !path.exists() {
+        return Err(format!("Fomni file does not exist: {file}"));
+    }
+    Ok(path)
+}
+
 #[tauri::command]
 fn highlight_in_fomni(file: String) -> Result<(), String> {
-    Command::new(FOMNI_EXE)
-        .arg("--select")
-        .arg(file)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("failed to launch Fomni: {e}"))
+    launch_fomni(&fomni_target(&file)?, true)
 }
 
 /// Open a real local Inbox artifact as a Fomni tab, rather than using the OS
 /// default application or revealing just its parent folder.
 #[tauri::command]
 fn open_file_in_fomni(file: String) -> Result<(), String> {
-    let path = fs::canonicalize(&file)
-        .map_err(|error| format!("Inbox file does not exist: {file} ({error})"))?;
-    Command::new(FOMNI_EXE)
-        .arg(&path)
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("failed to launch Fomni: {error}"))
+    launch_fomni(&fomni_target(&file)?, false)
 }
 
 /// Read selected published Dashboard captures directly from the durable
