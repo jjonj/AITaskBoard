@@ -12,6 +12,7 @@ mod queue_workload;
 mod busy_recovery;
 mod error_log;
 mod restart_warning;
+mod window_placement;
 
 use std::{fs, path::PathBuf, process::{Command, Stdio}, io::Write};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -952,6 +953,10 @@ fn startup_task() -> Option<serde_json::Value> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_window_state::Builder::default()
+            .with_state_flags(window_placement::state_flags())
+            .build())
+        .on_window_event(window_placement::on_window_event)
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             use tauri::Manager;
             if let Some(window) = app.get_webview_window("main") {
@@ -977,6 +982,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            window_placement::start(app);
             busy_recovery::start();
             std::thread::spawn(|| {
                 // Defer cloud-drive maintenance until the first board is visible.
