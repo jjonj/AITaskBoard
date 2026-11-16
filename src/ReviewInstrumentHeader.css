@@ -1,6 +1,10 @@
 /* Dense instrument-bar variant for the visual Review Inbox.
    Scoped independently so the rest of TaskBoard and other Inbox views are unchanged. */
 .review-visual-inspector.instrument-review {
+  /* The parent Inbox backdrop is anchored inside the project workspace.
+     Avoid the legacy fixed-to-window inspector, which hid project tabs. */
+  position: absolute;
+  inset: 0;
   grid-template-rows: 50px minmax(0, 1fr);
 }
 .review-visual-inspector.instrument-review > .review-instrument-header {
