@@ -19,6 +19,7 @@ fn draft(title: &str, column: &str, parent: Option<&str>) -> TaskDraft {
         reservation_token: None,
         title: title.into(),
         kind: task_core::TaskKind::Task,
+        review_mode: task_core::ReviewMode::Inbox,
         deployable: None,
         repeat_every_days: None,
         next_due: None,

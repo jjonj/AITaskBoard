@@ -353,6 +353,7 @@ pub fn move_task_between_projects(
         reserved_id: None,
         reservation_token: None,
         kind: old.kind,
+        review_mode: old.review_mode,
         deployable: old.deployable,
         repeat_every_days: old.repeat_every_days,
         next_due: old.next_due.clone(),

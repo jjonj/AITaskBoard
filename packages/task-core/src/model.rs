@@ -79,6 +79,19 @@ pub enum TaskKind {
     Release,
 }
 
+/// Where the human reviews an AI-owned task. Older tasks use the Inbox.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewMode {
+    #[default]
+    Inbox,
+    Session,
+}
+
+impl ReviewMode {
+    pub fn is_inbox(&self) -> bool { matches!(self, Self::Inbox) }
+}
+
 /// Optional live collaboration state. A missing block is a normal task.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -135,6 +148,8 @@ pub struct Task {
     /// Remains true after an agent claim or write, even if the claim is released.
     #[serde(default)]
     pub agent_interacted: bool,
+    #[serde(default, skip_serializing_if = "ReviewMode::is_inbox")]
+    pub review_mode: ReviewMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live: Option<TaskLive>,
     #[serde(default)]
@@ -210,6 +225,8 @@ pub struct TaskDraft {
     pub category: Option<String>,
     #[serde(default)]
     pub icon: Option<String>,
+    #[serde(default)]
+    pub review_mode: ReviewMode,
     #[serde(default)]
     pub attention: Vec<TaskAttention>,
     #[serde(default)]

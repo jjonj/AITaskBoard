@@ -244,6 +244,7 @@ const emptyDraft = (
   parent,
   category,
   kind: "task",
+  review_mode: "inbox",
   deployable: null,
   repeat_every_days: null,
   next_due: null,
@@ -1401,6 +1402,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     parent: task.parent,
     category: task.category,
     kind: task.kind,
+    review_mode: task.review_mode ?? "inbox",
     deployable: task.deployable ?? null,
     repeat_every_days: task.repeat_every_days ?? null,
     next_due: task.next_due ?? null,
@@ -2326,6 +2328,7 @@ Details: ${queueRecoveryWarning}`;
       draft: {
         ...editor.draft,
         kind,
+        review_mode: kind === "task" || kind === "recurring" ? editor.draft.review_mode : "inbox",
         repeat_every_days: kind === "recurring" ? editor.draft.repeat_every_days : null,
         next_due: kind === "recurring" ? editor.draft.next_due : null,
         parent: kind === "epic" ? null : editor.draft.parent,
@@ -4777,6 +4780,34 @@ Details: ${queueRecoveryWarning}`;
                   onChange={(event) => setEditor({ ...editor, draft: { ...editor.draft, deployable: event.currentTarget.checked } })} />
                 Enroll automatically in the rolling release when this task is Done
               </label>
+            )}
+            {(editor.draft.kind === "task" || editor.draft.kind === "recurring") && (
+              <section className="task-review-mode" aria-label="How this task is reviewed">
+                <div className="task-review-mode-label">Review with you</div>
+                <div className="task-review-mode-options" role="group" aria-label="Review mode">
+                  {(["session", "inbox"] as const).map(mode => {
+                    const selected = (editor.draft.review_mode ?? "inbox") === mode;
+                    const hasPendingInbox = mode === "session" && !!editor.original &&
+                      (editor.original.review_status === "open" ||
+                       (!!editor.original.question && !editor.original.question.answer));
+                    return <button key={mode} type="button" aria-pressed={selected}
+                      className={`task-review-mode-option${selected ? " active" : ""}`}
+                      disabled={busy || hasPendingInbox}
+                      title={hasPendingInbox ? "Resolve the existing Inbox request before switching to Session" :
+                        mode === "session" ? "Iterate directly in the T3 session with persistent Get My Attention; no Inbox review" :
+                        "Send required verification or visual work to TaskBoard's review Inbox; no duplicate GMA review"}
+                      onClick={() => setEditor(current => current ? {
+                        ...current, draft: { ...current.draft, review_mode: mode },
+                      } : current)}>
+                      <strong>{mode === "session" ? "Session · GMA" : "Review Inbox"}</strong>
+                      <small>{mode === "session" ? "Interactive · until you're happy" : "Asynchronous · approve later"}</small>
+                    </button>;
+                  })}
+                </div>
+                <p>{(editor.draft.review_mode ?? "inbox") === "session"
+                  ? "The agent shares evidence and iterates in the linked T3 session. It requests persistent GMA attention instead of creating an Inbox item."
+                  : "The agent submits finished work to the review Inbox when human acceptance is needed. No duplicate session-based approval."}</p>
+              </section>
             )}
             {editor.draft.kind === "epic" && (
               <div className="epic-editor-note">EPIC — not executable or assignable. Its board column is automatically derived from its subtasks.</div>

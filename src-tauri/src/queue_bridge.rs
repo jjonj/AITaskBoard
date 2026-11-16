@@ -57,6 +57,11 @@ fn body(task: &Task, reference: &Value) -> String {
     let mut message = format!("Work on {} — {}. Read the exact TaskBoard card at {}/{} ({}), its latest acceptance criteria and project instructions. This queue receipt is NOT a completion claim.",
         task.id, task.title, reference["boardRoot"].as_str().unwrap_or(""),
         task.id, reference["environmentId"].as_str().unwrap_or("pc"));
+    if task.review_mode == task_core::ReviewMode::Session {
+        message.push_str("\n\nREVIEW MODE: SESSION. Review only inside the task's T3 session using persistent Get My Attention (GMA) until the user confirms satisfaction. Send screenshots/evidence to the session, iterate there, and NEVER add a TaskBoard Inbox verification, question, or visual-review request. Finish the task only after the user accepts it in-session.");
+    } else {
+        message.push_str("\n\nREVIEW MODE: INBOX. Submit any requested human review through the original TaskBoard card, not a duplicate GMA session review.");
+    }
     if task.live.as_ref().is_some_and(|live| live.with_me) {
         message.push_str("\n\nWith me: prepare everything that does not need the human first. When live back-and-forth is genuinely needed, write a three-line brief (Done / Need from you / Minutes), run task live ready <ID> --brief \"Done: ... / Need from you: ... / Minutes: ...\" --est <minutes> on this owning board, then end your turn. Do NOT send an OpenRig Inbox, aispeak or feedback request merely to announce readiness. Quick standalone questions still use the existing TaskBoard question mechanism.");
     }

@@ -1946,6 +1946,18 @@ body.column-dragging * {
   background: linear-gradient(90deg, #40314f, transparent 68%);
 }
 
+/* Each AI task has one human review channel, not simultaneous Inbox and session gates. */
+.task-review-mode { margin: 10px 0 14px; padding: 12px 14px; border: 1px solid #354251; background: #161f2a; border-radius: 10px; }
+.task-review-mode-label { color: #d4e0ed; font-weight: 700; font-size: 12px; margin-bottom: 8px; }
+.task-review-mode-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+.task-review-mode-option { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 10px 13px; text-align: left; border-radius: 8px; border: 1px solid #37475a; background: #101720; color: #b7c6d5; cursor: pointer; }
+.task-review-mode-option strong { font-size: 13px; font-weight: 750; }
+.task-review-mode-option small { font-size: 11px; color: #8e9dae; }
+.task-review-mode-option.active { border-color: #74add1; background: #233b4e; color: #e5f4ff; box-shadow: 0 0 0 1px #446c89 inset; }
+.task-review-mode-option.active small { color: #bdd7e7; }
+.task-review-mode-option:disabled { opacity: .5; cursor: not-allowed; }
+.task-review-mode > p { margin: 9px 0 0; color: #99aabd; font-size: 11px; line-height: 1.5; }
+
 /* Explicit card kind switch at the top of the create/edit dialog. */
 .task-kind-switch {
   display: flex;

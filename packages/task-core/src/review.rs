@@ -427,6 +427,9 @@ impl FsTaskStore {
         let snapshot = self.load_unlocked(root)?;
         let mut task = find_review_task(&snapshot, &input.task_id)?;
         ensure_expected(input.expected_task_revision.as_deref().unwrap_or(""), &task.revision, &task.id)?;
+        if task.review_mode == crate::ReviewMode::Session {
+            return Err(TaskStoreError::Invalid("This task uses Session (persistent GMA) review; discuss evidence in the T3 session instead of submitting an Inbox review".into()));
+        }
         // A required video must not silently turn into a five-frame gallery
         // after a recording failure. The human can change the task's explicit
         // acceptance requirement when they intentionally waive video.
@@ -517,6 +520,9 @@ impl FsTaskStore {
         let snapshot = self.load_unlocked(root)?;
         let mut task = find_review_task(&snapshot, &input.task_id)?;
         ensure_expected(&input.expected_task_revision, &task.revision, &task.id)?;
+        if task.review_mode == crate::ReviewMode::Session {
+            return Err(TaskStoreError::Invalid("Session (GMA) tasks cannot reopen an Inbox review".into()));
+        }
         let file = manifest_file(root, &task.id);
         let mut manifest = parse_manifest(&file)?;
         ensure_expected(&input.expected_manifest_revision, &manifest.revision, "review manifest")?;

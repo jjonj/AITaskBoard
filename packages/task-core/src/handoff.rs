@@ -50,5 +50,10 @@ pub fn handoff_bundle(task: &Task) -> HandoffPacket {
     HandoffPacket {origin_sessions,latest_claim:task.claimed_by.clone(),user_decisions,
         progress,artifact_references,commit_references,uncommitted_references,
         latest_rejection,
-        instructions:format!("Continue {} using current TaskBoard revision. FIRST implement any USER DECISION in user_decisions / AI Notes as the next requirement. Do not request approval again for an answered question. Inspect previous work and working tree before edits; missing evidence is unknown, not completed.",task.id)}
+        instructions:format!("Continue {} using current TaskBoard revision. FIRST implement any USER DECISION in user_decisions / AI Notes as the next requirement. Do not request approval again for an answered question. Inspect previous work and working tree before edits; missing evidence is unknown, not completed. {}",task.id,
+            if task.review_mode == crate::ReviewMode::Session {
+                "REVIEW MODE: Session (persistent GMA). Keep the user in the linked T3 session, request persistent GMA attention for feedback, iterate until the user is satisfied, and DO NOT submit TaskBoard Inbox questions, verification or visual reviews. Finish only when the user accepts the work in-session."
+            } else {
+                "REVIEW MODE: Inbox. Submit required review/verification through the original TaskBoard card (not GMA session review)."
+            })}
 }

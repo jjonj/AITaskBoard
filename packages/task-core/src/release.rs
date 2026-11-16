@@ -174,7 +174,8 @@ pub(crate) fn reconcile_repairs_unlocked(root: &Path) -> Result<bool, TaskStoreE
                 let related_to = attempt.members.iter().map(|m| m.task_id.clone())
                     .filter(|id| snapshot.tasks.iter().any(|t| &t.id == id)).collect();
                 let draft = TaskDraft {
-                    kind: TaskKind::Task, deployable: Some(true), blocked_reason: None,
+                    kind: TaskKind::Task, review_mode: crate::ReviewMode::Inbox,
+                    deployable: Some(true), blocked_reason: None,
                     repeat_every_days: None, next_due: None,
                     reserved_id: None, reservation_token: None,
                     depends_on: vec![], related_to,

@@ -133,6 +133,8 @@ struct TaskMeta {
     claimed_by: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     agent_interacted: bool,
+    #[serde(default, skip_serializing_if = "crate::ReviewMode::is_inbox")]
+    review_mode: crate::ReviewMode,
     // Existing T3 claim lineage predates the durable interaction flag.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     originating_t3_sessions: Vec<String>,
@@ -933,6 +935,7 @@ impl FsTaskStore {
             icon: draft.icon,
             claimed_by: None,
             agent_interacted: false,
+            review_mode: draft.review_mode,
             live: None,
             attention: draft.attention,
             question: draft.question,
@@ -2350,6 +2353,14 @@ fn validate_draft(snapshot: &BoardSnapshot, draft: &TaskDraft) -> Result<(), Tas
     validate_parent_epic_only(snapshot, draft.kind, draft.parent.as_deref(), None)?;
     validate_recurrence(draft.kind, draft.repeat_every_days, draft.next_due.as_deref())?;
     validate_attention(&draft.attention, draft.question.as_ref())?;
+    if draft.review_mode == crate::ReviewMode::Session &&
+        !matches!(draft.kind, TaskKind::Task | TaskKind::Recurring) {
+        return Err(TaskStoreError::Invalid("Only agent-owned tasks can use Session review".into()));
+    }
+    if draft.review_mode == crate::ReviewMode::Session &&
+        draft.question.as_ref().is_some_and(|question| question.answer.is_none()) {
+        return Err(TaskStoreError::Invalid("Session review tasks cannot create an Inbox question; use the linked T3 session and GMA".into()));
+    }
     validate_icon(draft.icon.as_deref())?;
     validate_epic_fields(draft.kind, draft.icon.as_deref(), &draft.attention,
         draft.question.as_ref(), &draft.acceptance_criteria, &draft.ai_notes)?;
@@ -2408,6 +2419,15 @@ fn validate_task(snapshot: &BoardSnapshot, task: &Task) -> Result<(), TaskStoreE
     validate_parent_epic_only(snapshot, task.kind, task.parent.as_deref(), Some(&task.id))?;
     validate_recurrence(task.kind, task.repeat_every_days, task.next_due.as_deref())?;
     validate_attention(&task.attention, task.question.as_ref())?;
+    if task.review_mode == crate::ReviewMode::Session &&
+        !matches!(task.kind, TaskKind::Task | TaskKind::Recurring) {
+        return Err(TaskStoreError::Invalid("Only agent-owned tasks can use Session review".into()));
+    }
+    if task.review_mode == crate::ReviewMode::Session &&
+        (task.review_status.as_deref() == Some("open") ||
+         task.question.as_ref().is_some_and(|question| question.answer.is_none())) {
+        return Err(TaskStoreError::Invalid("Resolve the pending Inbox request before switching to Session (GMA) review".into()));
+    }
     validate_live(task)?;
     validate_icon(task.icon.as_deref())?;
     validate_epic_fields(task.kind, task.icon.as_deref(), &task.attention,
@@ -2730,6 +2750,7 @@ fn parse_task(path: &Path, archived: bool, text: &str) -> Result<Task, TaskStore
         icon: meta.icon,
         claimed_by: meta.claimed_by,
         agent_interacted,
+        review_mode: meta.review_mode,
         live: meta.live,
         attention: meta.attention,
         question: meta.question,
@@ -2940,6 +2961,7 @@ fn render_task(task: &Task, existing: Option<&str>) -> Result<String, TaskStoreE
         icon: task.icon.clone(),
         claimed_by: task.claimed_by.clone(),
         agent_interacted: task.agent_interacted || task.claimed_by.is_some(),
+        review_mode: task.review_mode,
         originating_t3_sessions: Vec::new(), // Retained from existing frontmatter.
         live: task.live.clone(),
         attention: task.attention.clone(),
@@ -2968,6 +2990,7 @@ fn render_task(task: &Task, existing: Option<&str>) -> Result<String, TaskStoreE
         mapping.remove(serde_yaml::Value::String("icon".into()));
         mapping.remove(serde_yaml::Value::String("claimed_by".into()));
         mapping.remove(serde_yaml::Value::String("agent_interacted".into()));
+        mapping.remove(serde_yaml::Value::String("review_mode".into()));
         mapping.remove(serde_yaml::Value::String("live".into()));
         mapping.remove(serde_yaml::Value::String("attention".into()));
         mapping.remove(serde_yaml::Value::String("question".into()));

@@ -11,7 +11,7 @@ fn close_review_finishes_task_without_inventing_a_verdict() {
     store.ensure_board(root, "Review test").unwrap();
     let task = store.create(root, TaskDraft {
         reserved_id: None, reservation_token: None, title: "Do we need this?".into(),
-        kind: TaskKind::Task, deployable: None, repeat_every_days: None, next_due: None,
+        kind: TaskKind::Task, review_mode: task_core::ReviewMode::Inbox, deployable: None, repeat_every_days: None, next_due: None,
         depends_on: vec![], related_to: vec![], column: "ai-ready".into(),
         parent: None, category: None, icon: None, attention: vec![], question: None,
         blocked_reason: None, description: "The user may dismiss it.".into(),
@@ -52,4 +52,33 @@ fn close_review_finishes_task_without_inventing_a_verdict() {
     assert!(finished.user_notes.contains("Not interested"));
     assert!(finished.description.contains("without decision"));
     assert!(store.review_close(root, request).is_err(), "stale/double close must fail");
+}
+
+#[test]
+fn session_mode_blocks_inbox_review_without_creating_a_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let store = FsTaskStore::default();
+    store.ensure_board(root, "Session review").unwrap();
+    let task = store.create(root, TaskDraft {
+        reserved_id: None, reservation_token: None,
+        title: "Review in session".into(), kind: TaskKind::Task,
+        review_mode: task_core::ReviewMode::Session, deployable: None,
+        repeat_every_days: None, next_due: None, depends_on: vec![], related_to: vec![],
+        column: "ai-ready".into(), parent: None, category: None, icon: None,
+        attention: vec![], question: None, blocked_reason: None,
+        description: "Discuss this in T3".into(), acceptance_criteria: vec![],
+        ai_notes: String::new(), user_notes: String::new(), notes: String::new(),
+    }).unwrap();
+    assert_eq!(task.review_mode, task_core::ReviewMode::Session);
+    let error = store.review_request(root, ReviewRequest {
+        task_id: task.id.clone(), mode: "approve".into(), judge: "Approve this?".into(),
+        criteria: vec![], artifacts: vec![], references: vec![], previous: None,
+        poster: None, top_k: None, implemented_by: None, openrig_gate: None,
+        expected_task_revision: Some(task.revision.clone()), expected_manifest_revision: None,
+    }).unwrap_err();
+    assert!(error.to_string().contains("Session"));
+    let unchanged = store.load(root).unwrap().tasks.into_iter().find(|t| t.id == task.id).unwrap();
+    assert!(unchanged.question.is_none());
+    assert!(unchanged.review_status.is_none());
 }

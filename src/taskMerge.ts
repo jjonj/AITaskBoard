@@ -7,7 +7,7 @@ export function mergeTaskEdits(base: Task, edited: Task, disk: Task): {
   conflicts: string[];
 } {
   const fields: (keyof Task)[] = [
-    "title", "column", "parent", "category", "kind", "deployable",
+    "title", "column", "parent", "category", "kind", "review_mode", "deployable",
     "repeat_every_days", "next_due", "blocked_reason", "depends_on", "related_to",
     "icon", "attention", "question", "description", "acceptance_criteria",
     "ai_notes", "user_notes", "notes",

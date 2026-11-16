@@ -305,6 +305,9 @@ struct TaskCreateArgs {
     icon: Option<String>,
     #[arg(long, default_value = "task")]
     kind: String,
+    /// inbox (default) or session (persistent GMA; no Inbox submissions).
+    #[arg(long, default_value = "inbox")]
+    review_mode: String,
     #[arg(long)] repeat_every_days: Option<u32>,
     #[arg(long)] next_due: Option<String>,
     #[arg(long = "depends-on")]
@@ -348,6 +351,8 @@ struct TaskUpdateArgs {
     clear_icon: bool,
     #[arg(long)]
     kind: Option<String>,
+    #[arg(long)]
+    review_mode: Option<String>,
     #[arg(long)] repeat_every_days: Option<u32>,
     #[arg(long)] next_due: Option<String>,
     #[arg(long)] clear_recurrence: bool,
@@ -678,6 +683,9 @@ fn run_ask_user(store: &FsTaskStore, root: &Path, args: &TaskAskUserArgs) -> Res
     let snapshot = load_checked(store, root)?;
     let mut task = resolve_task(&snapshot, &args.target, false)?.clone();
     ensure_task_rewrite_safe(&task)?;
+    if task.review_mode == task_core::ReviewMode::Session {
+        return Err(CliError::new("session_review", "This task uses Session review. Use the T3 session and persistent GMA, not the TaskBoard Inbox."));
+    }
     if task.kind != task_core::TaskKind::Task || is_human_only(&task) {
         return Err(CliError::new("invalid_request_target", "Use the original AI-owned implementation task, not a For user card or epic"));
     }
@@ -733,6 +741,9 @@ fn run_finish(store: &FsTaskStore, root: &Path, args: &TaskFinishArgs) -> Result
     match args.verification.as_str() {
         "none" => {},
         "user" => {
+            if task.review_mode == task_core::ReviewMode::Session {
+                return Err(CliError::new("session_review", "This task uses Session review. Finish only after agreeing in T3; do not submit Inbox verification."));
+            }
             let instructions = args.instructions.as_deref().unwrap_or("").trim();
             if instructions.is_empty() {
                 return Err(CliError::new("verification_instructions_required", "Provide --instructions with concrete verification steps and deployed evidence"));
@@ -1202,6 +1213,7 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
                 column,
                 parent,
                 kind,
+                review_mode: parse_review_mode(&args.review_mode)?,
                 deployable: None,
                 repeat_every_days: args.repeat_every_days,
                 next_due: args.next_due.clone(),
@@ -1236,6 +1248,7 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
                 }
                 task.kind = new_kind;
             }
+            if let Some(mode) = &args.review_mode { task.review_mode = parse_review_mode(mode)?; }
             if args.clear_recurrence { task.repeat_every_days = None; task.next_due = None; }
             if let Some(days) = args.repeat_every_days { task.repeat_every_days = Some(days); }
             if let Some(due) = &args.next_due { task.next_due = Some(due.clone()); }
@@ -1647,6 +1660,13 @@ fn parse_kind(value: &str) -> Result<task_core::TaskKind, CliError> {
         _ => Err(CliError::new("usage_error", "kind must be task, epic, for_user or recurring")),
     }
 }
+fn parse_review_mode(value: &str) -> Result<task_core::ReviewMode, CliError> {
+    match value {
+        "inbox" => Ok(task_core::ReviewMode::Inbox),
+        "session" | "gma" => Ok(task_core::ReviewMode::Session),
+        _ => Err(CliError::new("usage_error", "review-mode must be inbox or session")),
+    }
+}
 fn unfinished_dependencies<'a>(snapshot: &'a BoardSnapshot, task: &'a Task) -> Vec<&'a str> {
     task.depends_on.iter().filter(|id| {
         snapshot.tasks.iter().find(|t| t.id == **id)
@@ -2036,6 +2056,7 @@ mod tests {
             reservation_token: None,
             title: title.into(),
             kind: task_core::TaskKind::Task,
+            review_mode: task_core::ReviewMode::Inbox,
             deployable: None,
             repeat_every_days: None, next_due: None,
             depends_on: vec![],
@@ -2314,6 +2335,7 @@ mod tests {
         let args = TaskCreateArgs {
             title: "Human feedback".into(),
             kind: "task".into(),
+            review_mode: "inbox".into(),
             repeat_every_days: None, next_due: None,
             depends_on: vec![],
             related_to: vec![],
@@ -2735,7 +2757,7 @@ mod rolling_release_cli_tests {
         let store = FsTaskStore::default();
         let mut human = store.create(&root, TaskDraft {
             reserved_id: None, reservation_token: None,
-            kind: task_core::TaskKind::Task, deployable: None,
+            kind: task_core::TaskKind::Task, review_mode: task_core::ReviewMode::Inbox, deployable: None,
             repeat_every_days: None, next_due: None,
             depends_on: vec![], related_to: vec![], title: "Human task".into(), column: "ai-ready".into(),
             parent: None, category: None, icon: None, attention: vec![], question: None, blocked_reason: None, description: String::new(),

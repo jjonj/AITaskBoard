@@ -12,7 +12,7 @@ fn board() -> (FsTaskStore, PathBuf) {
 fn draft(column: &str) -> TaskDraft {
     TaskDraft {
         reserved_id: None, reservation_token: None, title: "Finish this task".into(),
-        kind: TaskKind::Task, deployable: None, repeat_every_days: None, next_due: None,
+        kind: TaskKind::Task, review_mode: task_core::ReviewMode::Inbox, deployable: None, repeat_every_days: None, next_due: None,
         depends_on: vec![], related_to: vec![], column: column.into(), parent: None,
         category: None, icon: None, attention: vec![], question: None,
         blocked_reason: None, description: "Some work".into(), acceptance_criteria: vec![],

@@ -8,7 +8,7 @@ fn board(label: &str) -> PathBuf {
 fn draft(title: &str, depends_on: Vec<String>) -> TaskDraft {
     TaskDraft {
         reserved_id: None, reservation_token: None, title: title.into(),
-        kind: TaskKind::Task, deployable: None, repeat_every_days: None, next_due: None,
+        kind: TaskKind::Task, review_mode: task_core::ReviewMode::Inbox, deployable: None, repeat_every_days: None, next_due: None,
         depends_on, related_to: vec![], column: "ai-ready".into(),
         parent: None, category: None, icon: None, attention: vec![], question: None,
         blocked_reason: None, description: String::new(), acceptance_criteria: vec![],

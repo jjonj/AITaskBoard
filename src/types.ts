@@ -34,6 +34,7 @@ export type TaskQuestion = {
 };
 
 export type TaskKind = "task" | "epic" | "for_user" | "recurring" | "release";
+export type ReviewMode = "inbox" | "session";
 export type TaskLive = {
   with_me: boolean;
   state?: "ready" | "in_session" | null;
@@ -61,6 +62,8 @@ export type Task = {
   claimed_by: string | null;
   /** Persistent record of prior agent work; never inferred from the current column. */
   agent_interacted?: boolean;
+  /** Absent on legacy tasks, which default to Inbox review. */
+  review_mode?: ReviewMode;
   live?: TaskLive | null;
   attention: TaskAttention[];
   question: TaskQuestion | null;
@@ -89,6 +92,7 @@ export type TaskDraft = {
   reserved_id?: string | null;
   reservation_token?: string | null;
   kind: TaskKind;
+  review_mode?: ReviewMode;
   deployable?: boolean | null;
   repeat_every_days?: number | null;
   next_due?: string | null;

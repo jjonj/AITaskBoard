@@ -7,7 +7,7 @@ fn root(label: &str) -> PathBuf {
 fn draft(title: &str) -> TaskDraft {
     TaskDraft {
         reserved_id: None, reservation_token: None,
-        kind: TaskKind::Task, deployable: None, blocked_reason: None,
+        kind: TaskKind::Task, review_mode: task_core::ReviewMode::Inbox, deployable: None, blocked_reason: None,
         repeat_every_days: None, next_due: None,
         depends_on: vec![], related_to: vec![], title: title.into(), column: "in-progress".into(), parent: None,
         category: None, icon: None, attention: vec![], question: None,
