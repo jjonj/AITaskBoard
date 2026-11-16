@@ -7,10 +7,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { activateProject, addProject, boardChangeTokens, listProjects, loadBoard, moveTaskBetweenProjects, removeProject, reorderProjects, restoreProject, saveBoardConfig, setProjectFolders, showMainWindow, userQueueProjectIds, taskQueueWorkload } from "./api";
 import type { ProjectCatalog, ProjectPriority, ProjectTab, QueueWorkload } from "./api";
-import type { BoardConfig, BoardSnapshot } from "./types";
+import type { BoardConfig, BoardSnapshot, TaskDraft } from "./types";
+import type { PendingClipboardImage } from "./TaskImageGallery";
 
 type Props = {
-  Board: (props: { project: ProjectTab; onInteractionChange: (locked: boolean) => void; requestedReviewId?: string; requestedTask?: {id: string; requestKey: number}; initialSnapshot?: BoardSnapshot; onSnapshot?: (path: string, snapshot: BoardSnapshot) => void; onInboxCount?: (path: string, count: number) => void }) => React.ReactNode;
+  Board: (props: { project: ProjectTab; onInteractionChange: (locked: boolean) => void; requestedReviewId?: string; requestedTask?: {id: string; requestKey: number}; requestedCreate?: {draft: TaskDraft; images: PendingClipboardImage[]; sourcePath: string; requestKey: number}; initialSnapshot?: BoardSnapshot; onSnapshot?: (path: string, snapshot: BoardSnapshot) => void; onInboxCount?: (path: string, count: number) => void }) => React.ReactNode;
 };
 type DialogMode = "create" | "folders" | null;
 type TabDrop = { id: string; after: boolean };
@@ -76,6 +77,28 @@ export function ProjectTabs({ Board }: Props) {
   }, []);
   const [startupReview, setStartupReview] = useState<{ path: string; taskId: string } | null>(null);
   const [startupTask, setStartupTask] = useState<{ path: string; taskId: string; requestKey: number } | null>(null);
+  // Handoff keeps an unsaved creation intact while the old board releases its ID.
+  const [createHandoff, setCreateHandoff] = useState<{
+    destinationId: string; draft: TaskDraft; images: PendingClipboardImage[];
+    sourcePath: string; requestKey: number;
+  } | null>(null);
+  useEffect(() => {
+    const switchEditor = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        destinationId: string; draft: TaskDraft; images: PendingClipboardImage[]; sourcePath: string;
+      }>).detail;
+      if (!detail || !catalog?.projects.some((item) => item.id === detail.destinationId)) return;
+      setCreateHandoff({ ...detail, requestKey: Date.now() });
+      setCatalog((current) => current ? { ...current, activeId: detail.destinationId } : current);
+    };
+    const consumed = () => setCreateHandoff(null);
+    window.addEventListener("taskboard:editor-switch-project", switchEditor);
+    window.addEventListener("taskboard:create-handoff-consumed", consumed);
+    return () => {
+      window.removeEventListener("taskboard:editor-switch-project", switchEditor);
+      window.removeEventListener("taskboard:create-handoff-consumed", consumed);
+    };
+  }, [catalog?.projects]);
   useEffect(() => {
     const onSearchResult = (event: Event) => {
       const detail = (event as CustomEvent<{ path: string; taskId: string }>).detail;
@@ -790,6 +813,7 @@ export function ProjectTabs({ Board }: Props) {
       {(error || catalogError) && !dialogMode && <div className="project-catalog-error" role="alert">{error || catalogError}</div>}
       {active && <div className="project-workspace" id="project-board" role="tabpanel">
         <Board key={active.id} project={active} onInteractionChange={setLocked}
+            {...(createHandoff?.destinationId === active.id ? { requestedCreate: createHandoff } : {})}
             initialSnapshot={boardCache.current.get(active.path)} onSnapshot={rememberBoard}
             onInboxCount={rememberInboxCount}
             {...(startupReview && startupReview.path.replace(/\\/g, "/").toLowerCase() === active.path.replace(/\\/g, "/").toLowerCase()

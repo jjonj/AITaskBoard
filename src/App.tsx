@@ -43,6 +43,7 @@ import {
   highlightInFomni,
   loadBoard,
   listProjects,
+  moveTaskBetweenProjects,
   openInObsidian,
   openTaskSession,
   startTaskPreparation,
@@ -295,11 +296,12 @@ const randomColumnColor = (used: string[]) => {
   return pool[Math.floor(Math.random() * pool.length)];
 };
 
-function ProjectBoard({ project, onInteractionChange, requestedReviewId, requestedTask, initialSnapshot, onSnapshot, onInboxCount }: {
+function ProjectBoard({ project, onInteractionChange, requestedReviewId, requestedTask, requestedCreate, initialSnapshot, onSnapshot, onInboxCount }: {
   project: ProjectTab;
   onInteractionChange: (locked: boolean) => void;
   requestedReviewId?: string;
   requestedTask?: { id: string; requestKey: number };
+  requestedCreate?: { draft: TaskDraft; images: PendingClipboardImage[]; sourcePath: string; requestKey: number };
   initialSnapshot?: BoardSnapshot;
   onSnapshot?: (path: string, snapshot: BoardSnapshot) => void;
   onInboxCount?: (path: string, count: number) => void;
@@ -482,6 +484,34 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     return `Claimed: ${h.owner} · ${h.agentState} · task update ${age(h.taskActivityAt)} · T3 last working ${age(h.agentActivityAt)} · T3 observed ${age(h.verifiedAt)}`;
   };
   const [editor, setEditor] = useState<EditorState | null>(null);
+  const [editorProjects, setEditorProjects] = useState<ProjectTab[]>([project]);
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+  const [transferTarget, setTransferTarget] = useState<ProjectTab | null>(null);
+  useEffect(() => {
+    if (!editor) { setProjectPickerOpen(false); setTransferTarget(null); return; }
+    let cancelled = false;
+    void listProjects().then((catalog) => { if (!cancelled) setEditorProjects(catalog.projects); })
+      .catch(() => { if (!cancelled) setEditorProjects([project]); });
+    return () => { cancelled = true; };
+  }, [!!editor, project.id]);
+  useEffect(() => {
+    if (!projectPickerOpen) return;
+    const dismiss = (event: PointerEvent) => {
+      if (!(event.target as Element).closest(".task-id-project-picker")) setProjectPickerOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setProjectPickerOpen(false);
+    };
+    document.addEventListener("pointerdown", dismiss);
+    window.addEventListener("keydown", escape, true);
+    return () => {
+      document.removeEventListener("pointerdown", dismiss);
+      window.removeEventListener("keydown", escape, true);
+    };
+  }, [projectPickerOpen]);
   const [prepRequestId, setPrepRequestId] = useState<string | null>(null);
   const prepLaunchRef = useRef<Promise<unknown> | null>(null);
   const prepNotified = useRef(new Set<string>());
@@ -1548,6 +1578,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     setQuestionAnswerText("");
     setDoneMenuOpen(false);
     setHoverTask(null);
+    setTransferTarget(null);
     setEditor({
       mode: "edit",
       original: task,
@@ -1555,6 +1586,37 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     });
   };
 
+  const handledCreate = useRef<number | null>(null);
+  useEffect(() => {
+    if (!requestedCreate || !snapshot || handledCreate.current === requestedCreate.requestKey) return;
+    handledCreate.current = requestedCreate.requestKey;
+    const columns = snapshot.config.columns;
+    const column = columns.find((item) => item.id === requestedCreate.draft.column && !item.hidden && !item.terminal)
+      ?? columns.find((item) => item.ai_ready && !item.hidden && !item.terminal)
+      ?? columns.find((item) => !item.hidden && !item.terminal);
+    if (!column) { setError("This project has no active column for the new task."); return; }
+    const qualify = (id: string) => id.includes("#") ? id : `${requestedCreate.sourcePath}#${id}`;
+    setPendingClipboardImages(requestedCreate.images);
+    setEditor({ mode: "create", draft: {
+      ...requestedCreate.draft, column: column.id, parent: null,
+      depends_on: requestedCreate.draft.depends_on.map(qualify),
+      related_to: requestedCreate.draft.related_to.map(qualify),
+    } });
+    window.dispatchEvent(new Event("taskboard:create-handoff-consumed"));
+  }, [requestedCreate?.requestKey, snapshot]);
+
+  const chooseEditorProject = (destination: ProjectTab) => {
+    setProjectPickerOpen(false);
+    if (editor?.mode === "create") {
+      if (destination.id === project.id) return;
+      window.dispatchEvent(new CustomEvent("taskboard:editor-switch-project", {
+        detail: { destinationId: destination.id, sourcePath: boardPath,
+          draft: editor.draft, images: pendingClipboardImages },
+      }));
+    } else {
+      setTransferTarget(destination.id === project.id ? null : destination);
+    }
+  };
   const handledDeepLink = useRef<number | null>(null);
   useEffect(() => {
     if (!requestedTask || !snapshot || handledDeepLink.current === requestedTask.requestKey) return;
@@ -1623,6 +1685,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     setUserQueueReview(null);
     setFollowupQueueReturn(null);
     setDoneMenuOpen(false);
+    setTransferTarget(null);
     setEditor({ mode: "create", draft: emptyDraft(target,
       parent && taskMap.get(parent)?.kind === "epic" ? parent : null, category) });
   };
@@ -2077,6 +2140,27 @@ Details: ${queueRecoveryWarning}`;
         draft = { ...draft, notes: retained.join("\n\n") };
       }
       if (executionLoading) throw new Error("Still reading the existing execution state; save after it loads.");
+      if (transferTarget && editor.mode === "edit" && editor.original) {
+        if (editor.original.claimed_by) throw new Error("Release the task’s agent claim before moving it to another board.");
+        if (markDone) throw new Error("Move the task first, then mark it Done in the destination board.");
+        // Save pending changes first, then let the existing revision-checked native
+        // transfer allocate the destination ID. On failure the source remains intact.
+        const saved = await updateWithDiskMerge(editor.original, { ...editor.original, ...draft });
+        try {
+          const moved = await moveTaskBetweenProjects(project.id, transferTarget.id, saved.id, saved.revision);
+          applySnapshot(await loadBoard(boardPath));
+          closeEditor(snapshot, true);
+          window.dispatchEvent(new CustomEvent("taskboard:open-search-result", {
+            detail: { path: transferTarget.path, taskId: moved.id },
+          }));
+          return;
+        } catch (reason) {
+          setPendingClipboardImages([]);
+          setEditor((current) => current?.original?.id === saved.id
+            ? { ...current, original: saved, draft: taskToDraft(saved) } : current);
+          throw new Error(`Changes saved to ${saved.id} on ${project.name}, but move to ${transferTarget.name} failed: ${errorText(reason)}`);
+        }
+      }
       let after = before;
       let savedTask: Task | null = null;
       let undoAction: string | null = null;
@@ -4367,7 +4451,10 @@ Details: ${queueRecoveryWarning}`;
       )}
 
       {editor && (
-        <div className="modal-backdrop task-editor-backdrop" onMouseDown={() => !busy && closeEditor()}>
+        <div className="modal-backdrop task-editor-backdrop" onMouseDown={() => {
+          if (projectPickerOpen) setProjectPickerOpen(false);
+          else if (!busy) closeEditor();
+        }}>
           <section ref={editorModalRef}
             className={`task-modal ${isAdvisoryEditor ? "advisory-editor" : ""} ${isQueueCompact ? "queue-compact-modal" : ""} ${fileDropActive ? "file-drop-active" : ""}`}
             onMouseDown={(event) => {
@@ -4377,11 +4464,39 @@ Details: ${queueRecoveryWarning}`;
             {fileDropActive && <div className="editor-file-drop-hint">Drop images to attach or files to link in Note to AI</div>}
             <div className="modal-header">
               <div className="eyebrow">
-                {editor.mode === "edit" && editor.original ? (
-                  <button type="button" className={`reserved-id-copy${copiedTaskId === editor.original.id ? " copied" : ""}`} title="Copy task ID" aria-label={`Copy task ID ${editor.original.id}`} onClick={() => void copyTaskText(editor.original!.id)}>{editor.original.id} <span aria-hidden="true">{copiedTaskId === editor.original.id ? "✓ Copied" : "⧉"}</span></button>
-                ) : reservedTaskId ? (
-                  <button type="button" className={`reserved-id-copy${copiedTaskId === reservedTaskId.id ? " copied" : ""}`} title="Copy task ID" onClick={() => void copyTaskText(reservedTaskId.id)} onContextMenu={(event) => { event.preventDefault(); void copyTaskText(reservedTaskId.id); }}>{reservedTaskId.id} <span aria-hidden="true">{copiedTaskId === reservedTaskId.id ? "✓ Copied" : "⧉"}</span></button>
-                ) : "RESERVING ID…"}
+                <div className="task-id-project-picker">
+                  <button type="button" className="task-id-project-button"
+                    title={`Change taskboard (currently ${project.name})`}
+                    aria-label={`Choose taskboard, currently ${project.name}`}
+                    aria-haspopup="menu" aria-expanded={projectPickerOpen} disabled={busy}
+                    onClick={() => setProjectPickerOpen((open) => !open)}>
+                    {(editor.original?.id ?? reservedTaskId?.id)?.split("-")[0] ?? "PROJECT"}
+                    <span className="task-id-chevron" aria-hidden="true">▾</span>
+                  </button>
+                  <span className="task-id-dash">-</span>
+                  {editor.original?.id || reservedTaskId?.id ? (() => {
+                    const id = editor.original?.id ?? reservedTaskId!.id;
+                    return <button type="button" className={`reserved-id-copy${copiedTaskId === id ? " copied" : ""}`}
+                      title={`Copy full task ID ${id}`} aria-label={`Copy task ID ${id}`}
+                      onClick={() => void copyTaskText(id)}
+                      onContextMenu={(event) => { event.preventDefault(); void copyTaskText(id); }}>
+                      {id.slice(id.lastIndexOf("-") + 1)}
+                      <span aria-hidden="true">{copiedTaskId === id ? " ✓ Copied" : " ⧉"}</span>
+                    </button>;
+                  })() : <span className="task-id-reserving">Reserving ID…</span>}
+                  {transferTarget && <span className="task-id-transfer-hint" title="Save to move this task. The target board allocates a new ID.">→ {transferTarget.name} on save</span>}
+                  {projectPickerOpen && <div className="task-id-project-menu" role="menu" aria-label="Select destination taskboard">
+                    <div className="task-id-project-menu-heading">{editor.mode === "create" ? "Create in project" : "Move to project on save"}</div>
+                    {editorProjects.map((item) => <button key={item.id} type="button" role="menuitemradio"
+                      aria-checked={(transferTarget?.id ?? project.id) === item.id}
+                      className={(transferTarget?.id ?? project.id) === item.id ? "selected" : ""}
+                      title={item.path}
+                      onClick={() => chooseEditorProject(item)}>
+                      <span className="task-id-project-name">{item.name}</span>
+                      {(transferTarget?.id ?? project.id) === item.id && <span aria-hidden="true">✓</span>}
+                    </button>)}
+                  </div>}
+                </div>
                 {userQueueReview && editor.original?.id === userQueueReview.ids[userQueueReview.index] && (
                   <span className="user-queue-progress">
                     USER QUEUE · {userQueueReview.index + 1} / {userQueueReview.ids.length}
@@ -4966,7 +5081,7 @@ Details: ${queueRecoveryWarning}`;
               <button className="button editor-cancel-button" onClick={() => closeEditor(snapshot, false, true)} disabled={busy}>Cancel</button>
               <button
                 className={`button primary ${queueEdited ? "queue-save-release" : ""}`}
-                title={queueEdited ? "Save your response and remove For user from this task" : "Save (Enter or Ctrl+S). Textareas keep Enter for new lines."}
+                title={transferTarget ? `Save and move task to ${transferTarget.name} (new ID will be assigned)` : queueEdited ? "Save your response and remove For user from this task" : "Save (Enter or Ctrl+S). Textareas keep Enter for new lines."}
                 onClick={() => saveEditor()}
                 disabled={
                   busy || executionLoading ||
@@ -4976,7 +5091,7 @@ Details: ${queueRecoveryWarning}`;
                     !editor.draft.question?.prompt.trim())
                 }
               >
-                {busy ? "Saving…" : queueEdited ? "Save & release" : "Save"}
+                {busy ? "Saving…" : transferTarget ? "Save & move" : queueEdited ? "Save & release" : "Save"}
               </button>
             </div>
           </section>

@@ -1287,6 +1287,22 @@ body.card-dragging * {
 .reserved-id-copy:active{transform:translateY(1px);background:#213a4d;border-color:#79a4ba;}
 .reserved-id-copy:focus-visible{outline:2px solid #e4a65b;outline-offset:2px;}
 .reserved-id-copy.copied{background:#24483f;color:#b9f2d6;border-color:#4b9379;}
+/* Task IDs are two independent targets: prefix selects the board, digits copy the full ID. */
+.task-id-project-picker{display:inline-flex;align-items:center;gap:1px;position:relative;max-width:100%;vertical-align:middle;}
+.task-id-project-button{display:inline-flex;align-items:center;gap:5px;color:#c7e0fc;font:inherit;font-weight:inherit;letter-spacing:inherit;border:1px solid transparent;border-radius:4px;background:#23374d;padding:3px 6px;cursor:pointer;}
+.task-id-project-button:hover,.task-id-project-button[aria-expanded="true"]{background:#345574;border-color:#739bbf;color:#fff;}
+.task-id-project-button:focus-visible{outline:2px solid #e4a65b;outline-offset:2px;}
+.task-id-project-button:disabled{opacity:.55;cursor:default;}
+.task-id-chevron{font-size:10px;color:#a9c3db;}
+.task-id-dash{color:#92a4b5;}
+.task-id-reserving{color:#8ea0b3;font-size:11px;letter-spacing:0;}
+.task-id-transfer-hint{padding-left:8px;font-size:10px;letter-spacing:0;color:#ffcb87;white-space:nowrap;}
+.task-id-project-menu{position:absolute;left:0;top:calc(100% + 7px);min-width:210px;max-width:min(340px,calc(100vw - 48px));max-height:min(360px,55vh);overflow:auto;z-index:100;border:1px solid #58718a;border-radius:9px;background:#172432;box-shadow:0 16px 42px #000a;padding:5px;letter-spacing:normal;text-transform:none;}
+.task-id-project-menu-heading{font-size:10px;color:#91abc3;padding:8px 9px 7px;text-transform:uppercase;letter-spacing:.08em;}
+.task-id-project-menu button{width:100%;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 10px;border:0;border-radius:5px;background:transparent;color:#e2e9f0;font-size:12px;font-weight:600;text-align:left;cursor:pointer;}
+.task-id-project-menu button:hover,.task-id-project-menu button:focus-visible{background:#2c4962;outline:0;}
+.task-id-project-menu button.selected{color:#b4dcff;background:#223b4d;}
+.task-id-project-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .task-images-hint{font-size:11px;color:#8e9ba8;margin:-1px 0 11px;}
 .task-image-gallery{margin:0 0 12px;padding:9px 11px;border:1px solid #39434f;border-radius:8px;background:#1a2027;}
 .task-image-gallery>strong{display:block;margin-bottom:8px;font-size:11px;color:#c3cbd5;}

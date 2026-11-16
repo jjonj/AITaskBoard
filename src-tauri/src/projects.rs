@@ -302,7 +302,7 @@ pub fn move_task_between_projects(
     let old = source.tasks.iter().find(|task| task.id == task_id && !task.archived)
         .ok_or("Source task no longer exists")?;
     if old.revision != expected_revision {
-        return Err("The task changed while dragging. Refresh and retry.".into());
+        return Err("The task changed on disk. Refresh and retry.".into());
     }
     if old.kind == TaskKind::Epic || old.claimed_by.is_some() || old.parent.is_some()
         || old.position_after.is_some() || !old.depends_on.is_empty() ||
@@ -327,8 +327,15 @@ pub fn move_task_between_projects(
     }
     let original = fs::read(&source_file).map_err(|e| e.to_string())?;
     let markdown = String::from_utf8(original.clone()).map_err(|e| e.to_string())?;
-    if markdown.contains("Attachments/") {
-        return Err("This task refers to image attachments. Cross-project attachment transfer is not yet supported.".into());
+    let source_attachments = source_root.join("Attachments").join(&old.id);
+    // Image references are task-local; the attachment directory moves with the
+    // Markdown card, and links are rewritten to the destination ID below.
+    let own_attachment_prefix = format!("Attachments/{}/", old.id);
+    if markdown.contains("Attachments/") && !markdown.contains(&own_attachment_prefix) {
+        return Err("This card links attachments belonging to a different task. Move those references manually.".into());
+    }
+    if markdown.contains(&own_attachment_prefix) && !source_attachments.is_dir() {
+        return Err("This task references attachments that are missing on disk.".into());
     }
     let destination = store.load(&destination_root).map_err(|e| e.to_string())?;
     let column = if destination.config.columns.iter()
@@ -370,6 +377,7 @@ pub fn move_task_between_projects(
     let created = store.create_as(&destination_root, draft, MutationActor::Human)
         .map_err(|e| e.to_string())?;
     let created_file = destination_root.join("Active").join(format!("{}.md", created.id));
+    let destination_attachments = destination_root.join("Attachments").join(&created.id);
     let mut frontmatter = false;
     let mut field_count = 0usize;
     let migrated = markdown.lines().enumerate().map(|(n, line)| {
@@ -390,7 +398,8 @@ pub fn move_task_between_projects(
             return format!("column: {column}");
         }
         line.to_string()
-    }).collect::<Vec<_>>().join("\n") + "\n";
+    }).collect::<Vec<_>>().join("\n").replace(
+        &own_attachment_prefix, &format!("Attachments/{}/", created.id)) + "\n";
     if field_count != 2 {
         let _ = fs::remove_file(&created_file);
         return Err("Source frontmatter has no unique id/column; transfer aborted".into());
@@ -402,7 +411,8 @@ pub fn move_task_between_projects(
     let verified = store.load(&destination_root).map_err(|e| e.to_string())
         .and_then(|validated| validated.tasks.into_iter()
             .find(|task| task.id == created.id && task.title == old.title
-                && task.description == old.description)
+                && task.description == old.description.replace(
+                    &own_attachment_prefix, &format!("Attachments/{}/", created.id)))
             .ok_or_else(|| "Target task could not be verified; original kept".to_string()));
     let new_task = match verified {
         Ok(task) => task,
@@ -415,7 +425,22 @@ pub fn move_task_between_projects(
         let _ = fs::remove_file(&created_file);
         return Err("Source was edited during transfer; target copy rolled back".into());
     }
+    // Same vault drive: rename preserves exact media bytes and is reversible if
+    // the Markdown removal fails. Do not leave broken links on either board.
+    if source_attachments.exists() {
+        if destination_attachments.exists() {
+            let _ = fs::remove_file(&created_file);
+            return Err("Destination attachment directory already exists; source unchanged".into());
+        }
+        if let Err(error) = fs::rename(&source_attachments, &destination_attachments) {
+            let _ = fs::remove_file(&created_file);
+            return Err(format!("Could not move attachments; source unchanged: {error}"));
+        }
+    }
     if let Err(error) = fs::remove_file(&source_file) {
+        if destination_attachments.exists() {
+            let _ = fs::rename(&destination_attachments, &source_attachments);
+        }
         let _ = fs::remove_file(&created_file);
         return Err(format!("Could not remove source; target copy rolled back: {error}"));
     }
