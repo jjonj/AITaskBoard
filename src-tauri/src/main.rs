@@ -10,6 +10,11 @@ fn main() {
     // Human-invoked native Review deep link from T3. A dedicated TaskBoard
     // window opens at the exact board and item; never resolves a verdict here.
     let args: Vec<_> = std::env::args().collect();
+    if args.len() == 2 && args[1] == "--create-task" {
+        #[cfg(windows)] unsafe { FreeConsole(); }
+        taskboard_lib::run();
+        return;
+    }
     if args.len() == 4 && matches!(args[1].as_str(), "--open-review" | "--open-task") {
         let payload = serde_json::json!({"path": args[2], "taskId": args[3]});
         if args[1] == "--open-review" {

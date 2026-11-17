@@ -11,7 +11,7 @@ import type { BoardConfig, BoardSnapshot, TaskDraft } from "./types";
 import type { PendingClipboardImage } from "./TaskImageGallery";
 
 type Props = {
-  Board: (props: { project: ProjectTab; onInteractionChange: (locked: boolean) => void; requestedReviewId?: string; requestedTask?: {id: string; requestKey: number}; requestedCreate?: {draft: TaskDraft; images: PendingClipboardImage[]; sourcePath: string; requestKey: number}; initialSnapshot?: BoardSnapshot; onSnapshot?: (path: string, snapshot: BoardSnapshot) => void; onInboxCount?: (path: string, count: number) => void }) => React.ReactNode;
+  Board: (props: { project: ProjectTab; onInteractionChange: (locked: boolean) => void; requestedReviewId?: string; requestedTask?: {id: string; requestKey: number}; requestedCreate?: {draft: TaskDraft; images: PendingClipboardImage[]; sourcePath: string; requestKey: number}; requestedHotkeyCreate?: number; initialSnapshot?: BoardSnapshot; onSnapshot?: (path: string, snapshot: BoardSnapshot) => void; onInboxCount?: (path: string, count: number) => void }) => React.ReactNode;
 };
 type DialogMode = "create" | "folders" | null;
 type TabDrop = { id: string; after: boolean };
@@ -77,6 +77,19 @@ export function ProjectTabs({ Board }: Props) {
   }, []);
   const [startupReview, setStartupReview] = useState<{ path: string; taskId: string } | null>(null);
   const [startupTask, setStartupTask] = useState<{ path: string; taskId: string; requestKey: number } | null>(null);
+  const [hotkeyCreateRequest, setHotkeyCreateRequest] = useState(0);
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    // A second TaskBoard process asks this one to enter Create without changing tabs.
+    void listen("taskboard-create-task", () => setHotkeyCreateRequest((id) => id + 1))
+      .then((remove) => { if (disposed) remove(); else unlisten = remove; })
+      .catch(() => undefined);
+    void invoke<boolean>("startup_create_task")
+      .then((requested) => { if (!disposed && requested) setHotkeyCreateRequest((id) => id + 1); })
+      .catch(() => undefined);
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
   // Handoff keeps an unsaved creation intact while the old board releases its ID.
   const [createHandoff, setCreateHandoff] = useState<{
     destinationId: string; draft: TaskDraft; images: PendingClipboardImage[];
@@ -813,6 +826,7 @@ export function ProjectTabs({ Board }: Props) {
       {(error || catalogError) && !dialogMode && <div className="project-catalog-error" role="alert">{error || catalogError}</div>}
       {active && <div className="project-workspace" id="project-board" role="tabpanel">
         <Board key={active.id} project={active} onInteractionChange={setLocked}
+            requestedHotkeyCreate={hotkeyCreateRequest || undefined}
             {...(createHandoff?.destinationId === active.id ? { requestedCreate: createHandoff } : {})}
             initialSnapshot={boardCache.current.get(active.path)} onSnapshot={rememberBoard}
             onInboxCount={rememberInboxCount}

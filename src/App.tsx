@@ -297,12 +297,13 @@ const randomColumnColor = (used: string[]) => {
   return pool[Math.floor(Math.random() * pool.length)];
 };
 
-function ProjectBoard({ project, onInteractionChange, requestedReviewId, requestedTask, requestedCreate, initialSnapshot, onSnapshot, onInboxCount }: {
+function ProjectBoard({ project, onInteractionChange, requestedReviewId, requestedTask, requestedCreate, requestedHotkeyCreate, initialSnapshot, onSnapshot, onInboxCount }: {
   project: ProjectTab;
   onInteractionChange: (locked: boolean) => void;
   requestedReviewId?: string;
   requestedTask?: { id: string; requestKey: number };
   requestedCreate?: { draft: TaskDraft; images: PendingClipboardImage[]; sourcePath: string; requestKey: number };
+  requestedHotkeyCreate?: number;
   initialSnapshot?: BoardSnapshot;
   onSnapshot?: (path: string, snapshot: BoardSnapshot) => void;
   onInboxCount?: (path: string, count: number) => void;
@@ -487,9 +488,10 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [editorProjects, setEditorProjects] = useState<ProjectTab[]>([project]);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+  const [keepPickerOnTitle, setKeepPickerOnTitle] = useState(false);
   const [transferTarget, setTransferTarget] = useState<ProjectTab | null>(null);
   useEffect(() => {
-    if (!editor) { setProjectPickerOpen(false); setTransferTarget(null); return; }
+    if (!editor) { setProjectPickerOpen(false); setKeepPickerOnTitle(false); setTransferTarget(null); return; }
     let cancelled = false;
     void listProjects().then((catalog) => { if (!cancelled) setEditorProjects(catalog.projects); })
       .catch(() => { if (!cancelled) setEditorProjects([project]); });
@@ -498,7 +500,14 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   useEffect(() => {
     if (!projectPickerOpen) return;
     const dismiss = (event: PointerEvent) => {
-      if (!(event.target as Element).closest(".task-id-project-picker")) setProjectPickerOpen(false);
+      const target = event.target as Element;
+      // The global create shortcut leaves the project menu open while the title
+      // receives focus/clicks; normal manually opened menus still dismiss outside.
+      if (!target.closest(".task-id-project-picker") &&
+          !(keepPickerOnTitle && target.closest(".task-title-input"))) {
+        setProjectPickerOpen(false);
+        setKeepPickerOnTitle(false);
+      }
     };
     const escape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
@@ -512,7 +521,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       document.removeEventListener("pointerdown", dismiss);
       window.removeEventListener("keydown", escape, true);
     };
-  }, [projectPickerOpen]);
+  }, [projectPickerOpen, keepPickerOnTitle]);
   const [prepRequestId, setPrepRequestId] = useState<string | null>(null);
   const prepLaunchRef = useRef<Promise<unknown> | null>(null);
   const prepNotified = useRef(new Set<string>());
@@ -1609,6 +1618,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
 
   const chooseEditorProject = (destination: ProjectTab) => {
     setProjectPickerOpen(false);
+    setKeepPickerOnTitle(false);
     if (editor?.mode === "create") {
       if (destination.id === project.id) return;
       window.dispatchEvent(new CustomEvent("taskboard:editor-switch-project", {
@@ -1691,6 +1701,25 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     setEditor({ mode: "create", draft: emptyDraft(target,
       parent && taskMap.get(parent)?.kind === "epic" ? parent : null, category) });
   };
+
+  const handledHotkeyCreate = useRef<number | null>(null);
+  useEffect(() => {
+    if (!requestedHotkeyCreate || !snapshot || handledHotkeyCreate.current === requestedHotkeyCreate) return;
+    handledHotkeyCreate.current = requestedHotkeyCreate;
+    // Never silently throw away unsaved edits when invoked over an existing task.
+    if (editor && editor.mode !== "create") {
+      setError("Close or save the current editor before starting a new task.");
+      return;
+    }
+    if (!editor) {
+      setReviewOpen(false);
+      setTaskDumpOpen(false);
+      openCreate();
+    }
+    setKeepPickerOnTitle(true);
+    setProjectPickerOpen(true);
+    window.setTimeout(() => document.querySelector<HTMLInputElement>(".task-modal .task-title-input")?.focus(), 0);
+  }, [requestedHotkeyCreate, snapshot]);
 
   const openTaskDump = (text = "") => {
     if (busy || editor) return;
@@ -4472,7 +4501,7 @@ Details: ${queueRecoveryWarning}`;
                     title={`Change taskboard (currently ${project.name})`}
                     aria-label={`Choose taskboard, currently ${project.name}`}
                     aria-haspopup="menu" aria-expanded={projectPickerOpen} disabled={busy}
-                    onClick={() => setProjectPickerOpen((open) => !open)}>
+                    onClick={() => { setKeepPickerOnTitle(false); setProjectPickerOpen((open) => !open); }}>
                     {(editor.original?.id ?? reservedTaskId?.id)?.split("-")[0] ?? "PROJECT"}
                     <span className="task-id-chevron" aria-hidden="true">▾</span>
                   </button>

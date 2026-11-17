@@ -950,6 +950,13 @@ fn startup_task() -> Option<serde_json::Value> {
     Some(serde_json::json!({ "path": path, "taskId": id }))
 }
 
+/// A fresh --create-task process handles the request after React has mounted;
+/// subsequent invocations are forwarded by the single-instance plugin.
+#[tauri::command]
+fn startup_create_task() -> bool {
+    std::env::args().nth(1).as_deref() == Some("--create-task")
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -965,6 +972,10 @@ pub fn run() {
                 let _ = window.set_focus();
             }
             // Forward deep links to the already-open UI instead of opening a second window.
+            if args.len() == 2 && args[1] == "--create-task" {
+                use tauri::Emitter;
+                let _ = app.emit("taskboard-create-task", ());
+            }
             if args.len() == 4 && args[1] == "--open-review" {
                 use tauri::Emitter;
                 let _ = app.emit("taskboard-open-review", serde_json::json!({ "path": args[2], "taskId": args[3] }));
@@ -1005,6 +1016,7 @@ pub fn run() {
             restart_warning::postpone_restart_warning,
             startup_review,
             startup_task,
+            startup_create_task,
             projects::list_projects,
             projects::add_project,
             projects::set_project_folders,
