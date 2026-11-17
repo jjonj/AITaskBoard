@@ -1521,11 +1521,10 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const closeEditor = (board = snapshot, persisted = false, explicitCancel = false) => {
     // Only implicit dismissal auto-saves an unfinished creation. The Cancel
     // button explicitly discards it, even when fields have been populated.
+    // An unfinished creation is only a draft once it has a real title.
+    // Other fields or the Prepare flag alone must not create an untitled task.
     if (!persisted && !explicitCancel && editor?.mode === "create" && !autosavingDraft.current &&
-        (editor.draft.title.trim() || editor.draft.description.trim() ||
-         editor.draft.user_notes.trim() || editor.draft.notes.trim() ||
-         editor.draft.acceptance_criteria.some((item) => item.trim()) ||
-         editor.draft.attention.includes("prepare"))) {
+        editor.draft.title.trim()) {
       if (!reservedTaskId) { setError("Cannot save draft yet: task ID reservation is not ready."); return; }
       autosavingDraft.current = true;
       setBusy(true);
@@ -1533,7 +1532,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       const preparing = editor.draft.attention.includes("prepare") && prepRequestId;
       const draft = {
         ...editor.draft,
-        title: editor.draft.title.trim() || "Untitled draft",
+        title: editor.draft.title.trim(),
         column: "draft",
         notes: [preparing
           ? preparationNotes(editor.draft.notes, preparing, editor.draft.column, false)
