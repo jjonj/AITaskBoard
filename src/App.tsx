@@ -4810,34 +4810,6 @@ Details: ${queueRecoveryWarning}`;
                 Enroll automatically in the rolling release when this task is Done
               </label>
             )}
-            {(editor.draft.kind === "task" || editor.draft.kind === "recurring") && (
-              <section className="task-review-mode" aria-label="How this task is reviewed">
-                <div className="task-review-mode-label">Review with you</div>
-                <div className="task-review-mode-options" role="group" aria-label="Review mode">
-                  {(["session", "inbox"] as const).map(mode => {
-                    const selected = (editor.draft.review_mode ?? "inbox") === mode;
-                    const hasPendingInbox = mode === "session" && !!editor.original &&
-                      (editor.original.review_status === "open" ||
-                       (!!editor.original.question && !editor.original.question.answer));
-                    return <button key={mode} type="button" aria-pressed={selected}
-                      className={`task-review-mode-option${selected ? " active" : ""}`}
-                      disabled={busy || hasPendingInbox}
-                      title={hasPendingInbox ? "Resolve the existing Inbox request before switching to Session" :
-                        mode === "session" ? "Iterate directly in the T3 session with persistent Get My Attention; no Inbox review" :
-                        "Send required verification or visual work to TaskBoard's review Inbox; no duplicate GMA review"}
-                      onClick={() => setEditor(current => current ? {
-                        ...current, draft: { ...current.draft, review_mode: mode },
-                      } : current)}>
-                      <strong>{mode === "session" ? "Session · GMA" : "Review Inbox"}</strong>
-                      <small>{mode === "session" ? "Interactive · until you're happy" : "Asynchronous · approve later"}</small>
-                    </button>;
-                  })}
-                </div>
-                <p>{(editor.draft.review_mode ?? "inbox") === "session"
-                  ? "The agent shares evidence and iterates in the linked T3 session. It requests persistent GMA attention instead of creating an Inbox item."
-                  : "The agent submits finished work to the review Inbox when human acceptance is needed. No duplicate session-based approval."}</p>
-              </section>
-            )}
             {editor.draft.kind === "epic" && (
               <div className="epic-editor-note">EPIC — not executable or assignable. Its board column is automatically derived from its subtasks.</div>
             )}
@@ -4916,6 +4888,31 @@ Details: ${queueRecoveryWarning}`;
                         : flag === "priority" ? "! Priority" : flag === "announce" ? "♪ Announce" : "✦ Prepare"}
                     </button>)
                   ))}
+                  {(editor.draft.kind === "task" || editor.draft.kind === "recurring") && (
+                    <label className="review-channel-toggle" title={
+                      editor.original?.review_status === "open" ||
+                      (editor.original?.question && !editor.original.question.answer)
+                        ? "Resolve the pending Inbox request before switching to GMA"
+                        : "Choose where this task is reviewed: TaskBoard Inbox or this T3 session (GMA)"
+                    }>
+                      <span className="review-channel-caption">Review:</span>
+                      <span className={(editor.draft.review_mode ?? "inbox") === "inbox" ? "selected" : ""}>Inbox</span>
+                      <input type="checkbox" role="switch"
+                        aria-label="Review in T3 session with persistent GMA instead of Inbox"
+                        checked={(editor.draft.review_mode ?? "inbox") === "session"}
+                        disabled={busy || ((editor.draft.review_mode ?? "inbox") !== "session" &&
+                          (editor.original?.review_status === "open" ||
+                           !!(editor.original?.question && !editor.original.question.answer)))}
+                        onChange={event => {
+                          const reviewMode = event.currentTarget.checked ? "session" : "inbox";
+                          setEditor(current => current ? {
+                            ...current, draft: { ...current.draft, review_mode: reviewMode },
+                          } : current);
+                        }} />
+                      <span className="review-channel-track" aria-hidden="true" />
+                      <span className={(editor.draft.review_mode ?? "inbox") === "session" ? "selected" : ""}>GMA</span>
+                    </label>
+                  )}
                 </div>
               </div>
             </div>}

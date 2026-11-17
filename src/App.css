@@ -1255,9 +1255,9 @@ body.card-dragging * {
 .attention-icon.priority{background:#684e17;color:#ffe18d;border:1px solid #d3a849}
 .attention-icon.prepare{background:#1c3e3a;color:#93eee0;border:1px solid #2f8b7b}
 .attention-icon.announce{background:#273347;color:#addaff;border:1px solid #5484a8}
-.attention-editor{flex:0 0 auto}
+.attention-editor{flex:1 1 560px;min-width:0}
 .attention-editor>span{display:block;margin-bottom:4px;color:#a5adb7;font-size:11px;font-weight:650}
-.attention-editor-buttons{display:flex;gap:7px}
+.attention-editor-buttons{display:flex;flex-wrap:wrap;align-items:center;gap:7px;width:100%}
 .attention-toggle{height:32px;padding:0 10px;border:1px solid #343b44;border-radius:7px;background:#15191d;color:#8f99a4;cursor:pointer;font-size:11px}
 .attention-toggle.question.active{border-color:#80651f;background:#302812;color:#ffd66b}
 .attention-toggle.needs-user.active{border-color:#315f80;background:#152838;color:#8fd1ff}
@@ -1946,17 +1946,18 @@ body.column-dragging * {
   background: linear-gradient(90deg, #40314f, transparent 68%);
 }
 
-/* Each AI task has one human review channel, not simultaneous Inbox and session gates. */
-.task-review-mode { margin: 10px 0 14px; padding: 12px 14px; border: 1px solid #354251; background: #161f2a; border-radius: 10px; }
-.task-review-mode-label { color: #d4e0ed; font-weight: 700; font-size: 12px; margin-bottom: 8px; }
-.task-review-mode-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
-.task-review-mode-option { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 10px 13px; text-align: left; border-radius: 8px; border: 1px solid #37475a; background: #101720; color: #b7c6d5; cursor: pointer; }
-.task-review-mode-option strong { font-size: 13px; font-weight: 750; }
-.task-review-mode-option small { font-size: 11px; color: #8e9dae; }
-.task-review-mode-option.active { border-color: #74add1; background: #233b4e; color: #e5f4ff; box-shadow: 0 0 0 1px #446c89 inset; }
-.task-review-mode-option.active small { color: #bdd7e7; }
-.task-review-mode-option:disabled { opacity: .5; cursor: not-allowed; }
-.task-review-mode > p { margin: 9px 0 0; color: #99aabd; font-size: 11px; line-height: 1.5; }
+/* Compact review destination switch sits at the right end of the Attention flags. */
+.review-channel-toggle{margin-left:auto;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;font-size:11px;color:#909eac;cursor:pointer}
+.review-channel-toggle .review-channel-caption{color:#a5adb7;font-weight:650}
+.review-channel-toggle .selected{color:#e2effb;font-weight:700}
+.review-channel-toggle input{position:absolute;opacity:0;width:1px;height:1px}
+.review-channel-track{width:30px;height:17px;flex:0 0 30px;border-radius:10px;background:#334050;border:1px solid #627183;position:relative;transition:background .12s}
+.review-channel-track::after{content:"";position:absolute;left:2px;top:2px;width:11px;height:11px;border-radius:50%;background:#e2e9f0;transition:transform .12s}
+.review-channel-toggle input:checked+.review-channel-track{background:#276c89;border-color:#62a9cf}
+.review-channel-toggle input:checked+.review-channel-track::after{transform:translateX(13px)}
+.review-channel-toggle input:focus-visible+.review-channel-track{outline:2px solid #9bd5fc;outline-offset:3px}
+.review-channel-toggle input:disabled+.review-channel-track{opacity:.45}
+.review-channel-toggle:has(input:disabled){cursor:not-allowed}
 
 /* Explicit card kind switch at the top of the create/edit dialog. */
 .task-kind-switch {
