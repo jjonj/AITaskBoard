@@ -1255,9 +1255,10 @@ body.card-dragging * {
 .attention-icon.priority{background:#684e17;color:#ffe18d;border:1px solid #d3a849}
 .attention-icon.prepare{background:#1c3e3a;color:#93eee0;border:1px solid #2f8b7b}
 .attention-icon.announce{background:#273347;color:#addaff;border:1px solid #5484a8}
-.attention-editor{flex:1 1 560px;min-width:0}
-.attention-editor>span{display:block;margin-bottom:4px;color:#a5adb7;font-size:11px;font-weight:650}
-.attention-editor-buttons{display:flex;flex-wrap:wrap;align-items:center;gap:7px;width:100%}
+.attention-editor{flex:1 1 100%;min-width:0;display:flex;align-items:center;gap:10px}
+.attention-editor>span{flex:0 0 auto;margin:0;color:#a5adb7;font-size:11px;font-weight:650}
+.attention-editor-buttons{display:flex;flex:1 1 auto;min-width:0;flex-wrap:nowrap;align-items:center;gap:7px;width:auto;overflow-x:auto}
+.attention-editor-buttons>.attention-toggle{flex:0 0 auto;white-space:nowrap}
 .attention-toggle{height:32px;padding:0 10px;border:1px solid #343b44;border-radius:7px;background:#15191d;color:#8f99a4;cursor:pointer;font-size:11px}
 .attention-toggle.question.active{border-color:#80651f;background:#302812;color:#ffd66b}
 .attention-toggle.needs-user.active{border-color:#315f80;background:#152838;color:#8fd1ff}
@@ -1947,10 +1948,10 @@ body.column-dragging * {
 }
 
 /* Compact review destination switch sits at the right end of the Attention flags. */
-.review-channel-toggle{margin-left:auto;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;font-size:11px;color:#909eac;cursor:pointer}
+.task-modal .review-channel-toggle{margin:0 0 0 auto;display:inline-flex;flex-direction:row;flex:0 0 auto;align-items:center;gap:5px;white-space:nowrap;font-size:11px;color:#909eac;cursor:pointer}
 .review-channel-toggle .review-channel-caption{color:#a5adb7;font-weight:650}
 .review-channel-toggle .selected{color:#e2effb;font-weight:700}
-.review-channel-toggle input{position:absolute;opacity:0;width:1px;height:1px}
+.task-modal .review-channel-toggle input{position:absolute;opacity:0;width:1px;height:1px;margin:0;padding:0;border:0}
 .review-channel-track{width:30px;height:17px;flex:0 0 30px;border-radius:10px;background:#334050;border:1px solid #627183;position:relative;transition:background .12s}
 .review-channel-track::after{content:"";position:absolute;left:2px;top:2px;width:11px;height:11px;border-radius:50%;background:#e2e9f0;transition:transform .12s}
 .review-channel-toggle input:checked+.review-channel-track{background:#276c89;border-color:#62a9cf}
