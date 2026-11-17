@@ -1538,11 +1538,12 @@ fn run_column(store: &FsTaskStore, root: &Path, command: &ColumnCommand) -> Resu
             if config.columns.iter().any(|c| c.id.eq_ignore_ascii_case(&id)) {
                 return Err(CliError::new("invalid_column", format!("column id already exists: {id}")));
             }
-            let order = config.columns.iter().map(|c| c.order).max().unwrap_or(-1) + 1;
-            config.columns.push(Column {
+            config.columns.sort_by_key(|c| c.order);
+            let middle = config.columns.len() / 2;
+            config.columns.insert(middle, Column {
                 id,
                 name: args.name.trim().to_string(),
-                order,
+                order: middle as i32,
                 terminal: args.terminal,
                 hidden: false,
                 snoozed_until: None,
@@ -1550,8 +1551,11 @@ fn run_column(store: &FsTaskStore, root: &Path, command: &ColumnCommand) -> Resu
                 ai_ready: task_core::default_column_ai_ready(&args.id.clone().unwrap_or_else(|| slugify(&args.name)), &args.name, args.terminal),
                 advisory: false,
                 auto_queue: false,
-                color: column_color(order),
+                color: column_color(middle as i32),
             });
+            for (index, column) in config.columns.iter_mut().enumerate() {
+                column.order = index as i32;
+            }
             let saved = store.save_config(root, config).map_err(map_store_error)?;
             Ok(json!(saved))
         }

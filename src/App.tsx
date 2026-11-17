@@ -2836,24 +2836,24 @@ Details: ${queueRecoveryWarning}`;
     while (snapshot.config.columns.some((column) => column.id === id)) {
       id = `${base}-${suffix++}`;
     }
+    const ordered = [...snapshot.config.columns].sort((a, b) => a.order - b.order);
+    const middle = Math.floor(ordered.length / 2);
+    ordered.splice(middle, 0, {
+      id,
+      name: name.trim(),
+      order: middle,
+      terminal: false,
+      hidden: false,
+      snoozed_until: null,
+      awake_until: null,
+      ai_ready: !["draft", "done", "review", "blocked"].includes(id.toLowerCase()) &&
+        !["draft", "done", "review", "blocked"].includes(name.trim().toLowerCase()),
+      advisory: false,
+      color: randomColumnColor(ordered.map((column) => column.color)),
+    });
     const config = {
       ...snapshot.config,
-      columns: [
-        ...snapshot.config.columns,
-        {
-          id,
-          name: name.trim(),
-          order: snapshot.config.columns.length,
-          terminal: false,
-          hidden: false,
-          snoozed_until: null,
-          awake_until: null,
-          ai_ready: !["draft", "done", "review", "blocked"].includes(id.toLowerCase()) &&
-            !["draft", "done", "review", "blocked"].includes(name.trim().toLowerCase()),
-          advisory: false,
-          color: randomColumnColor(snapshot.config.columns.map((column) => column.color)),
-        },
-      ],
+      columns: ordered.map((column, order) => ({ ...column, order })),
     };
     void saveConfig(config, "create column");
   };
