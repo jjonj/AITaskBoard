@@ -1,5 +1,5 @@
-//! The only automatic TaskBoard recovery loop. Busy attempts enter a rotating
-//! FIFO; Starting uses 10 minutes, while other busy work uses three hours.
+//! The automatic TaskBoard recovery loop: stale busy attempts use a rotating
+//! FIFO; answered Inbox reviews stranded in Waiting are also resumed here.
 use std::{collections::{HashMap, HashSet, VecDeque}, path::PathBuf, sync::{Mutex, OnceLock}, time::Duration};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -54,10 +54,11 @@ fn busy(state: Option<QueueState>) -> bool {
     matches!(state, Some(QueueState::Reserved | QueueState::Starting |
         QueueState::Working | QueueState::RecoveryRequired))
 }
-fn scan() -> Result<Vec<Busy>, String> {
+fn scan() -> Result<(Vec<Busy>, Vec<(PathBuf, String)>), String> {
     let catalog = crate::projects::list_projects_sync()?;
     let store = FsTaskStore::default();
     let mut entries = Vec::new();
+    let mut answered_review_waits = Vec::new();
     for project in catalog.projects {
         let root = PathBuf::from(project.path);
         if !root.join("_board.md").is_file() { continue; }
@@ -69,6 +70,10 @@ fn scan() -> Result<Vec<Busy>, String> {
         for task in board.tasks.iter().filter(|task| !task.archived && task.completed.is_none() &&
             matches!(task.kind, TaskKind::Task | TaskKind::Recurring) &&
             !board.config.columns.iter().any(|c| c.terminal && c.id == task.column)) {
+            if task.kind == TaskKind::Task && task.column == "blocked" &&
+                matches!(task.review_status.as_deref(), Some("resolved" | "awaiting_revision")) {
+                answered_review_waits.push((root.clone(), task.id.clone()));
+            }
             let intent = store.execution_intent(&root, &task.id).map_err(|e| e.to_string())?;
             let state = (intent.mode == ExecutionMode::Queue).then_some(intent.queue_state).flatten();
             let pending_start = intent.start_now_request.is_some() && intent.start_now_receipt.is_none();
@@ -88,7 +93,7 @@ fn scan() -> Result<Vec<Busy>, String> {
             });
         }
     }
-    Ok(entries)
+    Ok((entries, answered_review_waits))
 }
 
 fn t3_activity(row: &Busy, sessions: &[Value]) -> Option<i64> {
@@ -128,7 +133,7 @@ pub(crate) fn current_status() -> RecoveryStatus {
     status().lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 fn tick(fifo: &mut Fifo) -> Result<(), String> {
-    let entries = scan()?;
+    let (entries, answered_review_waits) = scan()?;
     fifo.sync(&entries);
     let due = fifo.next(BATCH);
     let by_key: HashMap<_, _> = entries.into_iter().map(|entry| (entry.key.clone(), entry)).collect();
@@ -138,6 +143,23 @@ fn tick(fifo: &mut Fifo) -> Result<(), String> {
         state.queued = fifo.items.len();
         state.last_error = None;
     }
+    // This recovery is independent of busy/Starting timeouts. A review
+    // verdict is already authoritative; one repair per tick bounds writes.
+    let store = FsTaskStore::default();
+    for (root, id) in answered_review_waits.into_iter().take(BATCH) {
+        match store.recover_answered_review_wait(&root, &id) {
+            Ok(true) => {
+                status().lock().unwrap_or_else(|e| e.into_inner()).last_action =
+                    Some(format!("{id}: answered review resumed from Waiting"));
+                break;
+            }
+            Ok(false) => {},
+            Err(err) => {
+                status().lock().unwrap_or_else(|e| e.into_inner()).last_error =
+                    Some(format!("{id}: review wait recovery: {err}"));
+            }
+        }
+    }
     if due.is_empty() { return Ok(()) }
     let sessions = crate::agent_notices::shared_t3_inventory()
         .and_then(|data| {
@@ -146,7 +168,6 @@ fn tick(fifo: &mut Fifo) -> Result<(), String> {
                 data.get("hasMore").and_then(Value::as_bool) == Some(true) { return None; }
             Some(sessions.clone())
         }).unwrap_or_default();
-    let store = FsTaskStore::default();
     let now = Utc::now();
     for key in due {
         let Some(row) = by_key.get(&key) else { continue };

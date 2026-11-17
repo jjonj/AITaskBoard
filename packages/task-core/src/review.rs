@@ -381,6 +381,24 @@ fn persist_task_review(root: &Path, task: &Task) -> Result<Task, TaskStoreError>
     saved.revision = revision(&text);
     Ok(saved)
 }
+/// A visual verdict releases an Inbox-only Waiting hold; it does not certify
+/// that all implementation acceptance criteria are complete. Technical and
+/// independent human blockers must remain parked.
+fn resume_answered_review_wait(snapshot: &BoardSnapshot, task: &mut Task) -> bool {
+    if task.kind != TaskKind::Task || task.column != BLOCKED_COLUMN_ID ||
+        task.completed.is_some() || task.claimed_by.is_some() ||
+        !matches!(task.review_status.as_deref(), Some("resolved" | "awaiting_revision")) ||
+        task.blocked_reason.as_deref().is_some_and(|reason| !reason.trim().is_empty()) ||
+        task.attention.iter().any(|flag| matches!(flag,
+            TaskAttention::Blocked | TaskAttention::NeedsUser | TaskAttention::Question)) ||
+        task.question.as_ref().is_some_and(|q| q.answer.is_none() && !q.prompt.trim().is_empty()) {
+        return false;
+    }
+    task.column = AI_READY_COLUMN_ID.into();
+    apply_completion_state(&snapshot.config, task);
+    true
+}
+
 fn ensure_expected(received: &str, expected: &str, entity: &str) -> Result<(), TaskStoreError> {
     if received != expected {
         return Err(TaskStoreError::Conflict(format!("{entity} changed since the review was loaded")));
@@ -389,6 +407,33 @@ fn ensure_expected(received: &str, expected: &str, entity: &str) -> Result<(), T
 }
 
 impl FsTaskStore {
+    /// Repair pre-existing reviewed tasks left in Waiting by old review handlers.
+    /// This is safe to retry: the review manifest must contain a human verdict,
+    /// and a later independent technical/human blocker wins.
+    pub fn recover_answered_review_wait(&self, root: &Path, task_id: &str) -> Result<bool, TaskStoreError> {
+        let _lock = acquire_lock(root)?;
+        if !valid_id(task_id) { return Err(TaskStoreError::Invalid("invalid review task ID".into())); }
+        let snapshot = self.load_unlocked(root)?;
+        let Some(mut task) = snapshot.tasks.iter().find(|task| task.id == task_id && !task.archived).cloned() else {
+            return Ok(false);
+        };
+        if !matches!(task.review_status.as_deref(), Some("resolved" | "awaiting_revision")) ||
+            task.column != BLOCKED_COLUMN_ID { return Ok(false); }
+        let manifest = parse_manifest(&manifest_file(root, task_id))?;
+        let verdict = manifest.rounds.last().and_then(|round| round.result.as_ref())
+            .map(|result| result.verdict.as_str());
+        let answered = match (task.review_status.as_deref(), manifest.status.as_str(), verdict) {
+            (Some("resolved"), "resolved", Some("approved" | "picked" | "ranked" | "marked")) => true,
+            (Some("awaiting_revision"), "open", Some("rejected" | "more-variants")) => true,
+            _ => false,
+        };
+        if !answered || !resume_answered_review_wait(&snapshot, &mut task) { return Ok(false); }
+        task.description = append_timeline(&task.description,
+            "Answered visual review recovered from Waiting to AI Ready; verify remaining implementation acceptance before Done.");
+        persist_task_review(root, &task)?;
+        Ok(true)
+    }
+
     /// Recreate missing HTML queue posters without overwriting current verdicts.
     /// Uses the same board mutation lock as review request/resolve.
     pub fn review_capture_thumbnails(&self, root: &Path, task_id: &str) -> Result<ReviewManifest, TaskStoreError> {
@@ -676,6 +721,10 @@ impl FsTaskStore {
         }
         task.attention.retain(|flag| *flag != TaskAttention::Question);
         task.question = None;
+        // A human verdict ends the Inbox wait, including a rejected round.
+        // Do not finish the implementation automatically: other acceptance
+        // criteria may still need an agent to verify or complete them.
+        resume_answered_review_wait(&snapshot, &mut task);
         let summary = format!("Review round {}: {}. Choice: [{}]. Ranking: [{}]. Pins: {}. Note: {}",
             round.number, input.verdict, input.choices.join(", "),
             input.ranking.join(", "), serde_json::to_string(&input.pins).unwrap_or_default(), input.note);
@@ -1037,6 +1086,60 @@ impl FsTaskStore {
     }
 }
 
+
+#[cfg(test)]
+mod answered_review_wait_tests {
+    use super::*;
+
+    #[test]
+    fn human_approval_releases_waiting_without_premature_completion() {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path();
+        let store = FsTaskStore::default();
+        store.ensure_board(root, "Review recovery").unwrap();
+        let draft = serde_json::from_value(serde_json::json!({
+            "title":"Export generated island", "column":"blocked",
+            "acceptance_criteria":["Export", "Human review", "Integrate later"]
+        })).unwrap();
+        let task = store.create_as(root, draft, MutationActor::Human).unwrap();
+        let image = root.join("review.png");
+        fs::write(&image, b"fixture").unwrap();
+        let manifest = store.review_request(root, ReviewRequest {
+            task_id: task.id.clone(), mode: "approve".into(), judge: "Accept design?".into(),
+            criteria: vec![], artifacts: vec![ReviewInputArtifact {
+                source: image.to_string_lossy().into_owned(), label: "Design".into(),
+            }], references: vec![], previous: None, poster: None, top_k: None,
+            implemented_by: None, openrig_gate: None,
+            expected_task_revision: Some(task.revision), expected_manifest_revision: None,
+        }).unwrap();
+        let before = store.load(root).unwrap().tasks.into_iter().find(|t| t.id == task.id).unwrap();
+        store.review_resolve(root, ReviewResolution {
+            task_id: task.id.clone(), verdict: "approved".into(),
+            choices: vec!["A".into()], ranking: vec![], pins: vec![], note: String::new(),
+            expected_task_revision: before.revision, expected_manifest_revision: manifest.revision,
+        }).unwrap();
+        let mut approved = store.load(root).unwrap().tasks.into_iter().find(|t| t.id == task.id).unwrap();
+        assert_eq!(approved.column, AI_READY_COLUMN_ID);
+        assert_eq!(approved.review_status.as_deref(), Some("resolved"));
+        assert!(approved.completed.is_none(), "human design approval is not implementation completion");
+
+        // Reproduce the legacy persisted state and verify restart-safe recovery.
+        approved.column = BLOCKED_COLUMN_ID.into();
+        let legacy = store.update_as(root, approved, MutationActor::Human).unwrap();
+        assert!(store.recover_answered_review_wait(root, &legacy.id).unwrap());
+        assert!(!store.recover_answered_review_wait(root, &legacy.id).unwrap());
+        let mut recovered = store.load(root).unwrap().tasks.into_iter().find(|t| t.id == task.id).unwrap();
+        assert_eq!(recovered.column, AI_READY_COLUMN_ID);
+
+        // A distinct technical blocker must never be released by review recovery.
+        recovered.column = BLOCKED_COLUMN_ID.into();
+        recovered.blocked_reason = Some("Missing importer".into());
+        assert!(!resume_answered_review_wait(&store.load(root).unwrap(), &mut recovered));
+        recovered.blocked_reason = None;
+        recovered.attention.push(TaskAttention::NeedsUser);
+        assert!(!resume_answered_review_wait(&store.load(root).unwrap(), &mut recovered));
+    }
+}
 
 #[cfg(test)]
 mod video_retention_tests {
