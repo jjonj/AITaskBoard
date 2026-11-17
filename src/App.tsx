@@ -1215,6 +1215,41 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     [snapshot],
   );
 
+  // Keep the draft's destination column visible beside the editor sheet, not
+  // merely somewhere underneath it. Recheck when switching columns or resizing.
+  useEffect(() => {
+    const selectedColumn = editor?.draft.column;
+    if (!selectedColumn) return;
+    const reveal = () => {
+      const board = boardRef.current;
+      const target = board?.querySelector<HTMLElement>(
+        `[data-column-id="${CSS.escape(selectedColumn)}"]`,
+      );
+      if (!board || !target) return;
+
+      const boardBounds = board.getBoundingClientRect();
+      const sheetLeft = editorModalRef.current?.getBoundingClientRect().left ?? boardBounds.right;
+      const visibleLeft = boardBounds.left + 17;
+      const visibleRight = Math.min(boardBounds.right, sheetLeft) - 17;
+      if (visibleRight <= visibleLeft) return;
+
+      const bounds = target.getBoundingClientRect();
+      const room = visibleRight - visibleLeft;
+      const offset = bounds.width > room || bounds.left < visibleLeft
+        ? bounds.left - visibleLeft
+        : bounds.right > visibleRight ? bounds.right - visibleRight : 0;
+      if (Math.abs(offset) > 1) {
+        board.scrollTo({ left: board.scrollLeft + offset, behavior: "smooth" });
+      }
+    };
+    const frame = requestAnimationFrame(reveal);
+    window.addEventListener("resize", reveal);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener("resize", reveal);
+    };
+  }, [editor?.draft.column, columns, todaysWork]);
+
   const todaysWorkSet = useMemo(() => todaysWork
     ? todaysWorkIds(activeTasks, columns, isComplete, todayClock)
     : null, [todaysWork, activeTasks, columns, remotePrerequisites, todayClock]);
@@ -3694,9 +3729,11 @@ Details: ${queueRecoveryWarning}`;
         <div className="warning-banner">{snapshot.warnings.join(" • ")}</div>
       )}
 
+      {/* Extra scroll runway lets the final column move left of the editor sheet. */}
       <section
         className="board"
-        style={reviewOpen ? { display: "none" } : undefined}
+        style={reviewOpen ? { display: "none" } : editor
+          ? { paddingRight: "calc(min(756px, 100vw) + 17px)" } : undefined}
         ref={boardRef}
         onPointerDown={startBoardPan}
         onPointerMove={moveBoardPan}
@@ -3739,8 +3776,12 @@ Details: ${queueRecoveryWarning}`;
             : "";
 
           // Focus mode shows only relevant columns and temporarily reveals hidden ones.
-          if (todaysWork && columnTasks.length === 0) return null;
-          if (!todaysWork && column.hidden && (!column.snoozed_until || Date.parse(column.snoozed_until) > Date.now())) {
+          // Temporarily expand filtered/collapsed destinations while editing.
+          // This never changes the user's saved column visibility preference.
+          const selectedInEditor = editor?.draft.column === column.id;
+          if (todaysWork && columnTasks.length === 0 && !selectedInEditor) return null;
+          if (!todaysWork && column.hidden && !selectedInEditor &&
+              (!column.snoozed_until || Date.parse(column.snoozed_until) > Date.now())) {
             return (
               <button
                 className={`hidden-column${column.snoozed_until ? " snoozed" : ""}${columnActivityClass}`}
@@ -3762,7 +3803,7 @@ Details: ${queueRecoveryWarning}`;
 
           return (
             <div
-              className={`column ${column.terminal ? "terminal" : ""} ${highlightedEpicId && taskMap.get(highlightedEpicId)?.column === column.id ? "epic-proxy-origin-column" : ""} ${
+              className={`column ${selectedInEditor ? "editor-selected-column" : ""} ${column.terminal ? "terminal" : ""} ${highlightedEpicId && taskMap.get(highlightedEpicId)?.column === column.id ? "epic-proxy-origin-column" : ""} ${
                 dragColumnId === column.id ? "column-drag-source" : ""
               } ${cardDropIntent?.kind === "column" && cardDropIntent.columnId === column.id ? "column-drop-target" : ""}${columnActivityClass}`}
               key={column.id}

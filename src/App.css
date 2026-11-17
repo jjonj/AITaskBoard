@@ -4596,3 +4596,15 @@ body.card-dragging .project-tab-wrapper:not(.selected):hover {
   .dashboard-lightbox-heading strong { font-size: 13px; }
   .dashboard-lightbox-caption { padding: 6px 9px; }
 }
+
+/* MISC-0206: editor destination stays unmistakable on the exposed board. */
+.column.editor-selected-column {
+  outline: 3px solid color-mix(in srgb, var(--column-color) 65%, #d9f3ff);
+  outline-offset: 1px;
+  background: color-mix(in srgb, var(--column-color) 12%, #10151c);
+  box-shadow: 0 0 0 6px rgba(122, 191, 224, .12), 0 0 28px rgba(122, 191, 224, .25);
+}
+.column.editor-selected-column > .column-header {
+  background: color-mix(in srgb, var(--column-color) 20%, #19232d);
+  border-radius: 10px 10px 0 0;
+}
