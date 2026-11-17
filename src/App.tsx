@@ -1,4 +1,5 @@
 import { ToolbarIcon } from "./ToolbarIcons";
+import { ViewportMenu } from "./ViewportMenu";
 import { useLoggedError } from "./errorLog";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -3179,8 +3180,8 @@ Details: ${queueRecoveryWarning}`;
     setContextMenu(null);
     setColumnContextMenu({
       columnId: id,
-      x: Math.max(8, Math.min(event.clientX, window.innerWidth - 252)),
-      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 410)),
+      x: event.clientX,
+      y: event.clientY,
     });
   };
 
@@ -3237,11 +3238,10 @@ Details: ${queueRecoveryWarning}`;
   const openMoveSubmenu = (event: React.MouseEvent<HTMLButtonElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
     const width = 240;
-    const height = Math.min(window.innerHeight - 16, columns.length * 33 + 14);
     setMoveSubmenu({
       x: rect.right + width + 4 > window.innerWidth - 8
         ? Math.max(8, rect.left - width - 4) : rect.right + 4,
-      y: Math.max(8, Math.min(rect.top, window.innerHeight - height - 8)),
+      y: rect.top,
     });
   };
 
@@ -3894,8 +3894,8 @@ Details: ${queueRecoveryWarning}`;
                         setMoveSubmenu(null);
                         setContextMenu({
                           taskId: task.id,
-                          x: Math.min(event.clientX, Math.max(8, window.innerWidth - 238)),
-                          y: Math.min(event.clientY, Math.max(8, window.innerHeight - 408)),
+                          x: event.clientX,
+                          y: event.clientY,
                         });
                       }}
                       onMouseEnter={(event) => showHoverDetails(event, task)}
@@ -3999,8 +3999,8 @@ Details: ${queueRecoveryWarning}`;
                               const rect = event.currentTarget.getBoundingClientRect();
                               setContextMenu({
                                 taskId: task.id,
-                                x: Math.min(rect.right, window.innerWidth - 240),
-                                y: Math.min(rect.bottom, window.innerHeight - 410),
+                                x: rect.right,
+                                y: rect.bottom,
                               });
                             }}>···</button>
                         )}
@@ -4183,9 +4183,9 @@ Details: ${queueRecoveryWarning}`;
       )}
 
       {contextMenu && contextTask && (
-        <div
+        <ViewportMenu
           className="task-context-menu"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
+          x={contextMenu.x} y={contextMenu.y}
           onMouseDown={(event) => event.stopPropagation()}
         >
           <button
@@ -4331,15 +4331,15 @@ Details: ${queueRecoveryWarning}`;
           >
             Archive task
           </button>
-        </div>
+        </ViewportMenu>
       )}
 
       {contextMenu && contextTask && contextTask.kind !== "epic" && moveSubmenu && (
-        <div
+        <ViewportMenu
           className="task-context-menu task-move-submenu"
           role="menu"
           aria-label="Move to column"
-          style={{ left: moveSubmenu.x, top: moveSubmenu.y }}
+          x={moveSubmenu.x} y={moveSubmenu.y}
           onMouseDown={(event) => event.stopPropagation()}
         >
           <div className="context-menu-label">Move {contextTask.id} to</div>
@@ -4355,13 +4355,13 @@ Details: ${queueRecoveryWarning}`;
               }}
             >{column.name}{contextTask.column === column.id ? " ✓" : ""}</button>
           ))}
-        </div>
+        </ViewportMenu>
       )}
 
       {columnContextMenu && contextColumn && (
-        <div
+        <ViewportMenu
           className="task-context-menu column-context-menu"
-          style={{ left: columnContextMenu.x, top: columnContextMenu.y }}
+          x={columnContextMenu.x} y={columnContextMenu.y}
           onMouseDown={(event) => event.stopPropagation()}
         >
           <div className="context-menu-label">{contextColumn.name}</div>
@@ -4405,7 +4405,7 @@ Details: ${queueRecoveryWarning}`;
           >
             Archive all ({activeTasks.filter((task) => task.column === contextColumn.id).length})
           </button>
-        </div>
+        </ViewportMenu>
       )}
 
       {taskDumpOpen && (
