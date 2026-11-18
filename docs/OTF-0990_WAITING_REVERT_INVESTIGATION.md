@@ -1,0 +1,26 @@
+# OTF-0990 Waiting-to-AI-Ready regression (2026-11-18)
+
+## Exact cause
+**Stale OmniHub production binary statically embedded an older TaskBoard task-core.** Its Workstack/Inbox polling performs FsTaskStore::load, which historically wrote changes during reads. In the version built Nov 17, maintain_dependency_unblocks released any Waiting ("blocked") card if dependencies were done, **without checking an unanswered question**. OTF-0988 is Done, so OTF-0990 was released incorrectly to "ai-ready" even though it has attention "question" and an unanswered action prompt. The desktop TaskBoard (built Nov 18) correctly restored Waiting. Older binary vs newer binary caused the oscillation. Commits eca7bf0, 7f059fd, 0a8e783 and 6f3b821 fixed the core source but did not update the separate production OmniHub binary.
+
+Actual source: historical TaskBoard source at "git show eca7bf0^:packages/task-core/src/store.rs", maintain_dependency_unblocks. OmniHub dependency "src-omnihub-tauri/Cargo.toml" has "task-core = { path = ../../../TaskBoard/packages/task-core }"; "src-omnihub-tauri/src/workstack_taskboard.rs" regularly calls FsTaskStore::load from an apparently read-only Inbox endpoint.
+
+## Process and file evidence
+- Earlier TaskBoard trace at board "Tasks/.column-write-trace.log" logged hundreds of requested=blocked/readback=blocked writes from new desktop and CLI, and **no modern ai-ready writes** during actual observed reversions. Old OmniHub binary predates trace instrumentation.
+- Sampling at 11:49:32-11:49:41 captured blocked -> ai-ready -> blocked with question unchanged. Captured copies in E:\_AgentScratch\Tasks\TaskBoard\OTF-0990\Evidence\snapshot-blocked.md and snapshot-ai-ready.md differ in **only one line: column**.
+- Elevated Microsoft-Windows-Kernel-File tracing found the exact Markdown file being accessed repeatedly by old OmniHub PID 55476 and desktop TaskBoard PID 36068. ETW dropped events, so file opens are corroborating evidence, not direct proof of the write.
+- **Controlled isolation**: suspend OmniHub PID 55476 at 12:04:29; TaskBoard restored blocked at 12:04:31 and it remained blocked until resume at 12:04:36. After OmniHub resumed, the card changed back to ai-ready at 12:04:44.784. Before suspension, it oscillated repeatedly. NtSuspendProcess/NtResumeProcess returned success, and process was always resumed in finally.
+- OTF-0990 remained unanswered, waiting_return_column=animation, depends_on=OTF-0988. No user-answer or WAR review state was altered.
+
+## All relevant column-writer classes
+1. **Core store.rs**: explicit human/agent update, claim/release, automatic dependency maintenance, pending-question reconciliation, queue/recurrence/completion/review maintenance and archive/restore. Older versions ran automatic dependency unblock during load() itself.
+2. **Core execution.rs**: FIFO claim, recovery, release-to-origin; **review.rs**: verdict and review-dependent AI Ready transitions; **release.rs**: completion/release.
+3. **CLI and desktop**: packages/task-cli, src-tauri/src/lib.rs update_as, src-tauri/src/agent_notices.rs expired worker release; UI src/App.tsx manual move/release and src/ReviewView.tsx decision submission. All currently use the shared core writer and its audit.
+4. **Other consumer**: OmniHub src-omnihub-tauri/src/workstack_taskboard.rs and src-omnihub-tauri/src/taskboard_phone.rs call shared core load, including for reads. Because compiled statically, the old running production binary retained pre-fix mutation semantics.
+5. **Direct Markdown writers outside core**: src-tauri/src/projects.rs fs::write(&created_file, migrated) when moving cards between projects; independent scripts/agents/editors, Google DriveFS sync, and any older statically linked binaries. These bypass the modern write-trace log. The project-move writer was not involved here (no changed ID/path). GoogleDriveFS did open the file but its activity did not explain the suspend/resume result.
+
+## Root fix and verification
+- Rebuilt OmniHub with corrected shared task-core in a detached clean-source worktree, to avoid deploying concurrent agents' unrelated dirty Omnish changes. Used canonical Tauri production embedded-assets verification and SHA-pinned activation.
+- Replaced running binary (old PID 55476, modified 2026-11-17) with validated OmniHub production release "D:\SSDProjects\Tools\Omnish\main\target\release\omnihub-production-20261118T111619Z-245eb28c.exe" (new PID 63612). SHA256 906A68C8D77B7027EF73EF5F7C5F9618C8E04E70674D04A23A6B061E6CFDEE3D. Restarted via "OmniHub Rust" scheduled task, verified listeners 5000/3333/5055 owned by 63612, and gateway HTTP 200.
+- After deployment, 50 samples over 14 seconds: blocked=50, ai-ready=0. Question remains unanswered and waiting_return_column remains animation; it will return to animation only after an actual answer when the unified current Waiting release gate permits.
+- Removed the ad hoc OTF-0990-only high-volume tracing from task-core/store.rs after identifying the stale writer. No extra guard/watchdog was added. Forensics and snapshots remain only in scratch.
