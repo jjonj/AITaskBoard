@@ -1195,6 +1195,16 @@ impl FsTaskStore {
         // Otherwise the recovery scanner can mistake a parked task for busy work.
         let text = clear_parked_queue_lifecycle(&text, &task, &snapshot.config)?;
         write_text_atomic(&path, &text)?;
+        if previous.column != task.column {
+            let audit_path = root.join(".column-transitions.log");
+            if let Ok(mut audit) = fs::OpenOptions::new().create(true).append(true).open(&audit_path) {
+                let _ = writeln!(audit, "{} task={} {} -> {} actor={:?} action={} pid={} previous_claim={:?} new_claim={:?} queue_before={:?} queue_after={:?}",
+                    Utc::now().to_rfc3339(), task.id, previous.column, task.column,
+                    actor, action, std::process::id(), previous.claimed_by, task.claimed_by,
+                    claim_metadata(&existing, "queue_state").ok().flatten(),
+                    claim_metadata(&text, "queue_state").ok().flatten());
+            }
+        }
         task.revision = revision(&text);
         if previous.related_to != task.related_to {
             mirror_local_related_links(root, &snapshot, &task.id, &previous.related_to, &task.related_to)?;
