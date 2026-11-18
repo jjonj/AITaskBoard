@@ -1913,6 +1913,9 @@ fn map_store_error(error: TaskStoreError) -> CliError {
         TaskStoreError::Parse(message) => CliError::new("invalid_board_task_data", message).exit(4),
         TaskStoreError::Io(error) => CliError::new("io_error", error.to_string()).exit(5),
         TaskStoreError::Invalid(message) => {
+            if let Some(guidance) = message.strip_prefix("inbox_question_or_media_required: ") {
+                return CliError::new("inbox_question_or_media_required", guidance).exit(4);
+            }
             if message.starts_with("blocked_") {
                 return CliError::new(if message.starts_with("blocked_reason_required") { "blocked_reason_required" } else { "blocked_confirmation_invalid" }, message).exit(3);
             }
@@ -2164,6 +2167,43 @@ mod tests {
     }
 
     #[test]
+    fn inbox_rejects_text_only_review_without_a_question_or_media() {
+        let root = temp_board("inbox-question-or-media");
+        let store = FsTaskStore::default();
+        store.ensure_board(&root, "Test").unwrap();
+        let task = store.create(&root, draft("Change installer theme")).unwrap();
+        let id = task.id.clone();
+        let error = run_task(&store, &root, &TaskCommand::Finish(TaskFinishArgs {
+            target: id.clone(), verification: "user".into(),
+            instructions: Some("Review the warmer theme after next installation.".into()),
+        })).unwrap_err();
+        assert_eq!(error.code, "inbox_question_or_media_required");
+        assert!(error.message.contains("task review request --artifact"));
+        let current = store.load(&root).unwrap().tasks.into_iter().find(|t| t.id == id).unwrap();
+        assert_eq!(current.column, task.column, "rejected finish must not mark Done");
+        assert!(current.question.is_none());
+
+        // Direct core updates (also used by the desktop) cannot bypass the CLI rule.
+        let mut bypass = current.clone();
+        bypass.question = Some(TaskQuestion {
+            request_type: Some("verification".into()),
+            prompt: "Please review the installation later.".into(),
+            options: vec!["Done".into(), "Needs changes".into()], answer: None,
+        });
+        bypass.attention.push(TaskAttention::Question);
+        assert!(store.update(&root, bypass).unwrap_err().to_string()
+            .contains("inbox_question_or_media_required"));
+
+        let accepted = run_task(&store, &root, &TaskCommand::Finish(TaskFinishArgs {
+            target: id.clone(), verification: "user".into(),
+            instructions: Some("Does the installed theme look correct?".into()),
+        })).unwrap();
+        assert_eq!(accepted["task"]["question"]["prompt"], "Does the installed theme look correct?");
+        assert_eq!(accepted["task"]["column"], "done");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn ask_user_and_finish_attach_one_request_to_the_original_task() {
         let root = temp_board("human-input");
         let store = FsTaskStore::default();
@@ -2194,7 +2234,7 @@ mod tests {
         store.claim(&root, &id, "TestWorker").unwrap();
         let finish = TaskCommand::Finish(TaskFinishArgs {
             target: id.clone(), verification: "user".into(),
-            instructions: Some("Open the built app and check feature X".into()),
+            instructions: Some("Does feature X work in the built app?".into()),
         });
         let completed = run_task(&store, &root, &finish).unwrap();
         assert_eq!(completed["task"]["column"], "done");

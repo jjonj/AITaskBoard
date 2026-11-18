@@ -885,6 +885,7 @@ impl FsTaskStore {
                 "agents must create in a ready column, then claim the task to enter In Progress".into()));
         }
         validate_draft(&snapshot, &draft)?;
+        validate_new_inbox_request(draft.kind, draft.review_mode, None, draft.question.as_ref())?;
 
         let reserved = match (&draft.reserved_id, &draft.reservation_token) {
             (None, None) => None,
@@ -1164,6 +1165,7 @@ impl FsTaskStore {
             return Err(TaskStoreError::Invalid("blocked_confirmation_invalid: no new agent Blocked transition".into()));
         }
         apply_blocked_state(Some(&previous), &mut task, actor)?;
+        validate_new_inbox_request(task.kind, task.review_mode, previous.question.as_ref(), task.question.as_ref())?;
         validate_task(&snapshot, &task)?;
         // An advisory is temporary board-wide information. Completing it
         // removes the Markdown card instead of leaving a misleading Done task.
@@ -2401,6 +2403,38 @@ fn validate_live(task: &Task) -> Result<(), TaskStoreError> {
             return Err(TaskStoreError::Invalid("in_session must clear needs-user".into()));
         }
         _ => {}
+    }
+    Ok(())
+}
+
+/// An Inbox submission without visual media must ask the human an actual question.
+/// Only newly submitted/changed pending questions are checked: legacy requests
+/// stay editable, and native visual reviews already require attached artifacts.
+fn validate_new_inbox_request(
+    kind: TaskKind,
+    mode: crate::ReviewMode,
+    previous: Option<&TaskQuestion>,
+    current: Option<&TaskQuestion>,
+) -> Result<(), TaskStoreError> {
+    if !matches!(kind, TaskKind::Task | TaskKind::Recurring) || !mode.is_inbox() {
+        return Ok(());
+    }
+    let Some(question) = current else { return Ok(()); };
+    if question.answer.is_some() || previous == Some(question)
+        || question.request_type.as_deref() == Some("queue_recovery") {
+        return Ok(());
+    }
+    // A question must stand on its own line and end with '?'. This prevents
+    // generic acceptance buttons or instructions like "review after install"
+    // from masquerading as a human question; other prose can follow on later lines.
+    let asks_something = question.prompt.lines().any(|line| {
+        let line = line.trim();
+        line.ends_with('?') && line[..line.len() - 1].chars().any(char::is_alphabetic)
+    });
+    if !asks_something {
+        return Err(TaskStoreError::Invalid(
+            "inbox_question_or_media_required: Inbox rejected: no explicit question or attached media. Ask a specific question ending in '?' (task ask-user --question or task finish --verification user --instructions), or attach a screenshot/video/HTML (task review request --artifact). Done/Needs changes buttons alone don't count. No review needed? Use task finish without verification.".into()
+        ));
     }
     Ok(())
 }
