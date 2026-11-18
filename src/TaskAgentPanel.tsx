@@ -5,6 +5,7 @@ import type { Task } from "./types";
 /** Controls only the T3 session already bound to this exact task. */
 export function TaskAgentPanel({ path, task }: { path: string; task: Task }) {
   const [state, setState] = useState<TaskAgentStatus | null>(null);
+  const [expanded, setExpanded] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
@@ -23,10 +24,11 @@ export function TaskAgentPanel({ path, task }: { path: string; task: Task }) {
     catch (cause) { setState(null); setError(String(cause)); }
   }, [path, task.id]);
   useEffect(() => {
+    if (!expanded) return;
     void refresh();
     const timer = window.setInterval(() => void refresh(), 15_000);
     return () => window.clearInterval(timer);
-  }, [refresh]);
+  }, [refresh, expanded]);
   const invoke = async (command: string, options: Record<string,unknown> = {}) => {
     if (busy) return;
     setBusy(true); setNotice(""); setError("");
@@ -52,9 +54,7 @@ export function TaskAgentPanel({ path, task }: { path: string; task: Task }) {
     void invoke("caffy_set", {mode, ...(minutes ? {durationMinutes:minutes}:{}),
       ...(mode === "periodic" ? {intervalMinutes:step}:{}), startup:mode === "startup"});
   };
-  return <section aria-label="Linked T3 agent controls" style={{padding:12, margin:"10px 0",
-    border:"1px solid #555",borderRadius:10}}>
-    <strong>Linked T3 agent</strong>{" "}
+  return <section aria-label="Linked T3 agent controls" style={{margin:"8px 0"}}><details onToggle={e => setExpanded(e.currentTarget.open)}><summary style={{cursor:"pointer",fontSize:12,opacity:.8}}>T3 agent · controls</summary><div style={{padding:"8px 0"}}>
     <button type="button" disabled={busy} onClick={() => void refresh()}>Refresh</button>
     {!state ? <p>{error || "Checking linked agent…"} No new session will be started.</p> : <>
       <p>{state.title ?? state.sessionId} · {state.activity ?? state.status ?? "unknown"} · observed {state.statusObservedAt ?? "unverified"}</p>
@@ -134,5 +134,5 @@ export function TaskAgentPanel({ path, task }: { path: string; task: Task }) {
     </>}
     {error && state && <p role="alert" style={{color:"#e39c70"}}>{error}</p>}
     {notice && <p role="status">{notice}</p>}
-  </section>;
+  </div></details></section>;
 }

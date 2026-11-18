@@ -663,6 +663,10 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const [executionModes, setExecutionModes] = useState<Record<string, import("./api").ExecutionIntent>>({});
   const pendingTaskStarts = useRef(new Set<string>());
   const [startingTaskIds, setStartingTaskIds] = useState<string[]>([]);
+  // Optimistic queue toggles: the new state shows on click while the durable
+  // write runs, so toggles never wait on (or grey out for) unrelated work.
+  const [pendingColumnQueue, setPendingColumnQueue] = useState<Record<string, boolean>>({});
+  const [pendingTaskQueue, setPendingTaskQueue] = useState<Record<string, boolean>>({});
   useEffect(() => {
     if (!snapshot) return;
     let cancelled = false;
@@ -2075,48 +2079,81 @@ Details: ${queueRecoveryWarning}`;
     task.review_status !== "open" &&
     !(task.attention.includes("question") && task.question?.answer == null);
 
-  const toggleTaskQueue = (task: Task) => run(async () => {
-    if (!queueEligible(task)) throw new Error(`${task.id} is not currently eligible for Queue.`);
-    const current = await taskExecutionIntent(task.id, boardPath);
-    const next = current.mode === "queue" ? "backlog" : "queue";
-    await taskSetExecutionMode(task.id, current.revision, next, boardPath);
-    const after = await loadBoard(boardPath);
-    applySnapshot(after);
-    const warning = await syncQueueWarning(task.id);
-    if (warning) setError(warning);
-  });
+  const dropPending = (id: string) => (current: Record<string, boolean>) => {
+    const { [id]: _dropped, ...rest } = current;
+    return rest;
+  };
+  // Displayed queue state = in-flight optimistic value, else persisted state.
+  const columnAutoQueued = (column: BoardConfig["columns"][number]) =>
+    pendingColumnQueue[column.id] ?? !!column.auto_queue;
+  const taskQueued = (task: Task) =>
+    pendingTaskQueue[task.id] ?? pendingColumnQueue[task.column] ?? executionModes[task.id]?.mode === "queue";
 
-  const toggleColumnQueue = (columnId: string) => run(async () => {
-    if (!snapshot) return;
-    const current = await loadBoard(boardPath);
-    const column = current.config.columns.find(item => item.id === columnId);
-    if (!column || !queueableColumn(columnId, current.config)) return;
-    const next = !column.auto_queue;
-    await saveBoardConfig({ ...current.config, columns: current.config.columns.map(item =>
-      item.id === columnId ? { ...item, auto_queue: next } : item) }, boardPath);
-    // Saving the column preference first makes newly created tasks inherit it,
-    // even if a later individual queue CAS encounters an uncertain receipt.
-    const afterPolicy = await loadBoard(boardPath);
-    const conflicts: string[] = [];
-    for (const task of afterPolicy.tasks.filter(task =>
-      task.column === columnId && queueEligible(task))) {
-      try {
-        const mode = await taskExecutionIntent(task.id, boardPath);
-        if (mode.mode !== (next ? "queue" : "backlog")) {
-          await taskSetExecutionMode(task.id, mode.revision, next ? "queue" : "backlog", boardPath);
-        }
-      } catch (err) { conflicts.push(`${task.id}: ${errorText(err)}`); }
+  // Card queue toggle. Ignores repeat clicks while its own write is in flight.
+  const toggleTaskQueue = async (task: Task) => {
+    if (task.id in pendingTaskQueue || !queueEligible(task)) return;
+    const next = !taskQueued(task);
+    setPendingTaskQueue(current => ({ ...current, [task.id]: next }));
+    setError("");
+    try {
+      const intent = await taskExecutionIntent(task.id, boardPath);
+      if ((intent.mode === "queue") !== next)
+        await taskSetExecutionMode(task.id, intent.revision, next ? "queue" : "backlog", boardPath);
+      // Load modes before dropping the optimistic value so the icon never flickers back.
+      setExecutionModes(await taskExecutionModes(boardPath));
+      applySnapshot(await loadBoard(boardPath));
+      await syncQueueWarning(task.id);
+    } catch (err) {
+      setError(errorText(err));
+      await refresh(boardPath, true);
+    } finally {
+      setPendingTaskQueue(dropPending(task.id));
     }
-    applySnapshot(await loadBoard(boardPath));
-    // An agent may update one of these tasks concurrently; column auto-queue
-    // policy is already persisted, and subsequent refreshes reconcile it.
-    if (!conflicts.length) {
-      void taskQueueReconcile(boardPath).then(() => refresh(boardPath, true)).catch(() =>
-        setQueueReconciliationOffline(true));
-    } else {
-      setError(`${column.name} auto-queue saved, but ${conflicts.length} task(s) could not be updated: ${conflicts.join("; ")}`);
+  };
+
+  // Column auto-queue toggle: saves the column policy, then aligns every
+  // currently eligible task in the column with it.
+  const toggleColumnQueue = async (columnId: string) => {
+    if (!snapshot || columnId in pendingColumnQueue) return;
+    const shown = snapshot.config.columns.find(item => item.id === columnId);
+    if (!shown || !queueableColumn(columnId)) return;
+    const next = !shown.auto_queue;
+    setPendingColumnQueue(current => ({ ...current, [columnId]: next }));
+    setError("");
+    try {
+      const current = await loadBoard(boardPath);
+      await saveBoardConfig({ ...current.config, columns: current.config.columns.map(item =>
+        item.id === columnId ? { ...item, auto_queue: next } : item) }, boardPath);
+      // Saving the column preference first makes newly created tasks inherit it,
+      // even if a later individual queue CAS encounters an uncertain receipt.
+      const afterPolicy = await loadBoard(boardPath);
+      const conflicts: string[] = [];
+      for (const task of afterPolicy.tasks.filter(task =>
+        task.column === columnId && queueEligible(task))) {
+        try {
+          const mode = await taskExecutionIntent(task.id, boardPath);
+          if (mode.mode !== (next ? "queue" : "backlog")) {
+            await taskSetExecutionMode(task.id, mode.revision, next ? "queue" : "backlog", boardPath);
+          }
+        } catch (err) { conflicts.push(`${task.id}: ${errorText(err)}`); }
+      }
+      setExecutionModes(await taskExecutionModes(boardPath));
+      applySnapshot(await loadBoard(boardPath));
+      // An agent may update one of these tasks concurrently; column auto-queue
+      // policy is already persisted, and subsequent refreshes reconcile it.
+      if (!conflicts.length) {
+        void taskQueueReconcile(boardPath).then(() => refresh(boardPath, true)).catch(() =>
+          setQueueReconciliationOffline(true));
+      } else {
+        setError(`${shown.name} auto-queue saved, but ${conflicts.length} task(s) could not be updated: ${conflicts.join("; ")}`);
+      }
+    } catch (err) {
+      setError(errorText(err));
+      await refresh(boardPath, true);
+    } finally {
+      setPendingColumnQueue(dropPending(columnId));
     }
-  });
+  };
 
   const showLinkedReviewOutcome = (before: BoardSnapshot, after: BoardSnapshot, reviewId: string) => {
     const review = after.tasks.find((task) => task.id === reviewId);
@@ -3746,7 +3783,7 @@ Details: ${queueRecoveryWarning}`;
           const inReviewCount = column.id === "blocked"
             ? allColumnTasks.filter(isInReviewInbox).length : 0;
           const eligibleColumnQueue = activeTasks.filter(task => task.column === column.id && queueEligible(task));
-          const queuedColumnCount = eligibleColumnQueue.filter(task => executionModes[task.id]?.mode === "queue").length;
+          const queuedColumnCount = eligibleColumnQueue.filter(taskQueued).length;
           const columnQueueMixed = queuedColumnCount > 0 && queuedColumnCount < eligibleColumnQueue.length;
           const columnTasks = orderCardsByDependencies(applyCardPlacements(allColumnTasks
             .filter((task) => !(column.id === "blocked" && hideBlockedInboxTasks && isInReviewInbox(task)))
@@ -3796,6 +3833,8 @@ Details: ${queueRecoveryWarning}`;
                 onClick={() => toggleColumnHidden(column.id)}
               >
                 {column.snoozed_until && <span className="hidden-column-snooze-icon" aria-hidden="true">☾</span>}
+                {columnAutoQueued(column) && queueableColumn(column.id) &&
+                  <span className="hidden-column-queue-icon" title="Auto-queue on" aria-hidden="true"><QueueArrows /></span>}
                 <span className="hidden-column-label" aria-hidden="true">{column.name}</span>
               </button>
             );
@@ -3837,15 +3876,15 @@ Details: ${queueRecoveryWarning}`;
                   onPointerDown={(event) => event.stopPropagation()}
                   onMouseDown={(event) => event.stopPropagation()}
                 >
-                  {queueableColumn(column.id) && <button type="button"
-                    className={`queue-intent-toggle column-queue-toggle${column.auto_queue ? " queued" : ""}${columnQueueMixed ? " mixed" : ""}`}
-                    title={`${column.auto_queue ? "Disable" : "Enable"} ${column.name} auto-queue for current and future eligible tasks · ${queuedColumnCount}/${eligibleColumnQueue.length} queued`}
-                    aria-label={`${column.auto_queue ? "Disable" : "Enable"} ${column.name} auto-queue`}
-                    aria-pressed={!!column.auto_queue}
-                    disabled={busy}
-                    onClick={() => void toggleColumnQueue(column.id)}><QueueArrows /></button>}
-                  <button type="button" className="column-quick-add" title={`Add task to ${column.name}`}
-                    aria-label={`Add task to ${column.name}`} onClick={() => openCreate(column.id)}>+</button>
+                  {queueableColumn(column.id) && (() => {
+                    const autoQueued = columnAutoQueued(column);
+                    return <button type="button"
+                      className={`queue-intent-toggle column-queue-toggle${autoQueued ? " queued" : ""}${columnQueueMixed ? " mixed" : ""}${column.id in pendingColumnQueue ? " pending" : ""}`}
+                      title={`Auto-queue ${autoQueued ? "ON" : "OFF"} · ${queuedColumnCount}/${eligibleColumnQueue.length} eligible tasks queued\nClick to turn ${autoQueued ? "off" : "on"} for current and future tasks`}
+                      aria-label={`${column.name} auto-queue`}
+                      aria-pressed={autoQueued}
+                      onClick={() => void toggleColumnQueue(column.id)}><QueueArrows /></button>;
+                  })()}
                   {column.id !== "draft" && !column.terminal && (
                     <button
                       className={`column-ai-ready ${column.advisory ? "advisory" : column.ai_ready ? "active" : ""}`}
@@ -3861,12 +3900,15 @@ Details: ${queueRecoveryWarning}`;
                       disabled={column.id === "ai-ready"}
                       onClick={() => cycleColumnMode(column.id)}
                     >
-                      {column.advisory ? "!" : "✓"}
+                      {column.advisory ? "!" : <ToolbarIcon name="check" size={14} />}
                     </button>
                   )}
-                  <button className="column-secondary-action" title="Collapse column" onClick={() => toggleColumnHidden(column.id)}>│</button>
-                  <button className="column-secondary-action" title="Rename" onClick={() => renameColumn(column.id)}>✎</button>
-                  <button className="column-secondary-action" title="Delete" onClick={() => deleteColumn(column.id)}>×</button>
+                  <button type="button" className="column-quick-add" title={`Add task to ${column.name}`}
+                    aria-label={`Add task to ${column.name}`} onClick={() => openCreate(column.id)}><ToolbarIcon name="plus" size={15} /></button>
+                  <span className="column-actions-divider" aria-hidden="true" />
+                  <button className="column-secondary-action" title="Collapse column" aria-label="Collapse column" onClick={() => toggleColumnHidden(column.id)}><ToolbarIcon name="shrink" size={14} /></button>
+                  <button className="column-secondary-action" title="Rename" aria-label="Rename column" onClick={() => renameColumn(column.id)}><ToolbarIcon name="edit" size={13} /></button>
+                  <button className="column-secondary-action" title="Delete" aria-label="Delete column" onClick={() => deleteColumn(column.id)}><ToolbarIcon name="close" size={13} /></button>
                 </div>
               </div>
 
@@ -3990,19 +4032,22 @@ Details: ${queueRecoveryWarning}`;
                           </span>
                         )}
                         <span className="task-meta-spacer" />
-                        {queueEligible(task) && <button type="button"
-                          className={`queue-intent-toggle card-queue-toggle${executionModes[task.id]?.mode === "queue" ? " queued" : ""}`}
-                          title={executionModes[task.id]?.mode === "queue"
-                            ? `Queued · ${queueReconciliationOffline ? "OpenRig unavailable, pending sync" :
-                                queueSyncStatuses[task.id] ? `${queueSyncStatuses[task.id].status}: ${queueSyncStatuses[task.id].reason ?? "exact receipt tracked"}` :
-                                  "durable intent, awaiting reconciliation"} · click to return to Backlog`
-                            : "Backlog · click to Queue"}
-                          aria-label={`${executionModes[task.id]?.mode === "queue" ? "Unqueue" : "Queue"} ${task.id}`}
-                          aria-pressed={executionModes[task.id]?.mode === "queue"}
-                          disabled={busy || !executionModes[task.id]}
-                          onPointerDown={event => event.stopPropagation()}
-                          onMouseDown={event => event.stopPropagation()}
-                          onClick={event => { event.stopPropagation(); void toggleTaskQueue(task); }}><QueueArrows /></button>}
+                        {queueEligible(task) && (() => {
+                          const queued = taskQueued(task);
+                          return <button type="button"
+                            className={`queue-intent-toggle card-queue-toggle${queued ? " queued" : ""}${task.id in pendingTaskQueue ? " pending" : ""}`}
+                            title={queued
+                              ? `Queued · ${queueReconciliationOffline ? "OpenRig unavailable, pending sync" :
+                                  queueSyncStatuses[task.id] ? `${queueSyncStatuses[task.id].status}: ${queueSyncStatuses[task.id].reason ?? "exact receipt tracked"}` :
+                                    "durable intent, awaiting reconciliation"} · click to return to Backlog`
+                              : "Backlog · click to Queue"}
+                            aria-label={`${queued ? "Unqueue" : "Queue"} ${task.id}`}
+                            aria-pressed={queued}
+                            disabled={!executionModes[task.id] && !(task.id in pendingTaskQueue)}
+                            onPointerDown={event => event.stopPropagation()}
+                            onMouseDown={event => event.stopPropagation()}
+                            onClick={event => { event.stopPropagation(); void toggleTaskQueue(task); }}><QueueArrows /></button>;
+                        })()}
                         {task.kind === "task" && !isForUser(task) && readinessOf(task) !== "ready" && (
                           <span className={`readiness-badge ${readinessOf(task)}`}
                             title={readinessOf(task) === "waiting" ? awaitingUserAnswer(task) ? "Waiting for your answer" : `Waiting for ${waitingFor(task).join(", ")}` : readinessOf(task) === "ready" ? "Ready to start" : "Blocked"}
@@ -4245,6 +4290,9 @@ Details: ${queueRecoveryWarning}`;
               {hasTaskSession(contextTask) ? "Open Session" : contextTask.live?.with_me ? "Start session with me" : "Spawn"}
             </button>
           )}
+          {contextTask.kind !== "epic" && <button type="button" onClick={() => {
+            setContextMenu(null); openEdit(contextTask);
+          }}>Agent controls · Caffy / GMA / Prepfile</button>}
           {contextTask.kind !== "epic" && <button type="button"
             title="Navigate to a previously linked T3 browser session, even if hidden or unloaded"
             onClick={() => {
@@ -4290,9 +4338,6 @@ Details: ${queueRecoveryWarning}`;
                 className="priority-context-action"
                 aria-pressed={contextTask.attention.includes("priority")}
                 onClick={() => {
-          {contextTask.kind !== "epic" && <button type="button" onClick={() => {
-            setContextMenu(null); openEdit(contextTask);
-          }}>Agent controls · Caffy / GMA / Prepfile</button>}
                   const id = contextTask.id;
                   setContextMenu(null);
                   void persistTaskMutation(id, "toggle priority", (task) => ({
@@ -4614,6 +4659,8 @@ Details: ${queueRecoveryWarning}`;
 
             {editor.mode === "edit" && editor.original && editor.original.kind !== "epic" &&
               <TaskTracePanel path={boardPath} taskId={editor.original.id} />}
+            {editor.mode === "edit" && editor.original && editor.original.kind !== "epic" &&
+              <TaskAgentPanel path={boardPath} task={editor.original} />}
             {isQueueCompact ? (
               <h2 className="queue-compact-title">{editor.draft.title}</h2>
             ) : <input
@@ -4659,8 +4706,6 @@ Details: ${queueRecoveryWarning}`;
                       return { ...current, draft: {
                         ...current.draft,
                         user_notes: note,
-            {editor.mode === "edit" && editor.original && editor.original.kind !== "epic" &&
-              <TaskAgentPanel path={boardPath} task={editor.original} />}
 
                       } };
                     })} />
