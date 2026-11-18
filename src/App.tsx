@@ -4290,9 +4290,6 @@ Details: ${queueRecoveryWarning}`;
               {hasTaskSession(contextTask) ? "Open Session" : contextTask.live?.with_me ? "Start session with me" : "Spawn"}
             </button>
           )}
-          {contextTask.kind !== "epic" && <button type="button" onClick={() => {
-            setContextMenu(null); openEdit(contextTask);
-          }}>Agent controls · Caffy / GMA / Prepfile</button>}
           {contextTask.kind !== "epic" && <button type="button"
             title="Navigate to a previously linked T3 browser session, even if hidden or unloaded"
             onClick={() => {
@@ -4648,19 +4645,20 @@ Details: ${queueRecoveryWarning}`;
                 </button>}
               </div>}
               {editor.mode === "edit" && !!editor.original && hasTaskSession(editor.original) && (
-                <button type="button" className="button secondary" disabled={busy}
-                  title="Open the linked T3 session"
-                  onClick={() => openForTask(editor.original!)}>
-                  Open Session
-                </button>
+                <>
+                  <button type="button" className="button secondary" disabled={busy}
+                    title="Open the linked T3 session"
+                    onClick={() => openForTask(editor.original!)}>
+                    Open Session
+                  </button>
+                  <TaskAgentPanel key={boardPath + editor.original.id} path={boardPath} task={editor.original} />
+                </>
               )}
               <button className="icon-button" aria-label="Close editor" onClick={() => closeEditor()} disabled={busy}>×</button>
             </div>
 
             {editor.mode === "edit" && editor.original && editor.original.kind !== "epic" &&
               <TaskTracePanel path={boardPath} taskId={editor.original.id} />}
-            {editor.mode === "edit" && editor.original && editor.original.kind !== "epic" &&
-              <TaskAgentPanel path={boardPath} task={editor.original} />}
             {isQueueCompact ? (
               <h2 className="queue-compact-title">{editor.draft.title}</h2>
             ) : <input
