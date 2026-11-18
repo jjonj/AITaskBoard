@@ -422,6 +422,30 @@ impl FsTaskStore {
     // a human-only card, or a card without prerequisites: those may have other
     // reasons to remain in Blocked. Also runs on load so manually edited
     // Markdown and older board states are reconciled.
+    fn maintain_pending_questions(&self, snapshot: &BoardSnapshot) -> Result<bool, TaskStoreError> {
+        let mut changed = false;
+        for task in snapshot.tasks.iter().filter(|t| t.kind == TaskKind::Task &&
+            !t.archived && t.completed.is_none() && t.column != BLOCKED_COLUMN_ID &&
+            t.question.as_ref().is_some_and(|q| q.answer.is_none() &&
+                q.request_type.as_deref() != Some("verification") && !q.prompt.trim().is_empty())) {
+            let path = PathBuf::from(&task.path);
+            let before = fs::read_to_string(&path)?;
+            if revision(&before) != task.revision { continue; }
+            let mut updated = task.clone();
+            updated.column = BLOCKED_COLUMN_ID.into();
+            updated.claimed_by = None;
+            let rendered = render_with_claim_token(&updated, &before, None)?;
+            let rendered = if waiting_return_column(&snapshot.config, &before).is_some() {
+                rendered
+            } else if is_todo(&snapshot.config, &task.column) {
+                set_waiting_origin(&rendered, &task.column)?
+            } else { rendered };
+            write_text_atomic(&path, &rendered)?;
+            changed = true;
+        }
+        Ok(changed)
+    }
+
     fn maintain_dependency_unblocks(&self, snapshot: &BoardSnapshot) -> Result<bool, TaskStoreError> {
         let ready_column = snapshot.config.columns.iter()
             .find(|col| col.id == AI_READY_COLUMN_ID && !col.terminal)
@@ -687,6 +711,9 @@ impl FsTaskStore {
             snapshot = self.load_unlocked(root)?;
         }
         if self.maintain_completed_tasks(root, &snapshot)? {
+            snapshot = self.load_unlocked(root)?;
+        }
+        if self.maintain_pending_questions(&snapshot)? {
             snapshot = self.load_unlocked(root)?;
         }
         if self.maintain_dependency_unblocks(&snapshot)? {
@@ -1199,7 +1226,8 @@ impl FsTaskStore {
         // Otherwise the recovery scanner can mistake a parked task for busy work.
         let text = clear_parked_queue_lifecycle(&text, &task, &snapshot.config)?;
         let text = if previous.column != BLOCKED_COLUMN_ID && task.column == BLOCKED_COLUMN_ID &&
-            is_todo(&snapshot.config, &previous.column) {
+            is_todo(&snapshot.config, &previous.column) &&
+            waiting_return_column(&snapshot.config, &existing).is_none() {
             set_waiting_origin(&text, &previous.column)?
         } else if previous.column == BLOCKED_COLUMN_ID && task.column != BLOCKED_COLUMN_ID {
             remove_waiting_origin(&text)?
