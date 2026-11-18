@@ -11,7 +11,7 @@ import { VisualReviewInspector } from "./VisualReviewInspector";
 import { InboxQueueSidebar, type InboxQueueItem } from "./InboxQueueSidebar";
 import { InboxResponseFooter, reviewOutcomes } from "./InboxResponseFooter";
 import { InboxRichText } from "./InboxRichText";
-import { InboxCheckboxTable, parseCheckboxTable } from "./InboxCheckboxTable";
+import { InboxCheckboxTable, parseCheckboxTable, checkboxRowCount, formatCheckboxAnswers, type CheckboxAnswers } from "./InboxCheckboxTable";
 import { parseDescriptionTimeline } from "./descriptionTimeline";
 
 type QueueItem = InboxQueueItem;
@@ -20,7 +20,7 @@ type QueueItem = InboxQueueItem;
 type AnswerUndo = { path: string; key: string; before: Task; savedRevision: string };
 type InboxDraft = {
   note: string; pins: ReviewPin[]; choice: string; ranking: string[];
-  userNote: string; userAnswer: string; userCriteria: string; keepForUser: boolean;
+  userNote: string; userAnswer: string; userCriteria: string; keepForUser: boolean; checkboxAnswers: CheckboxAnswers;
   images: Array<{ dataUrl: string; mime: string; name: string }>;
 };
 type Props = {
@@ -147,6 +147,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   const [userCriteria, setUserCriteria] = useState("");
   const [keepForUser, setKeepForUser] = useState(false);
   const [userAnswer, setUserAnswer] = useState("");
+  const [checkboxAnswers, setCheckboxAnswers] = useState<CheckboxAnswers>({});
   const [lastAnswered, setLastAnswered] = useState<AnswerUndo | null>(null);
   const [snoozedLocally, setSnoozedLocally] = useState<Record<string, number>>(loadReviewSnoozes);
   const [responseOutcome, setResponseOutcome] = useState("");
@@ -200,6 +201,8 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
     ((showResolved || reviewTask?.task.id === initialTaskId) &&
       (reviewTask?.task.review_status === "resolved" ||
        reviewTask?.task.review_status === "awaiting_revision"));
+  const checkboxTable = reviewTask?.task.question?.prompt && !reviewTask.historical
+    ? parseCheckboxTable(reviewTask.task.question.prompt) : null;
   const round = manifest?.rounds[manifest.rounds.length - 1];
   const activeInboxKey = useRef(selectedKey);
   activeInboxKey.current = selectedKey;
@@ -392,6 +395,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
     setKeepForUser(draft?.keepForUser ?? (reviewTask?.task.kind === "for_user" ||
       !!reviewTask?.task.attention.includes("needs-user")));
     setUserAnswer(draft?.userAnswer ?? "");
+    setCheckboxAnswers(draft?.checkboxAnswers ?? {});
     setInboxImages(draft?.images ?? []);
     setResponseOutcome("");
     if (!reviewTask || !reviewTask.task.review_status) return;
@@ -637,7 +641,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
 
   const captureDraft = (): InboxDraft => ({
     note, pins: [...pins], choice, ranking: [...ranking],
-    userNote, userAnswer, userCriteria, keepForUser, images: [...inboxImages],
+    userNote, userAnswer, userCriteria, keepForUser, checkboxAnswers, images: [...inboxImages],
   });
 
   // Leave the current item immediately; the revision-checked native write runs
@@ -667,6 +671,13 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
     });
   };
 
+  const changeCheckboxAnswers = (next: CheckboxAnswers) => {
+    setCheckboxAnswers(next);
+    if (checkboxTable) setUserAnswer(checkboxRowCount(checkboxTable.rows, next)
+      ? formatCheckboxAnswers(checkboxTable.rows, next) : "");
+    setKeepForUser(false);
+  };
+
   const submitUser = (markDone = false, reopen = false) => {
     if (!reviewTask || reviewTask.historical || isVisualReview || saving) return;
     const item = reviewTask;
@@ -674,6 +685,11 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
     const aiQuestion = old.kind === "task" && old.attention.includes("question") &&
       !!old.question && !old.question.answer;
     const isApproval = aiQuestion && (old.question?.request_type === "verification" || old.column === "done");
+    if (aiQuestion && checkboxTable && !reopen && !markDone &&
+        checkboxRowCount(checkboxTable.rows, checkboxAnswers) === 0) {
+      setError("Choose at least one answer in the questionnaire before submitting.");
+      return;
+    }
     // Done on a decision means keep the current implementation, not a change request.
     const answer = reopen ? "Needs changes" : aiQuestion && markDone
       ? (isApproval ? "Done" : "Keep current implementation")
@@ -1220,8 +1236,16 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
                   </div> : <>
                   {reviewTask.task.question?.prompt && (
                     <div className="review-user-question">
-                      {parseCheckboxTable(reviewTask.task.question.prompt) ? <InboxCheckboxTable key={keyOf(reviewTask)} prompt={reviewTask.task.question.prompt} disabled={saving} onAnswer={setUserAnswer} /> : <InboxRichText task={reviewTask.task} text={reviewTask.task.question.prompt} onError={setError} className="inbox-question-markdown" />}
-                      {!!reviewTask.task.question.options?.length && !parseCheckboxTable(reviewTask.task.question.prompt) &&
+                      {checkboxTable ? <>
+                        {!!checkboxTable.before && <InboxRichText task={reviewTask.task}
+                          text={checkboxTable.before} onError={setError} className="inbox-question-markdown" />}
+                        <InboxCheckboxTable table={checkboxTable} answers={checkboxAnswers}
+                          disabled={saving} onChange={changeCheckboxAnswers} />
+                        {!!checkboxTable.after && <InboxRichText task={reviewTask.task}
+                          text={checkboxTable.after} onError={setError} className="inbox-question-markdown" />}
+                      </> : <InboxRichText task={reviewTask.task} text={reviewTask.task.question.prompt}
+                        onError={setError} className="inbox-question-markdown" />}
+                      {!!reviewTask.task.question.options?.length && !checkboxTable &&
                         // For final verification, Done and Needs changes in
                         // the question are the same actions as the footer.
                         // Never make the user select one and then click it again.
@@ -1245,7 +1269,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
                       </div>}
                     </div>
                   )}
-                  <label>{reviewTask.task.question?.options.length || (reviewTask.task.question?.prompt && parseCheckboxTable(reviewTask.task.question.prompt)) ? "Add a note (optional)" : "Your answer"}
+                  <label>{reviewTask.task.question?.options.length || checkboxTable ? "Add a note (optional)" : "Your answer"}
                     <textarea onKeyDown={(event) => {
                       if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
                         event.preventDefault();
@@ -1255,7 +1279,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
                       setUserNote(event.currentTarget.value);
                       setKeepForUser(false);
                     }}
-                      rows={4} placeholder={reviewTask.task.question?.options.length
+                      rows={4} placeholder={reviewTask.task.question?.options.length || checkboxTable
                         ? "Optional explanation or extra instructions…" : "Write your answer…"} />
                   </label>
                   <button type="button" className="button secondary inbox-attach-button"
@@ -1328,6 +1352,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
               onReopen={reviewTask.task.question?.request_type === "verification" || reviewTask.task.column === "done" ? () => void submitUser(false, true) : undefined}
               onUndoLast={lastAnswered ? () => void undoLastAnswer() : undefined}
               notePresent={!!userNote.trim() || !!userAnswer.trim() || inboxImages.length > 0}
+              submitDisabled={!!checkboxTable && checkboxRowCount(checkboxTable.rows, checkboxAnswers) === 0}
               busy={saving}
               summary={reviewTask.task.kind === "for_user"
                 ? "Submit instructions or finish the human task"

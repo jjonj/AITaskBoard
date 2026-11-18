@@ -82,8 +82,8 @@ export function InboxResponseFooter({
         </button>)}
       </> : <>
         {!onReopen && <button className="button primary" type="button"
-          disabled={busy || disabled || !notePresent} onClick={() => onSubmit()}
-          title={!notePresent ? "Choose an option or write an answer" : "Send your answer and return this task to AI Ready"}>
+          disabled={busy || disabled || submitDisabled || !notePresent} onClick={() => onSubmit()}
+          title={submitDisabled ? "Choose at least one answer in the questionnaire" : !notePresent ? "Choose an option or write an answer" : "Send your answer and return this task to AI Ready"}>
           Submit ↵
         </button>}
         {onReopen && <button className="button secondary" type="button"
