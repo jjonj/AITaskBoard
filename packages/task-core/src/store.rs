@@ -3358,11 +3358,20 @@ pub(crate) fn write_text_atomic(path: &Path, text: &str) -> Result<(), TaskStore
     let parent = path
         .parent()
         .ok_or_else(|| TaskStoreError::Invalid("target has no parent directory".into()))?;
+    // Google Drive's virtual B: filesystem can report successful rename-over-existing
+    // yet restore the prior cloud-backed file seconds later. An in-place write is
+    // stable there; the TaskBoard cross-process lock protects cooperating writers.
+    let is_google_drive_mount = cfg!(windows) && path.to_string_lossy().starts_with("B:\\");
+    let saved = if is_google_drive_mount && path.exists() {
+        let mut file = fs::OpenOptions::new().write(true).truncate(true).open(path)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        Ok(())
+    } else {
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
     temp.write_all(text.as_bytes())?;
     temp.as_file().sync_all()?;
-
-    let saved = match temp.persist(path) {
+    match temp.persist(path) {
         Ok(_) => Ok(()),
         Err(error) if is_replace_not_supported(&error.error) => {
             // Some synced/mapped filesystems (notably the Google Drive Windows
@@ -3378,6 +3387,7 @@ pub(crate) fn write_text_atomic(path: &Path, text: &str) -> Result<(), TaskStore
             Ok(())
         }
         Err(error) => Err(TaskStoreError::Io(error.error)),
+    }
     };
     if saved.is_ok() && path.file_name().and_then(|n| n.to_str()) == Some("OTF-0990.md") {
         let requested = split_frontmatter(text).ok().and_then(|(yaml, _)| serde_yaml::from_str::<serde_yaml::Mapping>(&yaml).ok())
