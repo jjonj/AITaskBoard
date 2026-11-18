@@ -14,6 +14,12 @@ import { useLinkCopyMenu } from "./LinkCopyMenu";
 
 type Item = { path: string; project: string; task: Task };
 
+// Direct grid children are required for the Dashboard's full-width media stage.
+// WebView2 does not reliably lay out nested grid items through display:contents.
+function ReviewCenter({ dashboardMode, focus, children }: { dashboardMode: boolean; focus: boolean; children: ReactNode }) {
+  return dashboardMode && !focus ? <>{children}</> : <main className="review-visual-center">{children}</main>;
+}
+
 function ReviewHeaderIcon({ name }: { name: "previous" | "close" | "focus" | "feedback" | "more" }) {
   const paths = {
     previous: <><path d="m14.5 5.5-6.5 6.5 6.5 6.5" /><path d="M8.5 12H21" /></>,
@@ -551,7 +557,7 @@ export function VisualReviewInspector(props: Props) {
           counts={queueCounts}
         />}
 
-        <main className="review-visual-center">
+        <ReviewCenter dashboardMode={dashboardMode} focus={focus}>
           <div className="review-visual-toolbar">
             {dashboardMode ? <div className="review-visual-web-summary">
               <div className="dashboard-gallery-heading">
@@ -717,7 +723,7 @@ export function VisualReviewInspector(props: Props) {
               : round.mode === "rank" ? ranking.length + "/" + playable.length + " ranked"
               : pinCount > 0 ? pinCount + " annotations" : "Inspect artwork and choose an outcome"}
           />}
-        </main>
+        </ReviewCenter>
         {dashboardMode && !focus && <div className="dashboard-review-resizer"
           role="separator" tabIndex={0} aria-controls="dashboard-review-evidence" aria-label="Resize TaskBoard controls and evidence viewer"
           aria-orientation="horizontal" aria-valuemin={145} aria-valuemax={maxUpperHeight()}
