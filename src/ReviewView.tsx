@@ -11,6 +11,7 @@ import { VisualReviewInspector } from "./VisualReviewInspector";
 import { InboxQueueSidebar, type InboxQueueItem } from "./InboxQueueSidebar";
 import { InboxResponseFooter, reviewOutcomes } from "./InboxResponseFooter";
 import { InboxRichText } from "./InboxRichText";
+import { InboxCheckboxTable, parseCheckboxTable } from "./InboxCheckboxTable";
 import { parseDescriptionTimeline } from "./descriptionTimeline";
 
 type QueueItem = InboxQueueItem;
@@ -1219,9 +1220,8 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
                   </div> : <>
                   {reviewTask.task.question?.prompt && (
                     <div className="review-user-question">
-                      <InboxRichText task={reviewTask.task} text={reviewTask.task.question.prompt}
-                        onError={setError} className="inbox-question-markdown" />
-                      {!!reviewTask.task.question.options?.length &&
+                      {parseCheckboxTable(reviewTask.task.question.prompt) ? <InboxCheckboxTable key={keyOf(reviewTask)} prompt={reviewTask.task.question.prompt} disabled={saving} onAnswer={setUserAnswer} /> : <InboxRichText task={reviewTask.task} text={reviewTask.task.question.prompt} onError={setError} className="inbox-question-markdown" />}
+                      {!!reviewTask.task.question.options?.length && !parseCheckboxTable(reviewTask.task.question.prompt) &&
                         // For final verification, Done and Needs changes in
                         // the question are the same actions as the footer.
                         // Never make the user select one and then click it again.
@@ -1245,7 +1245,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
                       </div>}
                     </div>
                   )}
-                  <label>{reviewTask.task.question?.options.length ? "Add a note (optional)" : "Your answer"}
+                  <label>{reviewTask.task.question?.options.length || (reviewTask.task.question?.prompt && parseCheckboxTable(reviewTask.task.question.prompt)) ? "Add a note (optional)" : "Your answer"}
                     <textarea onKeyDown={(event) => {
                       if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
                         event.preventDefault();
