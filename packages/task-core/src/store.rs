@@ -439,6 +439,7 @@ impl FsTaskStore {
             task.column == "blocked" &&
             !task.attention.contains(&TaskAttention::Blocked) &&
             !task.attention.contains(&TaskAttention::NeedsUser) &&
+            !task.question.as_ref().is_some_and(|q| q.answer.is_none()) &&
             !task.depends_on.is_empty() &&
             ensure_dependencies_complete_for(&snapshot.tasks, &task.depends_on).is_ok()
         }) {
@@ -1129,7 +1130,9 @@ impl FsTaskStore {
         let asks_human = task.kind == TaskKind::Task && task.question.as_ref()
             .is_some_and(|q| q.answer.is_none() && q.request_type.as_deref() != Some("verification"))
             && !snapshot.config.columns.iter().any(|c| c.id == task.column && c.terminal);
-        if asks_human && snapshot.config.columns.iter().any(|c| c.id == BLOCKED_COLUMN_ID) {
+        if asks_human && (task.column == BLOCKED_COLUMN_ID ||
+            (task.column == previous.column && task.question != previous.question)) &&
+            snapshot.config.columns.iter().any(|c| c.id == BLOCKED_COLUMN_ID) {
             task.column = BLOCKED_COLUMN_ID.into();
             task.claimed_by = None;
             task.blocked_reason = None;
