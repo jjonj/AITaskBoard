@@ -3379,6 +3379,18 @@ pub(crate) fn write_text_atomic(path: &Path, text: &str) -> Result<(), TaskStore
         }
         Err(error) => Err(TaskStoreError::Io(error.error)),
     };
+    if saved.is_ok() && path.file_name().and_then(|n| n.to_str()) == Some("OTF-0990.md") {
+        let requested = split_frontmatter(text).ok().and_then(|(yaml, _)| serde_yaml::from_str::<serde_yaml::Mapping>(&yaml).ok())
+            .and_then(|map| map.get(serde_yaml::Value::String("column".into())).and_then(serde_yaml::Value::as_str).map(str::to_owned));
+        let observed = fs::read_to_string(path).ok().and_then(|s| split_frontmatter(&s).ok())
+            .and_then(|(yaml, _)| serde_yaml::from_str::<serde_yaml::Mapping>(&yaml).ok())
+            .and_then(|map| map.get(serde_yaml::Value::String("column".into())).and_then(serde_yaml::Value::as_str).map(str::to_owned));
+        if let Some(root) = path.parent().and_then(Path::parent) {
+            if let Ok(mut log) = fs::OpenOptions::new().create(true).append(true).open(root.join(".column-write-trace.log")) {
+                let _ = writeln!(log, "{} pid={} file={} requested={:?} readback={:?}", Utc::now().to_rfc3339(), std::process::id(), path.display(), requested, observed);
+            }
+        }
+    }
     if saved.is_ok() {
         if let Some(message) = announcement {
             announce_column_move(&message);
