@@ -473,8 +473,8 @@ impl FsTaskStore {
         persist(&path, &mapping, &body)
     }
 
-    /// The single FIFO recovery operation for any busy task. Queue phases,
-    /// Starting uses 10 idle minutes; other claimed and in-progress work uses 3 hours.
+    /// Reset stale temporary working state after the common inactivity timeout.
+    /// Preserve task content and restore its last pre-work column.
     /// All identities and timestamps are rechecked under the board lock.
     pub fn recover_stale_busy_task(
         &self, root: &Path, id: &str, expected_owner: Option<&str>,
@@ -532,7 +532,7 @@ impl FsTaskStore {
             latest = Some(latest.map_or(at, |v| v.max(at)));
         }
         let idle_threshold = crate::busy_recovery_idle_threshold(previous.queue_state);
-        let idle_label = if previous.queue_state == Some(QueueState::Starting) { "10 minutes" } else { "3 hours" };
+        let idle_label = "3 hours";
         if latest.is_none_or(|at| now.signed_duration_since(at) < idle_threshold) {
             return Err(TaskStoreError::Conflict(format!("{id}: not inactive for {idle_label}")));
         }
@@ -544,13 +544,21 @@ impl FsTaskStore {
         let (yaml, body) = split_frontmatter(&rendered)?;
         let mut mapping: serde_yaml::Mapping = serde_yaml::from_str(&yaml)
             .map_err(|e| TaskStoreError::Parse(e.to_string()))?;
-        if previous.mode == ExecutionMode::Queue {
+        // A parked task must not retain a queue lease that can reactivate it.
+        // AI Ready keeps queue eligibility; every other column stays parked.
+        if task.column == AI_READY_COLUMN_ID && previous.mode == ExecutionMode::Queue {
             mapping.insert(key("queue_request"), key(&uuid::Uuid::new_v4().to_string()));
             mapping.insert(key("queue_state"), key("queued"));
             mapping.insert(key("queue_state_since"), key(&now.to_rfc3339_opts(SecondsFormat::Millis, true)));
-            for name in ["queue_reservation_id", "queue_reservation_expires_at", "queue_session_id"] {
+        } else {
+            mapping.insert(key("execution_mode"), key("backlog"));
+            for name in ["queue_request", "queue_state", "queue_state_since"] {
                 mapping.remove(key(name));
             }
+        }
+        for name in ["queue_reservation_id", "queue_reservation_expires_at", "queue_session_id",
+            "queue_registration_attempt", "queue_receipt", "queue_error"] {
+            mapping.remove(key(name));
         }
         mapping.remove(key("start_now_request"));
         mapping.remove(key("start_now_receipt"));

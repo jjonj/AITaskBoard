@@ -1191,6 +1191,9 @@ impl FsTaskStore {
         // was previously queued, regardless of actor or reason for reopening.
         let text = restore_reopened_queue_lifecycle(&text, &task)?;
         let text = reset_released_queue_lifecycle(&text, &task)?;
+        // A deliberate move to a non-queue column cancels stale dispatch state.
+        // Otherwise the recovery scanner can mistake a parked task for busy work.
+        let text = clear_parked_queue_lifecycle(&text, &task, &snapshot.config)?;
         write_text_atomic(&path, &text)?;
         task.revision = revision(&text);
         if previous.related_to != task.related_to {
@@ -2885,6 +2888,23 @@ fn restore_reopened_queue_lifecycle(text: &str, task: &Task) -> Result<String, T
     }
     Ok(format!("---\n{}---\n{}", serde_yaml::to_string(&mapping)
         .map_err(|error| TaskStoreError::Parse(error.to_string()))?, body))
+}
+
+fn clear_parked_queue_lifecycle(text: &str, task: &Task, config: &BoardConfig) -> Result<String, TaskStoreError> {
+    if task.column == IN_PROGRESS_COLUMN_ID || task.claimed_by.is_some() ||
+        queue_enabled_column(config, &task.column) { return Ok(text.to_owned()); }
+    let (yaml, body) = split_frontmatter(text)?;
+    let mut mapping: serde_yaml::Mapping = serde_yaml::from_str(&yaml)
+        .map_err(|e| TaskStoreError::Parse(e.to_string()))?;
+    let key = |name: &str| serde_yaml::Value::String(name.into());
+    mapping.insert(key("execution_mode"), key("backlog"));
+    for name in ["queue_request", "queue_state", "queue_state_since", "queue_reservation_id",
+        "queue_reservation_expires_at", "queue_session_id", "queue_error", "start_now_request",
+        "start_now_receipt", "queue_registration_attempt", "queue_receipt"] {
+        mapping.remove(key(name));
+    }
+    Ok(format!("---\n{}---\n{}", serde_yaml::to_string(&mapping)
+        .map_err(|e| TaskStoreError::Parse(e.to_string()))?, body))
 }
 
 fn reset_released_queue_lifecycle(text: &str, task: &Task) -> Result<String, TaskStoreError> {

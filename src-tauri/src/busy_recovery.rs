@@ -195,7 +195,7 @@ fn tick(fifo: &mut Fifo) -> Result<(), String> {
             Ok(_) => {
                 status().lock().unwrap_or_else(|e| e.into_inner()).last_action =
                     Some(format!("{}: recovered after {} idle",key.task,
-                        if row.state == Some(QueueState::Starting) { "10 minutes" } else { "three hours" }));
+                        "three hours"));
                 break; // Reread authoritative board state next tick.
             }
             Err(err) => {
@@ -251,11 +251,11 @@ mod tests {
         assert_eq!(fifo.next(3),vec![b.key.clone(),c.key.clone(),d.key.clone()]);
     }
     #[test]
-    fn starting_uses_ten_minutes_while_other_busy_work_uses_three_hours() {
+    fn all_busy_states_use_the_same_three_hour_timeout() {
         let now=Utc::now();
-        let starting=work("starting",QueueState::Starting,11);
-        assert!(should_recover(&starting,Some(now),None,now));
-        assert!(!should_recover(&work("recent",QueueState::Starting,9),None,None,now));
+        let starting=work("starting",QueueState::Starting,181);
+        assert!(should_recover(&starting,None,None,now));
+        assert!(!should_recover(&work("recent",QueueState::Starting,11),None,None,now));
         assert!(!should_recover(&starting,None,
             Some((now-chrono::Duration::minutes(5)).timestamp_millis()),now));
         for state in [QueueState::Reserved,QueueState::Working,QueueState::Queued] {
