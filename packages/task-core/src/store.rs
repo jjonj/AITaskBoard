@@ -437,11 +437,8 @@ impl FsTaskStore {
             !task.archived &&
             task.kind == TaskKind::Task &&
             task.column == "blocked" &&
-            !task.attention.contains(&TaskAttention::Blocked) &&
-            !task.attention.contains(&TaskAttention::NeedsUser) &&
-            !task.question.as_ref().is_some_and(|q| q.answer.is_none()) &&
             !task.depends_on.is_empty() &&
-            ensure_dependencies_complete_for(&snapshot.tasks, &task.depends_on).is_ok()
+            waiting_release_allowed(snapshot, task)
         }) {
             let path = PathBuf::from(&task.path);
             let existing = fs::read_to_string(&path)?;
@@ -449,11 +446,12 @@ impl FsTaskStore {
                 return Err(TaskStoreError::Conflict(format!("{} changed during dependency release", task.id)));
             }
             let mut released = task.clone();
-            released.column = ready_column.id.clone();
+            released.column = waiting_return_column(&snapshot.config, &existing)
+                .unwrap_or_else(|| ready_column.id.clone());
             released.claimed_by = None;
-            released.blocked_reason = None;
             apply_completion_state(&snapshot.config, &mut released);
-            write_text_atomic(&path, &render_with_claim_token(&released, &existing, None)?)?;
+            let rendered = render_with_claim_token(&released, &existing, None)?;
+            write_text_atomic(&path, &remove_waiting_origin(&rendered)?)?;
             changed = true;
         }
         Ok(changed)
@@ -1119,10 +1117,9 @@ impl FsTaskStore {
             if !task.ai_notes.contains(&decision) {
                 task.ai_notes = format!("{decision}\n\n{}", task.ai_notes);
             }
-            task.column = AI_READY_COLUMN_ID.into();
+            task.column = BLOCKED_COLUMN_ID.into();
             task.claimed_by = None;
-            task.blocked_reason = None;
-            task.attention.retain(|flag| !matches!(flag, TaskAttention::Question | TaskAttention::Blocked | TaskAttention::NeedsUser));
+            task.attention.retain(|flag| *flag != TaskAttention::Question);
             if !task.attention.contains(&TaskAttention::UserNote) { task.attention.push(TaskAttention::UserNote); }
         }
         // An unfinished human decision is parked, not claimed. Keep the legacy
@@ -1180,6 +1177,12 @@ impl FsTaskStore {
             task.revision.clear();
             return Ok(task);
         }
+        // All automatic Waiting exits use the same gate, including answers.
+        if task.column == BLOCKED_COLUMN_ID && waiting_release_allowed(&snapshot, &task) &&
+            (previous_pending && task.question.as_ref().is_some_and(|q| q.answer.is_some())) {
+            task.column = waiting_return_column(&snapshot.config, &existing)
+                .unwrap_or_else(|| return_column(&snapshot.config, None));
+        }
         let rendered = if task.claimed_by != previous.claimed_by {
             render_with_claim_token(&task, &existing, None)?
         } else { render_task(&task, Some(&existing))? };
@@ -1195,6 +1198,12 @@ impl FsTaskStore {
         // A deliberate move to a non-queue column cancels stale dispatch state.
         // Otherwise the recovery scanner can mistake a parked task for busy work.
         let text = clear_parked_queue_lifecycle(&text, &task, &snapshot.config)?;
+        let text = if previous.column != BLOCKED_COLUMN_ID && task.column == BLOCKED_COLUMN_ID &&
+            is_todo(&snapshot.config, &previous.column) {
+            set_waiting_origin(&text, &previous.column)?
+        } else if previous.column == BLOCKED_COLUMN_ID && task.column != BLOCKED_COLUMN_ID {
+            remove_waiting_origin(&text)?
+        } else { text };
         write_text_atomic(&path, &text)?;
         if previous.column != task.column {
             let audit_path = root.join(".column-transitions.log");
@@ -1283,6 +1292,31 @@ fn is_todo(config: &BoardConfig, column: &str) -> bool {
     column != IN_PROGRESS_COLUMN_ID && queue_enabled_column(config, column)
 }
 
+fn waiting_release_allowed(snapshot: &BoardSnapshot, task: &Task) -> bool {
+    task.column == BLOCKED_COLUMN_ID && !task.archived && task.completed.is_none() &&
+    task.kind == TaskKind::Task && task.claimed_by.is_none() &&
+    !task.attention.iter().any(|a| matches!(a, TaskAttention::Blocked | TaskAttention::NeedsUser)) &&
+    !task.blocked_reason.as_deref().is_some_and(|s| !s.trim().is_empty()) &&
+    !task.question.as_ref().is_some_and(|q| q.answer.is_none() && !q.prompt.trim().is_empty()) &&
+    task.review_status.as_deref() != Some("open") &&
+    ensure_dependencies_complete_for(&snapshot.tasks, &task.depends_on).is_ok()
+}
+fn waiting_return_column(config: &BoardConfig, text: &str) -> Option<String> {
+    claim_metadata(text, "waiting_return_column").ok().flatten()
+        .filter(|column| column != BLOCKED_COLUMN_ID && is_todo(config, column))
+}
+fn set_waiting_origin(text: &str, origin: &str) -> Result<String, TaskStoreError> {
+    let (yaml, body) = split_frontmatter(text)?;
+    let mut map: serde_yaml::Mapping = serde_yaml::from_str(&yaml).map_err(|e| TaskStoreError::Parse(e.to_string()))?;
+    map.insert(serde_yaml::Value::String("waiting_return_column".into()), serde_yaml::Value::String(origin.into()));
+    Ok(format!("---\n{}---\n{}", serde_yaml::to_string(&map).map_err(|e| TaskStoreError::Parse(e.to_string()))?, body))
+}
+fn remove_waiting_origin(text: &str) -> Result<String, TaskStoreError> {
+    let (yaml, body) = split_frontmatter(text)?;
+    let mut map: serde_yaml::Mapping = serde_yaml::from_str(&yaml).map_err(|e| TaskStoreError::Parse(e.to_string()))?;
+    map.remove(serde_yaml::Value::String("waiting_return_column".into()));
+    Ok(format!("---\n{}---\n{}", serde_yaml::to_string(&map).map_err(|e| TaskStoreError::Parse(e.to_string()))?, body))
+}
 fn return_column(config: &BoardConfig, original: Option<&str>) -> String {
     original.filter(|column| is_todo(config, column))
         .map(str::to_owned)
