@@ -3363,7 +3363,7 @@ pub(crate) fn write_text_atomic(path: &Path, text: &str) -> Result<(), TaskStore
     // stable there; the TaskBoard cross-process lock protects cooperating writers.
     let is_google_drive_mount = cfg!(windows) && path.to_string_lossy().starts_with("B:\\");
     let saved = if is_google_drive_mount && path.exists() {
-        let mut file = fs::OpenOptions::new().write(true).truncate(true).open(path)?;
+        let mut file = fs::OpenOptions::new().write(true).create(true).truncate(true).open(path)?;
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
         Ok(())
@@ -3397,7 +3397,7 @@ pub(crate) fn write_text_atomic(path: &Path, text: &str) -> Result<(), TaskStore
             .and_then(|map| map.get(serde_yaml::Value::String("column".into())).and_then(serde_yaml::Value::as_str).map(str::to_owned));
         if let Some(root) = path.parent().and_then(Path::parent) {
             if let Ok(mut log) = fs::OpenOptions::new().create(true).append(true).open(root.join(".column-write-trace.log")) {
-                let _ = writeln!(log, "{} pid={} file={} requested={:?} readback={:?}", Utc::now().to_rfc3339(), std::process::id(), path.display(), requested, observed);
+                let _ = writeln!(log, "{} pid={} file={} requested={:?} readback={:?} backtrace={}", Utc::now().to_rfc3339(), std::process::id(), path.display(), requested, observed, if requested.as_deref() == Some("ai-ready") { std::backtrace::Backtrace::force_capture().to_string() } else { String::new() });
             }
         }
     }
