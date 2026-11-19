@@ -4851,7 +4851,8 @@ Details: ${queueRecoveryWarning}`;
                 <br />Completing records a run and returns this task to AI Ready.</span>
             </div>}
 
-            <div className={`form-grid ${editor.draft.kind === "epic" ? "two" : "three"}`}>
+            <div className={`form-grid task-details-grid ${editor.draft.kind === "epic" ? "two" :
+              editor.draft.kind === "task" || editor.draft.kind === "recurring" ? "four" : "three"}`}>
               <label>
                 Column
                 <select
@@ -4909,6 +4910,10 @@ Details: ${queueRecoveryWarning}`;
                   ))}
                 </datalist>
               </label>
+              {(editor.draft.kind === "task" || editor.draft.kind === "recurring") &&
+                <TaskModelPicker value={editor.draft.model_selection ?? null}
+                  onChange={model_selection => setEditor(current => current
+                    ? { ...current, draft: { ...current.draft, model_selection } } : current)} />}
             </div>
 
             {snapshot.config.releases_enabled && editor.draft.kind === "task" && (
@@ -4943,10 +4948,6 @@ Details: ${queueRecoveryWarning}`;
               />
             </div>
 
-            {(editor.draft.kind === "task" || editor.draft.kind === "recurring") &&
-              <TaskModelPicker value={editor.draft.model_selection ?? null}
-                onChange={model_selection => setEditor(current => current
-                  ? { ...current, draft: { ...current.draft, model_selection } } : current)} />}
             {editor.draft.kind !== "epic" && <div className="task-meta-row">
               <div className="task-icon-editor">
                 <span>Icon</span>
