@@ -76,7 +76,7 @@ export function InboxResponseFooter({
           className={index === 0 ? "button primary" : "button secondary"} type="button"
           disabled={busy || disabled || (index === 0 && submitDisabled)}
           onClick={() => { onOutcome(option.value); onSubmit(option.value); }}
-          title={index === 0 && submitDisabled ? "Choose an option in the filmstrip, or rank every option first" : undefined}>
+          title={index === 0 && submitDisabled ? "Choose an option in the filmstrip, or rank the required top choices first" : undefined}>
           {busy ? "Saving…" : index === 0 && primaryLabel ? primaryLabel : option.label}
           {index === 0 && notePresent ? " + note" : ""}
         </button>)}

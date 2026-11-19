@@ -676,11 +676,12 @@ impl FsTaskStore {
             return Err(TaskStoreError::Invalid("pins must use normalized x/y and valid timestamps".into()));
         }
         if (input.verdict == "picked" && (round.mode != "pick" || input.choices.len() != 1)) ||
-            (input.verdict == "ranked" && (round.mode != "rank" || input.ranking.len() != round.artifacts.len())) ||
+            (input.verdict == "ranked" && (round.mode != "rank" ||
+                input.ranking.len() < round.top_k || input.ranking.len() > round.artifacts.len())) ||
             (input.verdict == "approved" && (round.mode != "approve" || input.choices.len() != 1)) ||
             (input.verdict == "marked" && round.mode != "markup") ||
             (input.ranking.len() != input.ranking.iter().collect::<HashSet<_>>().len()) {
-            return Err(TaskStoreError::Invalid("review verdict requires a valid choice or full ranking".into()));
+            return Err(TaskStoreError::Invalid("review verdict requires a valid choice or ranking of at least top-K candidates".into()));
         }
         let date = now();
         round.result = Some(ReviewVerdict {
@@ -1090,6 +1091,47 @@ impl FsTaskStore {
 #[cfg(test)]
 mod answered_review_wait_tests {
     use super::*;
+
+    #[test]
+    fn ranking_accepts_top_k_without_ranking_every_candidate() {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path();
+        let store = FsTaskStore::default();
+        store.ensure_board(root, "Ranking review").unwrap();
+        let draft = serde_json::from_value(serde_json::json!({
+            "title": "Choose preferred designs", "column": "blocked"
+        })).unwrap();
+        let task = store.create_as(root, draft, MutationActor::Human).unwrap();
+        let mut artifacts = Vec::new();
+        for label in ["A", "B", "C"] {
+            let path = root.join(format!("{label}.png"));
+            fs::write(&path, b"fixture").unwrap();
+            artifacts.push(ReviewInputArtifact {
+                source: path.to_string_lossy().into_owned(),
+                label: label.into(),
+            });
+        }
+        let manifest = store.review_request(root, ReviewRequest {
+            task_id: task.id.clone(), mode: "rank".into(), judge: "Choose top two".into(),
+            criteria: vec![], artifacts, references: vec![], previous: None,
+            poster: None, top_k: Some(2), implemented_by: None, openrig_gate: None,
+            expected_task_revision: Some(task.revision), expected_manifest_revision: None,
+        }).unwrap();
+        let current = store.load(root).unwrap().tasks.into_iter()
+            .find(|candidate| candidate.id == task.id).unwrap();
+        let answer = |ranking: Vec<&str>| ReviewResolution {
+            task_id: task.id.clone(), verdict: "ranked".into(),
+            choices: vec![], ranking: ranking.into_iter().map(str::to_owned).collect(),
+            pins: vec![], note: String::new(),
+            expected_task_revision: current.revision.clone(),
+            expected_manifest_revision: manifest.revision.clone(),
+        };
+        assert!(store.review_resolve(root, answer(vec!["C"])).is_err());
+        let resolved = store.review_resolve(root, answer(vec!["C", "A"])).unwrap();
+        assert_eq!(resolved.status, "resolved");
+        assert_eq!(resolved.rounds.last().unwrap().result.as_ref().unwrap().ranking,
+            ["C", "A"]);
+    }
 
     #[test]
     fn human_approval_releases_waiting_without_premature_completion() {

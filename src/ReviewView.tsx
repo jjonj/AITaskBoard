@@ -849,8 +849,8 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
       return;
     }
     if (verdict === "picked" && !choice ||
-        verdict === "ranked" && ranking.length !== playable.length) {
-      setError("Choose the required variant or finish ranking before submitting.");
+        verdict === "ranked" && (ranking.length < round.top_k || ranking.length > playable.length)) {
+      setError(`Choose a variant or rank at least the top ${round.top_k} candidates before submitting.`);
       return;
     }
     const item = reviewTask;
@@ -920,7 +920,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
     : round?.mode === "approve" ? "approved"
     : round?.mode === "rank" ? "ranked" : "marked";
   const primaryReady = round?.mode === "pick" ? !!choice
-    : round?.mode === "rank" ? ranking.length === playable.length : true;
+    : round?.mode === "rank" ? ranking.length >= round.top_k : true;
   const primaryLabel = round?.mode === "pick" ? (choice ? `Pick ${choice}` : "Pick")
     : round?.mode === "approve" ? "Approve"
     : round?.mode === "rank" ? "Submit ranking" : "Send markup";
@@ -1524,8 +1524,8 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
               : <>
                 {round.mode === "pick" ? (choice ? <>Picked <b>{labelOf(choice)}</b></> : "No candidate picked yet")
                   : round.mode === "rank" ? (ranking.length
-                    ? <>Ranked <b>{ranking.map(labelOf).join(" › ")}</b> · {ranking.length}/{playable.length} · top {round.top_k} ship</>
-                    : <>0/{playable.length} ranked · top {round.top_k} ship</>)
+                    ? <>Ranked <b>{ranking.map(labelOf).join(" › ")}</b> · {ranking.length} ranked ({round.top_k} required) · top {round.top_k} ship</>
+                    : <>0 ranked (top {round.top_k} required) · top {round.top_k} ship</>)
                   : round.mode === "approve" ? <>Approving <b>{playable[0] ? labelOf(playable[0].id) : "candidate"}</b>
                     {round.previous ? " against previous" : ""}</>
                   : <>Markup · {playable.length} candidate{playable.length === 1 ? "" : "s"}</>}
@@ -1538,7 +1538,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
               <button type="button" className="button secondary review-decision-more" disabled={saving}
                 onClick={() => void submit("more-variants")}>More variants <kbd>M</kbd></button>
               <button type="button" className="button primary review-decision-primary" disabled={saving || !primaryReady}
-                title={primaryReady ? undefined : round.mode === "pick" ? "Pick a candidate first" : "Rank every candidate first"}
+                title={primaryReady ? undefined : round.mode === "pick" ? "Pick a candidate first" : `Rank at least ${round.top_k} candidates first`}
                 onClick={() => void submit(primaryVerdict)}>
                 {saving ? "Sending…" : <>{primaryLabel} <kbd>Enter</kbd></>}</button>
             </>}

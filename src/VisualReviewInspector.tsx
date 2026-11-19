@@ -199,7 +199,7 @@ export function VisualReviewInspector(props: Props) {
   const goPreviousItem = () => {
     if (previousItem) onSelectTask(`${previousItem.path}|${previousItem.task.id}`);
   };
-  // The primary action must not look actionable before a pick/full ranking,
+  // The primary action must not look actionable before a pick/top-K ranking,
   // regardless of which verdict the user last hovered or selected.
   const primaryIncomplete = !primaryReady;
 
@@ -661,8 +661,9 @@ export function VisualReviewInspector(props: Props) {
               {round.mode === "pick"
                 ? choice ? `Selected: ${labelOf(choice)}. Click another thumbnail to change it.`
                   : "Pick an option: click its thumbnail below, then click Pick selected option."
-                : `Rank options: click thumbnails below in preference order (${ranking.length}/${playable.length}). ` +
-                  "Every option needs a rank; click an already-ranked thumbnail to remove it."}
+                : `Rank your top ${round.top_k}: click thumbnails in preference order ` +
+                  `(${Math.min(ranking.length, round.top_k)}/${round.top_k} required). ` +
+                  "You can rank additional options, but don't have to. Click a ranked thumbnail to remove it."}
               {round.mode === "rank" && ranking.length > 0 &&
                 <button type="button" className="button secondary" disabled={saving}
                   onClick={onClearRanking}>
@@ -720,7 +721,7 @@ export function VisualReviewInspector(props: Props) {
             summary={closedWithoutDecision ? "Closed without decision · Done"
               : resolved ? (awaitingNextRound ? "Awaiting another round" : "Review resolved")
               : round.mode === "pick" ? (choice ? "Selected " + labelOf(choice) : "Select an option")
-              : round.mode === "rank" ? ranking.length + "/" + playable.length + " ranked"
+              : round.mode === "rank" ? ranking.length + " ranked · " + round.top_k + " required"
               : pinCount > 0 ? pinCount + " annotations" : "Inspect artwork and choose an outcome"}
           />}
         </ReviewCenter>
