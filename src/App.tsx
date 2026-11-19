@@ -370,6 +370,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const [queueTelemetry, setQueueTelemetry] = useState<QueueOverview | null>(null);
   const [capacityTelemetry, setCapacityTelemetry] = useState<QueueCapacity | null>(null);
   useEffect(() => {
+    if (QUICK_CREATE_WINDOW) return;
     let alive = true;
     const observe = () => {
       void taskQueueOverview(boardPath).then(value => {
@@ -388,6 +389,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const [queueSyncStatuses, setQueueSyncStatuses] = useState<Record<string, { status: string; reason: string | null }>>({});
   const [queueReconciliationOffline, setQueueReconciliationOffline] = useState(false);
   useEffect(() => {
+    if (QUICK_CREATE_WINDOW) return;
     let active = true;
     let busy = false;
     let last = 0;
@@ -465,6 +467,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const [defaultTaskModel, setDefaultTaskModel] = useState<TaskModelSelection | null>(readDefaultTaskModel);
   const [staleAckBusy, setStaleAckBusy] = useState(false);
   useEffect(() => {
+    if (QUICK_CREATE_WINDOW) return;
     let live = true;
     const refresh = () => void taskStaleBlockers(boardPath)
       .then(items => { if (live) setStaleBlockers(items); })
@@ -551,7 +554,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   useEffect(() => {
     // Background maintenance should not compete with a task editor's writes.
     // Durable notices resume automatically when the editor closes.
-    if (editor) return;
+    if (QUICK_CREATE_WINDOW || editor) return;
     let active = true;
     let inFlight = false;
     let lastStarted = 0;
@@ -605,8 +608,12 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const showNotifyAgent = editor?.mode === "edit" && !!editor.original?.claimed_by &&
     editor.original.column === "in-progress" && editor.draft.column === "in-progress";
   const [remoteRelatedTasks, setRemoteRelatedTasks] = useState<Task[]>([]);
+  const [remoteLinksRequested, setRemoteLinksRequested] = useState(false);
   useEffect(() => {
     if (!editor) { setRemoteRelatedTasks([]); return; }
+    // Cross-board searches read every project. In the hotkey overlay, defer
+    // them until the user actually focuses a task-link picker.
+    if (QUICK_CREATE_WINDOW && !remoteLinksRequested) return;
     let cancelled = false;
     void (async () => {
       try {
@@ -626,7 +633,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       } catch { if (!cancelled) setRemoteRelatedTasks([]); }
     })();
     return () => { cancelled = true; };
-  }, [!!editor, boardPath]);
+  }, [!!editor, boardPath, remoteLinksRequested]);
   const remotePrerequisiteKey = (snapshot?.tasks ?? [])
     .flatMap((task) => task.depends_on).filter((id) => id.includes("#")).sort().join("|");
   const [remotePrerequisites, setRemotePrerequisites] = useState<Map<string, Task>>(() => new Map());
@@ -686,7 +693,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const [pendingColumnQueue, setPendingColumnQueue] = useState<Record<string, boolean>>({});
   const [pendingTaskQueue, setPendingTaskQueue] = useState<Record<string, boolean>>({});
   useEffect(() => {
-    if (!snapshot) return;
+    if (!snapshot || QUICK_CREATE_WINDOW) return;
     let cancelled = false;
     let retry: ReturnType<typeof setTimeout> | undefined;
     let attempts = 0;
@@ -1015,6 +1022,10 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     let mounted = true;
     void (async () => {
       try {
+        // Render the quick overlay's editor and give it initial focus before
+        // the expensive cloud-backed full-board refresh competes for I/O.
+        if (QUICK_CREATE_WINDOW) await new Promise((resolve) => window.setTimeout(resolve, 250));
+        if (!mounted) return;
         // A cached board is immediately usable; verify changes made by agents
         // while its tab was hidden without blocking tab navigation.
         const next = await loadBoard(boardPath);
@@ -4944,6 +4955,7 @@ Details: ${queueRecoveryWarning}`;
               {editor.draft.kind !== "epic" && <TaskLinkPicker
                 key={`${editor.original?.id ?? "new"}-depends`}
                 label="Depends on (hard prerequisites · all projects)"
+                onSearchStart={QUICK_CREATE_WINDOW ? () => setRemoteLinksRequested(true) : undefined}
                 tasks={[...(snapshot?.tasks ?? []), ...remoteRelatedTasks]}
                 excludeId={editor.original?.id}
                 allowEpics={false}
@@ -4954,6 +4966,7 @@ Details: ${queueRecoveryWarning}`;
               <TaskLinkPicker
                 key={`${editor.original?.id ?? "new"}-related`}
                 label="Related to (informational · all projects)"
+                onSearchStart={QUICK_CREATE_WINDOW ? () => setRemoteLinksRequested(true) : undefined}
                 tasks={[...(snapshot?.tasks ?? []), ...remoteRelatedTasks]}
                 excludeId={editor.original?.id}
                 values={editor.draft.related_to}

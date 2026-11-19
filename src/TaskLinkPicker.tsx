@@ -9,9 +9,10 @@ type Props = {
   tasks: Task[];
   excludeId?: string;
   allowEpics?: boolean;
+  onSearchStart?: () => void;
 };
 
-export function TaskLinkPicker({ label, values, onChange, tasks, excludeId, allowEpics = true }: Props) {
+export function TaskLinkPicker({ label, values, onChange, tasks, excludeId, allowEpics = true, onSearchStart }: Props) {
   const inputId = useId();
   const resultsId = useId();
   const [search, setSearch] = useState("");
@@ -93,7 +94,7 @@ export function TaskLinkPicker({ label, values, onChange, tasks, excludeId, allo
             aria-controls={resultsId}
             aria-activedescendant={focused && matches[highlighted]
               ? `${resultsId}-${matches[highlighted].id}` : undefined}
-            onFocus={() => setFocused(true)}
+            onFocus={() => { setFocused(true); onSearchStart?.(); }}
             onBlur={(event) => {
               if (!event.currentTarget.closest(".task-link-picker")?.contains(event.relatedTarget as Node | null)) {
                 setFocused(false);

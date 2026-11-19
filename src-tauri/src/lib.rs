@@ -49,6 +49,19 @@ async fn load_board(path: Option<String>) -> Result<BoardSnapshot, String> {
     }).await.map_err(|e| e.to_string())?
 }
 
+/// A new-task overlay needs the board's columns immediately, not a full scan
+/// of every task in the cloud-backed directory. The real snapshot is fetched
+/// in the background after the editor opens; mutations still use FsTaskStore.
+#[tauri::command]
+async fn load_quick_board(path: String) -> Result<BoardSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let board = PathBuf::from(path).join("_board.md");
+        let yaml = fs::read_to_string(&board).map_err(|e| e.to_string())?;
+        let config: BoardConfig = serde_yaml::from_str(&yaml).map_err(|e| e.to_string())?;
+        Ok(BoardSnapshot { config, tasks: Vec::new(), warnings: Vec::new() })
+    }).await.map_err(|e| e.to_string())?
+}
+
 /// Lightweight project-tab inbox source: return both human-response and open
 /// review IDs, so renderer-local snoozes can be applied before showing a badge.
 #[derive(serde::Serialize)]
@@ -1039,6 +1052,7 @@ pub fn run() {
             projects::move_task_between_projects,
             default_board_path,
             load_board,
+            load_quick_board,
             model_favorites::task_model_favorites,
             claim_health::task_claim_health,
             agent_notices::task_enqueue_agent_notice,

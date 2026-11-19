@@ -7,7 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { QUICK_CREATE_WINDOW } from "./quickCreate";
-import { activateProject, addProject, boardChangeTokens, listProjects, loadBoard, moveTaskBetweenProjects, removeProject, reorderProjects, restoreProject, saveBoardConfig, setProjectFolders, showMainWindow, userQueueProjectIds, taskQueueWorkload } from "./api";
+import { activateProject, addProject, boardChangeTokens, listProjects, loadBoard, loadQuickBoard, moveTaskBetweenProjects, removeProject, reorderProjects, restoreProject, saveBoardConfig, setProjectFolders, showMainWindow, userQueueProjectIds, taskQueueWorkload } from "./api";
 import type { ProjectCatalog, ProjectPriority, ProjectTab, QueueWorkload } from "./api";
 import type { BoardConfig, BoardSnapshot, TaskDraft } from "./types";
 import type { PendingClipboardImage } from "./TaskImageGallery";
@@ -40,9 +40,24 @@ export function ProjectTabs({ Board }: Props) {
   const [catalog, setCatalog] = useState<ProjectCatalog | null>(null);
   // Keep snapshots in memory instead of mounting hidden boards and their timers.
   const boardCache = useRef(new Map<string, BoardSnapshot>());
+  const [quickSnapshots, setQuickSnapshots] = useState<Record<string, BoardSnapshot>>({});
+  useEffect(() => {
+    if (!QUICK_CREATE_WINDOW || !catalog) return;
+    const active = catalog.projects.find((item) => item.id === catalog.activeId);
+    if (!active || quickSnapshots[active.path]) return;
+    let cancelled = false;
+    // Read just _board.md, not every task, to open the editor immediately.
+    // ProjectBoard refreshes the full board in the background.
+    void loadQuickBoard(active.path).catch(() => loadBoard(active.path))
+      .then((snapshot) => {
+        if (!cancelled) setQuickSnapshots((current) => ({ ...current, [active.path]: snapshot }));
+      }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [catalog?.activeId, catalog?.projects, quickSnapshots]);
   const activationWrites = useRef<Promise<unknown>>(Promise.resolve());
   const rememberBoard = (path: string, snapshot: BoardSnapshot) => { boardCache.current.set(path, snapshot); };
   useEffect(() => {
+    if (QUICK_CREATE_WINDOW) return;
     const projects = catalog?.projects ?? [];
     if (!projects.length) return;
     let cancelled = false;
@@ -62,7 +77,7 @@ export function ProjectTabs({ Board }: Props) {
     return () => { cancelled = true; window.clearTimeout(timer); };
   }, [catalog?.projects]);
   useEffect(() => {
-    if (!catalog) return;
+    if (QUICK_CREATE_WINDOW || !catalog) return;
     const selected = catalog.activeId;
     // Save after painting, serialized so rapid switches cannot persist an older tab.
     const timer = window.setTimeout(() => {
@@ -109,6 +124,8 @@ export function ProjectTabs({ Board }: Props) {
       }>).detail;
       if (!detail || !catalog?.projects.some((item) => item.id === detail.destinationId)) return;
       setCreateHandoff({ ...detail, requestKey: Date.now() });
+      // The initial hotkey must not reopen the picker after choosing a project.
+      if (QUICK_CREATE_WINDOW) setHotkeyCreateRequest(0);
       setCatalog((current) => current ? { ...current, activeId: detail.destinationId } : current);
     };
     const consumed = () => setCreateHandoff(null);
@@ -212,6 +229,7 @@ export function ProjectTabs({ Board }: Props) {
 
   // T3 Keep Busy backlog is global, independent of the selected project tab.
   useEffect(() => {
+    if (QUICK_CREATE_WINDOW) return;
     let canceled = false;
     let running = false;
     const sync = async () => {
@@ -283,7 +301,7 @@ export function ProjectTabs({ Board }: Props) {
   // every project, not just the mounted tab. A changed inactive board gets a
   // visible indicator; opening it always loads the latest snapshot.
   useEffect(() => {
-    if (!catalog?.projects.length) return;
+    if (QUICK_CREATE_WINDOW || !catalog?.projects.length) return;
     let cancelled = false;
     let pending = false;
     const paths = catalog.projects.map((project) => project.path);
@@ -326,6 +344,7 @@ export function ProjectTabs({ Board }: Props) {
   // board Inbox, not the number of cards tagged "needs-user" in all columns.
   // Backend reads stay off the UI thread and do not interfere with active editors.
   useEffect(() => {
+    if (QUICK_CREATE_WINDOW) return;
     const paths = catalog?.projects.map((project) => project.path) ?? [];
     if (!paths.length) return;
     let cancelled = false;
@@ -831,11 +850,11 @@ export function ProjectTabs({ Board }: Props) {
         {locked && <span className="project-switch-note">Close the editor to change project</span>}
       </div>
       {(error || catalogError) && !dialogMode && <div className="project-catalog-error" role="alert">{error || catalogError}</div>}
-      {active && <div className="project-workspace" id="project-board" role="tabpanel">
+      {active && (!QUICK_CREATE_WINDOW || quickSnapshots[active.path]) && <div className="project-workspace" id="project-board" role="tabpanel">
         <Board key={active.id} project={active} onInteractionChange={setLocked}
             requestedHotkeyCreate={hotkeyCreateRequest || undefined}
             {...(createHandoff?.destinationId === active.id ? { requestedCreate: createHandoff } : {})}
-            initialSnapshot={boardCache.current.get(active.path)} onSnapshot={rememberBoard}
+            initialSnapshot={QUICK_CREATE_WINDOW ? quickSnapshots[active.path] : boardCache.current.get(active.path)} onSnapshot={rememberBoard}
             onInboxCount={rememberInboxCount}
             {...(startupReview && startupReview.path.replace(/\\/g, "/").toLowerCase() === active.path.replace(/\\/g, "/").toLowerCase()
               ? { requestedReviewId: startupReview.taskId } : {})}
