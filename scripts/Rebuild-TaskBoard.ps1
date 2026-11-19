@@ -23,11 +23,12 @@ $running = @(Get-Process -Name taskboard -ErrorAction SilentlyContinue | Where-O
 $wasRunning = $running.Count -gt 0
 
 if ($wasRunning) {
-    # The running desktop app polls this short-lived request and offers Postpone.
-    # Canceling must happen BEFORE the process is stopped and the build starts.
+    # The running app polls this request, offers Postpone, then saves editors.
+    # Canceling or a missing save acknowledgement prevents the process stop.
     $noticeDir = Join-Path $env:LOCALAPPDATA 'TaskBoard'
     $requestFile = Join-Path $noticeDir 'restart-warning.json'
     $postponeFile = Join-Path $noticeDir 'restart-postponed.json'
+    $savedFile = Join-Path $noticeDir 'restart-saved.json'
     New-Item -ItemType Directory -Path $noticeDir -Force | Out-Null
     $requestId = [Guid]::NewGuid().ToString()
     $deadline = [DateTimeOffset]::UtcNow.AddSeconds(30).ToUnixTimeMilliseconds()
@@ -35,7 +36,8 @@ if ($wasRunning) {
     $tmpFile = Join-Path $noticeDir "restart-warning.$requestId.tmp"
     $postponed = $false
     try {
-        Remove-Item -LiteralPath $postponeFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $postponeFile, $savedFile -Force -ErrorAction SilentlyContinue
+        Get-ChildItem -LiteralPath $noticeDir -Filter 'restart-ready-*.json' -File | Remove-Item -Force
         [IO.File]::WriteAllText($tmpFile, $requestJson, [Text.UTF8Encoding]::new($false))
         Move-Item -LiteralPath $tmpFile -Destination $requestFile -Force
         Write-Output 'TaskBoard restart warning active (30s countdown; Postpone cancels this attempt).'
@@ -48,7 +50,35 @@ if ($wasRunning) {
             }
             Start-Sleep -Milliseconds 250
         }
-        # Give a click near the deadline one final chance to be acknowledged.
+        # Finalize only after every open webview has saved its active editor.
+        # The request remains visible while the user can still choose Postpone.
+        if (-not $postponed) {
+            $finalRequest = @{ id = $requestId; deadlineUnixMs = $deadline; finalize = $true } | ConvertTo-Json -Compress
+            [IO.File]::WriteAllText($tmpFile, $finalRequest, [Text.UTF8Encoding]::new($false))
+            Move-Item -LiteralPath $tmpFile -Destination $requestFile -Force
+            $saveDeadline = [DateTimeOffset]::UtcNow.AddSeconds(20).ToUnixTimeMilliseconds()
+            $saved = $false
+            while ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -lt $saveDeadline) {
+                if (Test-Path -LiteralPath $postponeFile) {
+                    try {
+                        $response = Get-Content -LiteralPath $postponeFile -Raw | ConvertFrom-Json
+                        if ($response.id -eq $requestId) { $postponed = $true; break }
+                    } catch { }
+                }
+                if (Test-Path -LiteralPath $savedFile) {
+                    try {
+                        $response = Get-Content -LiteralPath $savedFile -Raw | ConvertFrom-Json
+                        if ($response.id -eq $requestId) { $saved = $true; break }
+                    } catch { }
+                }
+                Start-Sleep -Milliseconds 250
+            }
+            if (-not $saved -and -not $postponed) {
+                $postponed = $true
+                Write-Warning 'TaskBoard did not confirm every editor was saved. Restart canceled to protect unsaved work.'
+            }
+        }
+        # Give a last-moment Postpone click priority over an editor-save receipt.
         if (Test-Path -LiteralPath $postponeFile) {
             try {
                 $response = Get-Content -LiteralPath $postponeFile -Raw | ConvertFrom-Json
@@ -65,7 +95,8 @@ if ($wasRunning) {
                 }
             } catch { }
         }
-        Remove-Item -LiteralPath $postponeFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $postponeFile, $savedFile -Force -ErrorAction SilentlyContinue
+        Get-ChildItem -LiteralPath $noticeDir -Filter 'restart-ready-*.json' -File | Remove-Item -Force
     }
     if ($postponed) {
         Write-Warning 'TaskBoard restart postponed by user. No build or restart was performed; rerun the script later.'

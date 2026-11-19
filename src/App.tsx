@@ -499,10 +499,11 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   };
   const [editor, setEditor] = useState<EditorState | null>(null);
   const quickEditorWasOpen = useRef(false);
+  const restartSaveActive = useRef(false);
   useEffect(() => {
     if (!QUICK_CREATE_WINDOW) return;
     if (editor) quickEditorWasOpen.current = true;
-    else if (quickEditorWasOpen.current) {
+    else if (quickEditorWasOpen.current && !restartSaveActive.current) {
       // Save and Cancel already preserve their normal semantics; only dismiss
       // this lightweight overlay, never the independently open main board.
       void getCurrentWindow().close();
@@ -672,6 +673,8 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const imageDialogGeneration = useRef(0);
   const editorModalRef = useRef<HTMLElement | null>(null);
   const autosavingDraft = useRef(false);
+  const draftSaveInFlight = useRef<Promise<void> | null>(null);
+  const editorSaveInFlight = useRef<Promise<boolean> | null>(null);
   const [autoSavedDraft, setAutoSavedDraft] = useState<{ id: string; title: string } | null>(null);
   useEffect(() => {
     if (!autoSavedDraft) return;
@@ -1588,40 +1591,62 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     })();
   };
 
+  // Implicit dismissal and the final restart checkpoint use the same durable
+  // Draft save. Explicit Cancel still discards a new task.
+  const saveUnfinishedDraft = (): Promise<void> => {
+    if (draftSaveInFlight.current) return draftSaveInFlight.current;
+    if (editor?.mode !== "create" || !editor.draft.title.trim()) return Promise.resolve();
+    if (!reservedTaskId) return Promise.reject(new Error("Task ID reservation is not ready."));
+    autosavingDraft.current = true;
+    setBusy(true);
+    const stamp = new Date().toISOString();
+    const preparing = editor.draft.attention.includes("prepare") && prepRequestId;
+    const draft = {
+      ...editor.draft,
+      title: editor.draft.title.trim(),
+      column: "draft",
+      notes: [preparing
+        ? preparationNotes(editor.draft.notes, preparing, editor.draft.column, false)
+        : editor.draft.notes, `<!-- taskboard:auto-draft:${stamp} -->`].filter(Boolean).join("\n"),
+      reserved_id: reservedTaskId.id,
+      reservation_token: reservedTaskId.token,
+    };
+    const operation = (async () => {
+      const completeDraft = pendingClipboardImages.length
+        ? await withClipboardImages(draft, reservedTaskId.id) : draft;
+      const saved = await createTask({ ...completeDraft,
+        reserved_id: reservedTaskId.id, reservation_token: reservedTaskId.token }, boardPath);
+      const latest = await loadBoard(boardPath);
+      applySnapshot(latest);
+      flashTaskActivity([{ id: saved.id, kind: "created" }]);
+      closeEditor(latest, true);
+      setAutoSavedDraft({ id: saved.id, title: saved.title });
+      // Auto-saving a prepared task is not permission to release its agent.
+    })().finally(() => {
+      autosavingDraft.current = false;
+      draftSaveInFlight.current = null;
+      setBusy(false);
+    });
+    draftSaveInFlight.current = operation;
+    return operation;
+  };
+
   const closeEditor = (board = snapshot, persisted = false, explicitCancel = false) => {
-    // Only implicit dismissal auto-saves an unfinished creation. The Cancel
-    // button explicitly discards it, even when fields have been populated.
-    // An unfinished creation is only a draft once it has a real title.
-    // Other fields or the Prepare flag alone must not create an untitled task.
-    if (!persisted && !explicitCancel && editor?.mode === "create" && !autosavingDraft.current &&
-        editor.draft.title.trim()) {
-      if (!reservedTaskId) { setError("Cannot save draft yet: task ID reservation is not ready."); return; }
-      autosavingDraft.current = true;
-      setBusy(true);
-      const stamp = new Date().toISOString();
-      const preparing = editor.draft.attention.includes("prepare") && prepRequestId;
-      const draft = {
-        ...editor.draft,
-        title: editor.draft.title.trim(),
-        column: "draft",
-        notes: [preparing
-          ? preparationNotes(editor.draft.notes, preparing, editor.draft.column, false)
-          : editor.draft.notes, `<!-- taskboard:auto-draft:${stamp} -->`].filter(Boolean).join("\n"),
-        reserved_id: reservedTaskId.id,
-        reservation_token: reservedTaskId.token,
-      };
-      void createTask(draft, boardPath).then(async (saved) => {
-        const latest = await loadBoard(boardPath);
-        applySnapshot(latest);
-        flashTaskActivity([{ id: saved.id, kind: "created" }]);
-        closeEditor(latest, true);
-        setAutoSavedDraft({ id: saved.id, title: saved.title });
-        // Closing is only an autosave, not permission to release the preparation task.
-      }).catch((error) => setError(`Could not auto-save draft: ${errorText(error)}`))
-        .finally(() => { autosavingDraft.current = false; setBusy(false); });
+    if (!persisted && !explicitCancel && editor?.mode === "create" && editor.draft.title.trim()) {
+      void saveUnfinishedDraft().catch((error) => setError(`Could not auto-save draft: ${errorText(error)}`));
       return;
     }
     if (autosavingDraft.current && !persisted) return;
+    // Edits are saved on secondary dismissals (backdrop, Escape, window warning).
+    // The explicit Cancel button remains the only discard action.
+    if (!persisted && !explicitCancel && editor?.mode === "edit" && editor.original &&
+        (JSON.stringify(editor.draft) !== JSON.stringify(taskToDraft(editor.original)) ||
+         pendingClipboardImages.length > 0 || executionTouched ||
+         withMeSelected !== (editor.original.live?.with_me === true))) {
+      void saveEditor(false, true);
+      return;
+    }
+    if (editorSaveInFlight.current && !persisted) return;
     imageDialogGeneration.current += 1;
     setPendingClipboardImages([]);
     // A follow-up created during queue review is edited outside the queue.
@@ -2222,8 +2247,10 @@ Details: ${queueRecoveryWarning}`;
     }
   };
 
-  const saveEditor = (markDone = false) =>
-    run(async () => {
+  const saveEditor = (markDone = false, implicit = false): Promise<boolean> => {
+    if (editorSaveInFlight.current) return editorSaveInFlight.current;
+    let completed = false;
+    const operation = run(async () => {
       if (!editor || !snapshot) return;
       if (!editor.draft.title.trim()) return;
       if (
@@ -2275,7 +2302,7 @@ Details: ${queueRecoveryWarning}`;
         draft = { ...draft, notes: retained.join("\n\n") };
       }
       if (executionLoading) throw new Error("Still reading the existing execution state; save after it loads.");
-      if (transferTarget && editor.mode === "edit" && editor.original) {
+      if (!implicit && transferTarget && editor.mode === "edit" && editor.original) {
         if (editor.original.claimed_by) throw new Error("Release the task’s agent claim before moving it to another board.");
         if (markDone) throw new Error("Move the task first, then mark it Done in the destination board.");
         // Save pending changes first, then let the existing revision-checked native
@@ -2285,6 +2312,7 @@ Details: ${queueRecoveryWarning}`;
           const moved = await moveTaskBetweenProjects(project.id, transferTarget.id, saved.id, saved.revision);
           applySnapshot(await loadBoard(boardPath));
           closeEditor(snapshot, true);
+          completed = true;
           window.dispatchEvent(new CustomEvent("taskboard:open-search-result", {
             detail: { path: transferTarget.path, taskId: moved.id },
           }));
@@ -2343,7 +2371,7 @@ Details: ${queueRecoveryWarning}`;
         if (selectedMode === "start_now") {
           // The saved task is durable; do not hold the editor open while T3
           // creates/opens a browser session or delivers its prompt.
-          startAfterSave = { id: savedTask.id, implement: !withMeSelected };
+          if (!implicit) startAfterSave = { id: savedTask.id, implement: !withMeSelected };
         } else if (executionTouched) {
           const current = await taskExecutionIntent(savedTask.id, boardPath);
           if (selectedMode !== current.mode)
@@ -2364,7 +2392,50 @@ Details: ${queueRecoveryWarning}`;
       }
       if (notifyWarning || syncWarning) setError([notifyWarning, syncWarning].filter(Boolean).join(" · "));
       if (startAfterSave) startTaskSessionDetached(startAfterSave.id, boardPath, startAfterSave.implement);
-    });
+      completed = true;
+    }).then(() => completed);
+    editorSaveInFlight.current = operation;
+    void operation.then(() => { editorSaveInFlight.current = null; }, () => { editorSaveInFlight.current = null; });
+    return operation;
+  };
+
+  // A rebuild script asks the active window to finish its editor writes and
+  // refuses to stop the application without a durable completion receipt.
+  useEffect(() => {
+    const saveBeforeRestart = (event: Event) => {
+      restartSaveActive.current = true;
+      const detail = (event as CustomEvent<{ save?: Promise<void> }>).detail;
+      if (draftSaveInFlight.current) { detail.save = draftSaveInFlight.current; return; }
+      if (editorSaveInFlight.current) {
+        detail.save = editorSaveInFlight.current.then((ok) => {
+          if (!ok) throw new Error("Task edit could not be saved.");
+        });
+        return;
+      }
+      if (busy) { detail.save = Promise.reject(new Error("Another task operation is in progress.")); return; }
+      if (editor?.mode === "create") { detail.save = saveUnfinishedDraft(); return; }
+      if (editor?.mode === "edit" && editor.original &&
+          (JSON.stringify(editor.draft) !== JSON.stringify(taskToDraft(editor.original)) ||
+           pendingClipboardImages.length > 0 || executionTouched ||
+           withMeSelected !== (editor.original.live?.with_me === true))) {
+        detail.save = saveEditor(false, true).then((ok) => {
+          if (!ok) throw new Error("Task edit could not be saved.");
+        });
+        return;
+      }
+      detail.save = Promise.resolve();
+    };
+    const restartCancelled = () => {
+      restartSaveActive.current = false;
+      if (QUICK_CREATE_WINDOW && quickEditorWasOpen.current && !editor) void getCurrentWindow().close();
+    };
+    window.addEventListener("taskboard:save-before-restart", saveBeforeRestart);
+    window.addEventListener("taskboard:restart-cancelled", restartCancelled);
+    return () => {
+      window.removeEventListener("taskboard:save-before-restart", saveBeforeRestart);
+      window.removeEventListener("taskboard:restart-cancelled", restartCancelled);
+    };
+  });
 
   // Closing a task preserves edited fields; the follow-up starts in the same
   // work column/epic/category and links back to the completed task.

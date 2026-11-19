@@ -1047,6 +1047,7 @@ pub fn run() {
             error_log::record_ui_error,
             restart_warning::restart_warning_status,
             restart_warning::postpone_restart_warning,
+            restart_warning::confirm_restart_ready,
             startup_review,
             startup_task,
             startup_create_task,
