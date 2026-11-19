@@ -175,6 +175,7 @@ pub(crate) fn reconcile_repairs_unlocked(root: &Path) -> Result<bool, TaskStoreE
                     .filter(|id| snapshot.tasks.iter().any(|t| &t.id == id)).collect();
                 let draft = TaskDraft {
                     kind: TaskKind::Task, review_mode: crate::ReviewMode::Inbox,
+                    model_selection: None,
                     deployable: Some(true), blocked_reason: None,
                     repeat_every_days: None, next_due: None,
                     reserved_id: None, reservation_token: None,

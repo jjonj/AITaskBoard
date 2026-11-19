@@ -135,6 +135,8 @@ struct TaskMeta {
     agent_interacted: bool,
     #[serde(default, skip_serializing_if = "crate::ReviewMode::is_inbox")]
     review_mode: crate::ReviewMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_selection: Option<crate::TaskModelSelection>,
     // Existing T3 claim lineage predates the durable interaction flag.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     originating_t3_sessions: Vec<String>,
@@ -963,6 +965,7 @@ impl FsTaskStore {
             claimed_by: None,
             agent_interacted: false,
             review_mode: draft.review_mode,
+            model_selection: draft.model_selection,
             live: None,
             attention: draft.attention,
             question: draft.question,
@@ -2861,6 +2864,7 @@ fn parse_task(path: &Path, archived: bool, text: &str) -> Result<Task, TaskStore
         claimed_by: meta.claimed_by,
         agent_interacted,
         review_mode: meta.review_mode,
+        model_selection: meta.model_selection,
         live: meta.live,
         attention: meta.attention,
         question: meta.question,
@@ -3089,6 +3093,7 @@ fn render_task(task: &Task, existing: Option<&str>) -> Result<String, TaskStoreE
         claimed_by: task.claimed_by.clone(),
         agent_interacted: task.agent_interacted || task.claimed_by.is_some(),
         review_mode: task.review_mode,
+        model_selection: task.model_selection.clone(),
         originating_t3_sessions: Vec::new(), // Retained from existing frontmatter.
         live: task.live.clone(),
         attention: task.attention.clone(),
@@ -3118,6 +3123,7 @@ fn render_task(task: &Task, existing: Option<&str>) -> Result<String, TaskStoreE
         mapping.remove(serde_yaml::Value::String("claimed_by".into()));
         mapping.remove(serde_yaml::Value::String("agent_interacted".into()));
         mapping.remove(serde_yaml::Value::String("review_mode".into()));
+        mapping.remove(serde_yaml::Value::String("model_selection".into()));
         mapping.remove(serde_yaml::Value::String("live".into()));
         mapping.remove(serde_yaml::Value::String("attention".into()));
         mapping.remove(serde_yaml::Value::String("question".into()));

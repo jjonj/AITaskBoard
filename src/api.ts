@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { BoardConfig, BoardSnapshot, Task, TaskDraft } from "./types";
 
+export const taskModelFavorites = () => invoke<Array<{ provider: string; model: string }>>("task_model_favorites");
 export type ProjectPriority = "high" | "normal" | "low";
 export type ProjectTab = { id: string; name: string; path: string; folders: string[]; priority: ProjectPriority };
 export type ProjectCatalog = { schema: number; activeId: string; projects: ProjectTab[] };

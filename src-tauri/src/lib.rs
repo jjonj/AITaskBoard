@@ -13,6 +13,7 @@ mod busy_recovery;
 mod error_log;
 mod restart_warning;
 mod window_placement;
+mod model_favorites;
 
 use std::{fs, path::PathBuf, process::{Command, Stdio}, io::Write};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -1027,6 +1028,7 @@ pub fn run() {
             projects::move_task_between_projects,
             default_board_path,
             load_board,
+            model_favorites::task_model_favorites,
             claim_health::task_claim_health,
             agent_notices::task_enqueue_agent_notice,
             agent_notices::task_reconcile_agent_notices,

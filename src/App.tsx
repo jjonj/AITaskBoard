@@ -27,6 +27,9 @@ import { QueueOverviewPanel } from "./QueueOverviewPanel";
 import { TaskTracePanel } from "./TaskTracePanel";
 import { StaleBlockerPanel } from "./StaleBlockerPanel";
 import { AgentRecoverySettings } from "./AgentRecoverySettings";
+import { TaskModelPicker } from "./TaskModelPicker";
+import { readDefaultTaskModel, saveDefaultTaskModel } from "./taskModels";
+import type { TaskModelSelection } from "./types";
 import { TaskAgentPanel } from "./TaskAgentPanel";
 import { TaskFilterPanel, type TaskFilterSelection } from "./TaskFilterPanel";
 import { todaysWorkIds } from "./todaysWork";
@@ -246,6 +249,7 @@ const emptyDraft = (
   category,
   kind: "task",
   review_mode: "inbox",
+  model_selection: readDefaultTaskModel(),
   deployable: null,
   repeat_every_days: null,
   next_due: null,
@@ -455,6 +459,8 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const [staleBlockers, setStaleBlockers] = useState<StaleBlocker[]>([]);
   const [staleDrawerOpen, setStaleDrawerOpen] = useState(false);
   const [agentSettingsOpen, setAgentSettingsOpen] = useState(false);
+  const [taskModelSettingsOpen, setTaskModelSettingsOpen] = useState(false);
+  const [defaultTaskModel, setDefaultTaskModel] = useState<TaskModelSelection | null>(readDefaultTaskModel);
   const [staleAckBusy, setStaleAckBusy] = useState(false);
   useEffect(() => {
     let live = true;
@@ -1452,6 +1458,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     category: task.category,
     kind: task.kind,
     review_mode: task.review_mode ?? "inbox",
+    model_selection: task.model_selection ?? null,
     deployable: task.deployable ?? null,
     repeat_every_days: task.repeat_every_days ?? null,
     next_due: task.next_due ?? null,
@@ -3542,6 +3549,20 @@ Details: ${queueRecoveryWarning}`;
         if (columnContextMenu) setColumnContextMenu(null);
       }}
     >
+      {taskModelSettingsOpen && <div className="task-model-settings-backdrop" onMouseDown={event => {
+        if (event.target === event.currentTarget) setTaskModelSettingsOpen(false);
+      }}>
+        <section className="task-model-settings" role="dialog" aria-modal="true" aria-label="Task model defaults">
+          <h2>Task model defaults</h2>
+          <p>Default for new tasks in every TaskBoard project. Existing tasks retain their own model.</p>
+          <TaskModelPicker caption="Default task model" value={defaultTaskModel}
+            onChange={selection => {
+              try { saveDefaultTaskModel(selection); setDefaultTaskModel(selection); }
+              catch (err) { setError(`Could not save global task model: ${String(err)}`); }
+            }} />
+          <footer><button type="button" onClick={() => setTaskModelSettingsOpen(false)}>Close</button></footer>
+        </section>
+      </div>}
       {agentSettingsOpen && <AgentRecoverySettings boardPath={boardPath}
         onClose={() => setAgentSettingsOpen(false)} />}
       {staleDrawerOpen && <StaleBlockerPanel items={staleBlockers} busy={staleAckBusy}
@@ -3710,6 +3731,10 @@ Details: ${queueRecoveryWarning}`;
                 title="Show genuine stale technical blockers, excluding dependency waiting. No workers are spawned.">
                 <ToolbarIcon name="blockers" /><span>Recheck blockers</span>
                 {staleBlockers.length > 0 && <em className="menu-count danger">{staleBlockers.length}</em>}
+              </button>
+              <button type="button" role="menuitem" onClick={() => { setMoreMenuOpen(false); setTaskModelSettingsOpen(true); }}
+                title="Choose the global default model and effort for new tasks">
+                <ToolbarIcon name="agents" /><span>Task model defaults</span>
               </button>
               <button type="button" role="menuitem" onClick={() => { setMoreMenuOpen(false); setAgentSettingsOpen(true); }}
                 title="Configure resume window, idle wake, missing-session grace and external leases">
@@ -4918,6 +4943,10 @@ Details: ${queueRecoveryWarning}`;
               />
             </div>
 
+            {(editor.draft.kind === "task" || editor.draft.kind === "recurring") &&
+              <TaskModelPicker value={editor.draft.model_selection ?? null}
+                onChange={model_selection => setEditor(current => current
+                  ? { ...current, draft: { ...current.draft, model_selection } } : current)} />}
             {editor.draft.kind !== "epic" && <div className="task-meta-row">
               <div className="task-icon-editor">
                 <span>Icon</span>

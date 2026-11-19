@@ -92,6 +92,18 @@ impl ReviewMode {
     pub fn is_inbox(&self) -> bool { matches!(self, Self::Inbox) }
 }
 
+/// The native model picked for a task. None is the ChatGPT browser runtime.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskModelSelection {
+    pub provider: String,
+    pub model: String,
+    #[serde(default)]
+    pub effort: TaskModelEffort,
+}
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskModelEffort { Low, #[default] Medium, High, Xhigh }
+
 /// Optional live collaboration state. A missing block is a normal task.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -150,6 +162,8 @@ pub struct Task {
     pub agent_interacted: bool,
     #[serde(default, skip_serializing_if = "ReviewMode::is_inbox")]
     pub review_mode: ReviewMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_selection: Option<TaskModelSelection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live: Option<TaskLive>,
     #[serde(default)]
@@ -227,6 +241,8 @@ pub struct TaskDraft {
     pub icon: Option<String>,
     #[serde(default)]
     pub review_mode: ReviewMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_selection: Option<TaskModelSelection>,
     #[serde(default)]
     pub attention: Vec<TaskAttention>,
     #[serde(default)]

@@ -43,6 +43,7 @@ export type TaskLive = {
   ready_at?: string | null;
   later_until?: string | null;
 };
+export type TaskModelSelection = { provider: string; model: string; effort: "low" | "medium" | "high" | "xhigh" };
 export type Task = {
   kind: TaskKind;
   deployable?: boolean | null;
@@ -64,6 +65,7 @@ export type Task = {
   agent_interacted?: boolean;
   /** Absent on legacy tasks, which default to Inbox review. */
   review_mode?: ReviewMode;
+  model_selection?: TaskModelSelection | null;
   live?: TaskLive | null;
   attention: TaskAttention[];
   question: TaskQuestion | null;
@@ -93,6 +95,7 @@ export type TaskDraft = {
   reservation_token?: string | null;
   kind: TaskKind;
   review_mode?: ReviewMode;
+  model_selection?: TaskModelSelection | null;
   deployable?: boolean | null;
   repeat_every_days?: number | null;
   next_due?: string | null;
