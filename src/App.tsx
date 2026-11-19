@@ -3758,7 +3758,7 @@ Details: ${queueRecoveryWarning}`;
             </div>}
           </div>
           <button className="button primary new-task-button" onClick={() => openCreate()} disabled={busy}
-            title="Create a task (Ctrl+Space or Ctrl+T)">
+            title="Create a task (Ctrl+T or Ctrl+Space in TaskBoard · Ctrl+Alt+T globally)">
             <ToolbarIcon name="plus" size={14} /> Task
           </button>
         </div>
