@@ -975,10 +975,18 @@ fn startup_create_task() -> bool {
     std::env::args().nth(1).as_deref() == Some("--create-task")
 }
 
+#[tauri::command]
+fn show_quick_create(window: tauri::WebviewWindow) -> Result<(), String> {
+    quick_create::show(&window).map_err(|error| error.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_window_state::Builder::default()
+            // Quick-create is a transient overlay, never a user-resizable saved window.
+            // Restoring its old bounds races with the placement on each hotkey press.
+            .with_denylist(&["quick-create"])
             .with_state_flags(window_placement::state_flags())
             .build())
         .on_window_event(window_placement::on_window_event)
@@ -1042,6 +1050,7 @@ pub fn run() {
             startup_review,
             startup_task,
             startup_create_task,
+            show_quick_create,
             projects::list_projects,
             projects::add_project,
             projects::set_project_folders,

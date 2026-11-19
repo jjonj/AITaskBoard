@@ -38,13 +38,10 @@ fn cursor_position() -> Option<(i32, i32)> { None }
 
 pub(crate) fn open(app: &tauri::AppHandle) -> tauri::Result<()> {
     if let Some(window) = app.get_webview_window("quick-create") {
-        window.unminimize()?;
-        window.show()?;
-        window.set_focus()?;
-        return Ok(());
+        return show(&window);
     }
 
-    let overlay = WebviewWindowBuilder::new(
+    WebviewWindowBuilder::new(
         app, "quick-create", WebviewUrl::App("index.html?quick-create=1".into()),
     )
     .title("New Task — TaskBoard")
@@ -55,7 +52,13 @@ pub(crate) fn open(app: &tauri::AppHandle) -> tauri::Result<()> {
     .skip_taskbar(true)
     .visible(false)
     .build()?;
+    // React requests visibility after mounting. Position only then, so neither
+    // initial WebView creation nor the window-state plugin can override the size.
+    Ok(())
+}
 
+pub(crate) fn show(overlay: &tauri::WebviewWindow) -> tauri::Result<()> {
+    if overlay.label() != "quick-create" { return Ok(()); }
     // A global hotkey should appear on the monitor under the pointer, rather
     // than wherever the main TaskBoard happens to be. Use physical pixels for
     // correct work-area placement with mixed-DPI or negative-coordinate screens.
@@ -74,13 +77,16 @@ pub(crate) fn open(app: &tauri::AppHandle) -> tauri::Result<()> {
     if let Some(monitor) = target {
         let work = monitor.work_area();
         let width = ((756.0 * monitor.scale_factor()).round() as u32).min(work.size.width);
-        overlay.set_size(Size::Physical(PhysicalSize::new(width, work.size.height)))?;
+        // Move first: changing monitors can trigger a DPI-induced resize.
+        // Apply the intended physical size on the destination monitor last.
         overlay.set_position(Position::Physical(PhysicalPosition::new(
             work.position.x + (work.size.width - width) as i32,
             work.position.y,
         )))?;
+        overlay.set_size(Size::Physical(PhysicalSize::new(width, work.size.height)))?;
     }
-    // The renderer shows the overlay after mounting the editor, avoiding an
-    // empty/unstyled flash while the cloud-backed board loads.
+    overlay.unminimize()?;
+    overlay.show()?;
+    overlay.set_focus()?;
     Ok(())
 }

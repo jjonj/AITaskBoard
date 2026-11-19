@@ -91,7 +91,12 @@ export function ProjectTabs({ Board }: Props) {
     // Show the shell promptly while the cloud-backed board loads.
     const timer = window.setTimeout(() => {
       if (QUICK_CREATE_WINDOW) {
-        void getCurrentWindow().show().then(() => getCurrentWindow().setFocus()).catch(() => undefined);
+        // Native placement must complete before showing the editor; otherwise
+        // the WebView can briefly expose stale or half-sized restored bounds.
+        void invoke("show_quick_create").catch(() => {
+          // Keep the editor usable if native placement is temporarily unavailable.
+          void getCurrentWindow().show().then(() => getCurrentWindow().setFocus()).catch(() => undefined);
+        });
       } else {
         void showMainWindow().catch(() => undefined);
       }
