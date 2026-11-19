@@ -78,6 +78,11 @@ foreach ($proc in @(Get-Process -Name taskboard -ErrorAction SilentlyContinue)) 
     try {
         if ($proc.Path -and ($proc.Path -ieq $launcher -or $proc.Path -ieq $release)) {
             Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+            # The executable stays locked until Windows finishes tearing down
+            # the process. Rust's linker must not replace it before that point.
+            if (-not $proc.WaitForExit(10000)) {
+                throw "Timed out waiting for TaskBoard PID $($proc.Id) to exit"
+            }
             Write-Output "Stopped TaskBoard PID $($proc.Id)"
         }
     } catch {
