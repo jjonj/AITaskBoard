@@ -1,0 +1,22 @@
+/* MISC-0216: a --create-task process gets an independent, topmost, right-side
+   Windows overlay. Keep the real editor, while hiding the board underneath. */
+.quick-create-window,
+.quick-create-window body,
+.quick-create-window #root { width: 100%; height: 100%; overflow: hidden; }
+.quick-create-window .project-tabs,
+.quick-create-window .project-switch-hint,
+.quick-create-window .project-catalog-error { display: none !important; }
+.quick-create-window .app-shell > :not(.task-editor-backdrop) { display: none !important; }
+.quick-create-window .app-shell { padding: 0; min-width: 0; width: 100%; height: 100dvh; }
+.quick-create-window .task-editor-backdrop {
+  inset: 0;
+  background: #181c21;
+  padding: 0;
+}
+.quick-create-window .task-editor-backdrop > .task-modal {
+  width: 100%;
+  height: 100dvh;
+  max-height: none;
+  border: 0;
+  box-shadow: none;
+}

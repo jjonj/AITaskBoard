@@ -13,6 +13,7 @@ mod busy_recovery;
 mod error_log;
 mod restart_warning;
 mod window_placement;
+mod quick_create;
 mod model_favorites;
 
 use std::{fs, path::PathBuf, process::{Command, Stdio}, io::Write};
@@ -895,6 +896,9 @@ fn open_task_session_blocking(path: Option<String>, id: String, implement: Optio
 
 #[tauri::command]
 fn show_main_window(window: tauri::WebviewWindow) -> Result<(), String> {
+    // A hotkey launch only shows the separate always-on-top editor. The hidden
+    // main board can still be opened later through a normal TaskBoard launch.
+    if window.label() != "main" || startup_create_task() { return Ok(()); }
     // Both the prompt shell and the populated board may request visibility.
     // Avoid pulling focus away from another app when the slower read finishes.
     if window.is_visible().map_err(|e| e.to_string())? { return Ok(()); }
@@ -967,16 +971,18 @@ pub fn run() {
         .on_window_event(window_placement::on_window_event)
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             use tauri::Manager;
+            if args.len() == 2 && args[1] == "--create-task" {
+                if let Err(error) = quick_create::open(app) {
+                    eprintln!("TaskBoard: quick create overlay failed: {error}");
+                }
+                return;
+            }
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unminimize();
                 let _ = window.show();
                 let _ = window.set_focus();
             }
-            // Forward deep links to the already-open UI instead of opening a second window.
-            if args.len() == 2 && args[1] == "--create-task" {
-                use tauri::Emitter;
-                let _ = app.emit("taskboard-create-task", ());
-            }
+            // Forward normal deep links to the existing main board.
             if args.len() == 4 && args[1] == "--open-review" {
                 use tauri::Emitter;
                 let _ = app.emit("taskboard-open-review", serde_json::json!({ "path": args[2], "taskId": args[3] }));
@@ -995,6 +1001,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             window_placement::start(app);
+            if startup_create_task() {
+                quick_create::open(app.handle())?;
+            }
             busy_recovery::start();
             std::thread::spawn(|| {
                 // Defer cloud-drive maintenance until the first board is visible.

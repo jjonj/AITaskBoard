@@ -3,6 +3,8 @@ import { ViewportMenu } from "./ViewportMenu";
 import { useLoggedError } from "./errorLog";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { QUICK_CREATE_WINDOW } from "./quickCreate";
 import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 import { TASK_ICON_OPTIONS, TaskIconGlyph } from "./TaskIcons";
@@ -493,6 +495,16 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     return `Claimed: ${h.owner} · ${h.agentState} · task update ${age(h.taskActivityAt)} · T3 last working ${age(h.agentActivityAt)} · T3 observed ${age(h.verifiedAt)}`;
   };
   const [editor, setEditor] = useState<EditorState | null>(null);
+  const quickEditorWasOpen = useRef(false);
+  useEffect(() => {
+    if (!QUICK_CREATE_WINDOW) return;
+    if (editor) quickEditorWasOpen.current = true;
+    else if (quickEditorWasOpen.current) {
+      // Save and Cancel already preserve their normal semantics; only dismiss
+      // this lightweight overlay, never the independently open main board.
+      void getCurrentWindow().close();
+    }
+  }, [editor]);
   const [editorProjects, setEditorProjects] = useState<ProjectTab[]>([project]);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [keepPickerOnTitle, setKeepPickerOnTitle] = useState(false);
@@ -1750,7 +1762,9 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
 
   const handledHotkeyCreate = useRef<number | null>(null);
   useEffect(() => {
-    if (!requestedHotkeyCreate || !snapshot || handledHotkeyCreate.current === requestedHotkeyCreate) return;
+    // A cross-project editor handoff takes precedence over the initial hotkey
+    // request when this board is mounted for the first time.
+    if (requestedCreate || !requestedHotkeyCreate || !snapshot || handledHotkeyCreate.current === requestedHotkeyCreate) return;
     handledHotkeyCreate.current = requestedHotkeyCreate;
     // Never silently throw away unsaved edits when invoked over an existing task.
     if (editor && editor.mode !== "create") {
@@ -1765,7 +1779,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     setKeepPickerOnTitle(true);
     setProjectPickerOpen(true);
     window.setTimeout(() => document.querySelector<HTMLInputElement>(".task-modal .task-title-input")?.focus(), 0);
-  }, [requestedHotkeyCreate, snapshot]);
+  }, [requestedHotkeyCreate, requestedCreate?.requestKey, snapshot]);
 
   const openTaskDump = (text = "") => {
     if (busy || editor) return;

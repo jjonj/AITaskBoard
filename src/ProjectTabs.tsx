@@ -5,6 +5,8 @@ import { isInboxItemSnoozed, readInboxSnoozes } from "./inboxSnoozes";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { QUICK_CREATE_WINDOW } from "./quickCreate";
 import { activateProject, addProject, boardChangeTokens, listProjects, loadBoard, moveTaskBetweenProjects, removeProject, reorderProjects, restoreProject, saveBoardConfig, setProjectFolders, showMainWindow, userQueueProjectIds, taskQueueWorkload } from "./api";
 import type { ProjectCatalog, ProjectPriority, ProjectTab, QueueWorkload } from "./api";
 import type { BoardConfig, BoardSnapshot, TaskDraft } from "./types";
@@ -72,22 +74,27 @@ export function ProjectTabs({ Board }: Props) {
   }, [catalog?.activeId]);
   useEffect(() => {
     // Show the shell promptly while the cloud-backed board loads.
-    const timer = window.setTimeout(() => void showMainWindow().catch(() => undefined), 120);
+    const timer = window.setTimeout(() => {
+      if (QUICK_CREATE_WINDOW) {
+        void getCurrentWindow().show().then(() => getCurrentWindow().setFocus()).catch(() => undefined);
+      } else {
+        void showMainWindow().catch(() => undefined);
+      }
+    }, 120);
     return () => window.clearTimeout(timer);
   }, []);
   const [startupReview, setStartupReview] = useState<{ path: string; taskId: string } | null>(null);
   const [startupTask, setStartupTask] = useState<{ path: string; taskId: string; requestKey: number } | null>(null);
-  const [hotkeyCreateRequest, setHotkeyCreateRequest] = useState(0);
+  const [hotkeyCreateRequest, setHotkeyCreateRequest] = useState(QUICK_CREATE_WINDOW ? 1 : 0);
   useEffect(() => {
+    if (QUICK_CREATE_WINDOW) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    // A second TaskBoard process asks this one to enter Create without changing tabs.
+    // Legacy create requests to the main board (normal launches are unaffected).
     void listen("taskboard-create-task", () => setHotkeyCreateRequest((id) => id + 1))
       .then((remove) => { if (disposed) remove(); else unlisten = remove; })
       .catch(() => undefined);
-    void invoke<boolean>("startup_create_task")
-      .then((requested) => { if (!disposed && requested) setHotkeyCreateRequest((id) => id + 1); })
-      .catch(() => undefined);
+
     return () => { disposed = true; unlisten?.(); };
   }, []);
   // Handoff keeps an unsaved creation intact while the old board releases its ID.
