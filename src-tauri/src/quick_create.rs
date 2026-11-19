@@ -1,6 +1,28 @@
 //! The existing --create-task hotkey opens a standalone editor overlay, not the
 //! entire TaskBoard. Reusing one window preserves unsaved input on repeat presses.
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{Manager, PhysicalPosition, PhysicalSize, Position, Size, WebviewUrl, WebviewWindowBuilder};
+
+// A WebView must be created off the Windows event-loop thread. The
+// single-instance callback runs inside WM_COPYDATA on that thread; constructing
+// a WebView there can deadlock the entire board. Coalesce repeated hotkeys while
+// one background open is in flight.
+static OPEN_PENDING: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn request_open(app: &tauri::AppHandle) {
+    if OPEN_PENDING.swap(true, Ordering::AcqRel) { return; }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        struct ResetPending;
+        impl Drop for ResetPending {
+            fn drop(&mut self) { OPEN_PENDING.store(false, Ordering::Release); }
+        }
+        let _reset = ResetPending;
+        if let Err(error) = open(&app) {
+            eprintln!("TaskBoard: quick create overlay failed: {error}");
+        }
+    });
+}
 
 #[cfg(windows)]
 fn cursor_position() -> Option<(i32, i32)> {

@@ -972,9 +972,9 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             use tauri::Manager;
             if args.len() == 2 && args[1] == "--create-task" {
-                if let Err(error) = quick_create::open(app) {
-                    eprintln!("TaskBoard: quick create overlay failed: {error}");
-                }
+                // The Windows single-instance callback runs in the main window
+                // procedure; WebView creation here can deadlock that UI thread.
+                quick_create::request_open(app);
                 return;
             }
             if let Some(window) = app.get_webview_window("main") {
@@ -1002,7 +1002,9 @@ pub fn run() {
         .setup(|app| {
             window_placement::start(app);
             if startup_create_task() {
-                quick_create::open(app.handle())?;
+                // Startup setup is also on the event-loop thread. Defer WebView
+                // construction so both first-launch and repeat hotkeys are safe.
+                quick_create::request_open(app.handle());
             }
             busy_recovery::start();
             std::thread::spawn(|| {
