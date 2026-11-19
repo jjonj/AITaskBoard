@@ -179,3 +179,18 @@
   .review-visual-inspector .review-instrument-icon { width: 33px; min-width: 33px; }
   .review-instrument-title > strong { font-size: 10px; }
 }
+
+/* Dashboard evidence must receive the remaining height, not an implicit
+   auto-sized response row. The former max-content track stretched to fill
+   the entire review workspace and squeezed the gallery to ~20px. */
+.review-visual-inspector.instrument-review .review-visual-body.dashboard-review {
+  grid-template-rows: minmax(0, calc(var(--dashboard-controls-height, 176px) - 72px)) 72px 10px minmax(0, 1fr);
+}
+.review-visual-inspector.instrument-review .review-visual-body.dashboard-review .inbox-response-footer {
+  overflow-y: auto;
+}
+@media (max-width: 720px) {
+  .review-visual-inspector.instrument-review .review-visual-body.dashboard-review {
+    grid-template-rows: minmax(0, calc(var(--dashboard-controls-height, 176px) - 82px)) 82px 10px minmax(0, 1fr);
+  }
+}

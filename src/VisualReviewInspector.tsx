@@ -151,13 +151,17 @@ export function VisualReviewInspector(props: Props) {
     } catch { return defaultUpperHeight; }
   });
   const bodyRef = useRef<HTMLDivElement>(null);
+
   const dragOrigin = useRef<{ pointer: number; y: number; height: number } | null>(null);
   // A saved control-strip height from a larger window must not push the
   // Dashboard captures below the fold in a smaller window or at high DPI.
   // Reserve most of the available height for the actual evidence gallery.
   const maxUpperHeight = () => {
     const height = bodyRef.current?.clientHeight ?? window.innerHeight;
-    return Math.max(145, Math.min(Math.floor(height * 0.4), height - 220));
+    // WebView2 can render at monitor DPI > 100% while reporting layout
+    // dimensions in unscaled pixels; only half this height is then visible.
+    const visibleHeight = height / Math.max(1, window.devicePixelRatio || 1);
+    return Math.max(145, Math.min(Math.floor(visibleHeight * 0.4), visibleHeight - 220));
   };
   const clampUpperHeight = (height: number) =>
     Math.max(145, Math.min(Math.round(height), maxUpperHeight()));
