@@ -131,8 +131,8 @@ def record_window(
     A partial rejected recording remains in output for debugging, with a JSON
     verdict. Callers MUST check verified before publishing or attaching.
     """
-    if not 1 <= seconds <= 60 or not 2 <= fps <= 60:
-        raise ValueError("Seconds 1–60 and frame rate 2–60 required")
+    if not 1 <= seconds <= 120 or not 2 <= fps <= 60:
+        raise ValueError("Seconds 1–120 and frame rate 2–60 required")
     if width < 320 or height < 240 or width % 2 or height % 2:
         raise ValueError("Even output width/height >=320x240 required")
     target = validate_hwnd(hwnd, expected_pid)
