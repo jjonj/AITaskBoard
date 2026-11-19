@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type MouseEvent, type ReactNode, type RefObject, type CSSProperties, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type DragEvent, type MouseEvent, type ReactNode, type RefObject, type CSSProperties, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import "./ReviewImageFullscreen.css";
 import "./ReviewInstrumentHeader.css";
@@ -152,9 +152,31 @@ export function VisualReviewInspector(props: Props) {
   });
   const bodyRef = useRef<HTMLDivElement>(null);
   const dragOrigin = useRef<{ pointer: number; y: number; height: number } | null>(null);
-  const maxUpperHeight = () => Math.max(145, (bodyRef.current?.clientHeight ?? window.innerHeight) - 200);
+  // A saved control-strip height from a larger window must not push the
+  // Dashboard captures below the fold in a smaller window or at high DPI.
+  // Reserve most of the available height for the actual evidence gallery.
+  const maxUpperHeight = () => {
+    const height = bodyRef.current?.clientHeight ?? window.innerHeight;
+    return Math.max(145, Math.min(Math.floor(height * 0.4), height - 220));
+  };
   const clampUpperHeight = (height: number) =>
     Math.max(145, Math.min(Math.round(height), maxUpperHeight()));
+  useLayoutEffect(() => {
+    if (!dashboardMode || focus || !bodyRef.current) return;
+    const body = bodyRef.current;
+    const fitControls = () => setUpperHeight((current) => {
+      const fitted = Math.min(current, maxUpperHeight());
+      if (fitted !== current) {
+        try { localStorage.setItem("taskboard.dashboardReview.controlsHeight", String(fitted)); }
+        catch { /* storage optional */ }
+      }
+      return fitted;
+    });
+    fitControls();
+    const observer = new ResizeObserver(fitControls);
+    observer.observe(body);
+    return () => observer.disconnect();
+  }, [dashboardMode, focus]);
   const persistUpperHeight = (height: number) => {
     const bounded = clampUpperHeight(height);
     setUpperHeight(bounded);
