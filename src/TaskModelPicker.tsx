@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent }
 import { createPortal } from "react-dom";
 import { taskModelFavorites } from "./api";
 import { taskModelKey } from "./taskModels";
+import { ProviderIcon } from "./TaskProviderIcons";
+import { orderTaskModelFavorites } from "./modelFavoriteOrdering";
 import type { TaskModelSelection } from "./types";
 import "./taskModels.css";
 
@@ -24,7 +26,7 @@ function modelName(slug: string) {
   }
   if (end.toLowerCase().startsWith("claude-")) {
     return end.replace(/^claude-/i, "Claude ").replace(/-(\d+)-(\d+)$/, " $1.$2")
-      .replace(/\b(opus|sonnet|haiku)\b/gi, name => name[0].toUpperCase() + name.slice(1).toLowerCase());
+      .replace(/\b(opus|sonnet|fable|haiku)\b/gi, name => name[0].toUpperCase() + name.slice(1).toLowerCase());
   }
   return end.replace(/[-_]/g, " ").replace(/\b[a-z]/g, letter => letter.toUpperCase());
 }
@@ -34,12 +36,6 @@ function providerLabel(provider: string) {
   if (provider === "codex" || provider.startsWith("codex_")) return "Codex";
   if (provider === "opencode" || provider.startsWith("opencode_")) return "OpenCode";
   return provider;
-}
-
-function ProviderIcon({ provider }: { provider: string }) {
-  const kind = providerLabel(provider).toLowerCase();
-  const glyph = kind === "claude" ? "✳" : kind === "codex" || kind === "chatgpt" ? "◎" : "◇";
-  return <span aria-hidden="true" className={`task-model-provider-icon ${kind}`}>{glyph}</span>;
 }
 
 /** Floating T3-style two-pane picker; portaled to avoid the editor drawer's overflow clipping. */
@@ -90,7 +86,7 @@ export function TaskModelPicker({
       const key = taskModelKey(value.provider, value.model);
       if (!rows.has(key)) rows.set(key, { provider: value.provider, model: value.model, key, active: false });
     }
-    return [...rows.values()];
+    return orderTaskModelFavorites([...rows.values()]);
   }, [favorites, value]);
 
   const filtered = useMemo(() => {
@@ -224,9 +220,11 @@ export function TaskModelPicker({
                   <span>{modelName(row.model)}</span>
                   {!row.active && <small>No longer favorited</small>}
                 </span>
-                {row.key === selectedKey
-                  ? <span className="task-model-selected-check" aria-hidden="true">✓</span>
-                  : index < 9 && <span className="task-model-row-index" aria-hidden="true">{index + 1}</span>}
+                <span className="task-model-row-index" aria-hidden="true">
+                  {index < 9 ? index + 1 : ""}
+                </span>
+                <span className={`task-model-row-check${row.key === selectedKey ? " visible" : ""}`}
+                  aria-hidden="true">✓</span>
               </button>
             ))}
             {!filtered.length && <p className="task-model-empty">No models match “{search}”.</p>}

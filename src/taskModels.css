@@ -57,17 +57,21 @@
   transform: translateY(-2px);
 }
 .task-model-provider-icon {
-  font-size: 16px;
-  line-height: 1;
-  width: 17px;
-  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
   display: inline-flex;
+  align-items: center;
   justify-content: center;
-  color: #dbe2eb;
+  color: #e5e8ed;
+  vertical-align: middle;
 }
-.task-model-provider-icon.claude { color: #e4a880; }
-.task-model-provider-icon.opencode { color: #85ace1; }
-.task-model-provider-icon.codex { color: #dce3e9; }
+.task-model-provider-icon svg { display: block; width: 16px; height: 16px; fill: currentColor; }
+.task-model-provider-icon .task-opencode-cutout { fill: #4b4646; }
+.task-model-provider-icon .task-model-fallback-icon { line-height: 16px; font-size: 11px; font-weight: 700; }
+.task-model-provider-icon.claude { color: #d97757; }
+.task-model-provider-icon.opencode { color: #f1ecec; }
+.task-model-provider-icon.codex, .task-model-provider-icon.chatgpt { color: #f1f1f1; }
 
 /* The popup is in document.body, not clipped by the task editor's scroll area. */
 .task-model-popover {
@@ -125,14 +129,15 @@
 .task-model-option {
   box-sizing: border-box;
   width: 100%;
-  min-height: 32px;
+  min-height: 34px;
   border: 0;
   border-radius: 5px;
   background: transparent;
   color: #e5e8ec;
-  display: flex;
+  display: grid;
+  grid-template-columns: 16px minmax(0,1fr) 19px 16px;
   align-items: center;
-  gap: 9px;
+  column-gap: 9px;
   padding: 6px 8px;
   text-align: left;
   cursor: pointer;
@@ -154,9 +159,8 @@
 }
 .task-model-option-text {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 6px;
-  flex: 1;
   min-width: 0;
   overflow: hidden;
 }
@@ -178,13 +182,22 @@
   display: inline-flex;
   justify-content: center;
   align-items: center;
-  flex: 0 0 19px;
+  width: 19px;
   height: 19px;
   border-radius: 5px;
   background: #22262a;
   color: #9aa4af;
   font-size: 10px;
 }
+.task-model-row-index:empty { background: none; }
+.task-model-row-check {
+  width: 16px;
+  text-align: center;
+  visibility: hidden;
+  font-size: 12px;
+  color: #ccd7e4;
+}
+.task-model-row-check.visible { visibility: visible; }
 .task-model-selected-check { margin-left: auto; color: #c5d5eb; }
 .task-model-empty { margin: 12px; color: #96a2b0; }
 .task-model-fetch-error { padding: 8px 12px; color: #e2ab75; border-top: 1px solid #2c343d; }
