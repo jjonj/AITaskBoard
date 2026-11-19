@@ -1127,6 +1127,7 @@ pub fn run() {
             task_agent::task_agent_action,
             preparation::start_task_preparation,
             preparation::notify_task_preparation_saved,
+            preparation::start_task_prepfile,
             show_main_window
         ])
         .run(tauri::generate_context!())

@@ -4,7 +4,7 @@ import { taskModelFavorites } from "./api";
 import { taskModelKey } from "./taskModels";
 import { ProviderIcon } from "./TaskProviderIcons";
 import { orderTaskModelFavorites } from "./modelFavoriteOrdering";
-import type { TaskModelSelection } from "./types";
+import type { TaskModelSelection, TaskPrepfileSettings } from "./types";
 import "./taskModels.css";
 
 type Favorite = { provider: string; model: string };
@@ -40,11 +40,13 @@ function providerLabel(provider: string) {
 
 /** Floating T3-style two-pane picker; portaled to avoid the editor drawer's overflow clipping. */
 export function TaskModelPicker({
-  value, onChange, caption = "Model",
+  value, onChange, caption = "Model", prepfileSettings, onPrepfileChange,
 }: {
   value: TaskModelSelection | null;
   onChange: (next: TaskModelSelection | null) => void;
   caption?: string;
+  prepfileSettings?: TaskPrepfileSettings | null;
+  onPrepfileChange?: (settings: TaskPrepfileSettings | null) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -105,14 +107,15 @@ export function TaskModelPicker({
     const viewportWidth = window.innerWidth;
     const viewportHeight = window.innerHeight;
     const width = Math.min(524, Math.max(240, viewportWidth - 16));
-    const maxHeight = Math.min(386, Math.max(160, viewportHeight - 16));
+    const maxHeight = Math.min(onPrepfileChange ? prepfileSettings ? 495 : 444 : 386,
+      Math.max(160, viewportHeight - 16));
     const left = Math.max(8, Math.min(rect.right - width, viewportWidth - width - 8));
     const below = rect.bottom + 6;
     const above = rect.top - maxHeight - 6;
     const top = below + maxHeight < viewportHeight - 8 ? below
       : above >= 8 ? above : Math.max(8, Math.min(below, viewportHeight - maxHeight - 8));
     setPosition({ top, left, width, maxHeight });
-  }, []);
+  }, [!!onPrepfileChange, !!prepfileSettings]);
 
   const close = useCallback((restoreFocus = false) => {
     setOpen(false);
@@ -148,6 +151,7 @@ export function TaskModelPicker({
 
   const choose = (key: string) => {
     if (key === "chatgpt") {
+      if (prepfileSettings) return; // The handoff implementer is a native T3 thread.
       onChange(null);
       close(true);
       return;
@@ -171,6 +175,15 @@ export function TaskModelPicker({
   };
 
   const display = value ? modelName(value.model) : "ChatGPT";
+  const togglePrepfile = (enabled: boolean) => {
+    if (!onPrepfileChange) return;
+    if (enabled) {
+      onChange({ provider: "claudeAgent", model: "claude-opus-5-5", effort: "medium" });
+      onPrepfileChange({ generator: "chatgpt", depth: "medium" });
+    } else {
+      onPrepfileChange(null);
+    }
+  };
   return <div className="task-model-picker">
     <span className="task-model-field-label">{caption}</span>
     <button ref={triggerRef} type="button" className="task-model-trigger" aria-label={`${caption}: ${display}`}
@@ -187,7 +200,8 @@ export function TaskModelPicker({
       <span className="task-model-chevron" aria-hidden="true">⌄</span>
     </button>
     {open && createPortal(
-      <section ref={panelRef} role="dialog" aria-label={caption} className="task-model-popover"
+      <section ref={panelRef} role="dialog" aria-label={caption}
+        className={`task-model-popover${onPrepfileChange ? " with-prepfile" : ""}${prepfileSettings ? " prepfile-enabled" : ""}`}
         style={{ top: position.top, left: position.left, width: position.width, maxHeight: position.maxHeight }}
         onKeyDown={event => {
           const digit = /^[1-9]$/.test(event.key) ? Number(event.key) : 0;
@@ -212,6 +226,7 @@ export function TaskModelPicker({
             {filtered.map((row, index) => (
               <button key={row.key} type="button" className={`task-model-option${row.key === selectedKey ? " selected" : ""}${index === activeIndex ? " keyboard-active" : ""}`}
                 aria-pressed={row.key === selectedKey}
+                disabled={!!prepfileSettings && row.key === "chatgpt"}
                 aria-keyshortcuts={index < 9 ? `Alt+${index + 1}` : undefined}
                 title={`${row.model} · ${providerLabel(row.provider)}`}
                 onClick={() => choose(row.key)}>
@@ -252,6 +267,36 @@ export function TaskModelPicker({
           </p>}
           <footer>Model favorites from T3 Code</footer>
         </div>
+        {onPrepfileChange && <div className="task-model-prepfile-controls">
+          <label className="task-model-prepfile-toggle">
+            <input type="checkbox" checked={!!prepfileSettings}
+              onChange={event => togglePrepfile(event.currentTarget.checked)} />
+            <span>Prepfile</span>
+            <small>Prepare context first, then start the selected implementer</small>
+          </label>
+          {prepfileSettings && <div className="task-model-prepfile-settings">
+            <label>Prepper
+              <select value={prepfileSettings.generator}
+                onChange={event => onPrepfileChange({
+                  ...prepfileSettings, generator: event.currentTarget.value as TaskPrepfileSettings["generator"],
+                })}>
+                <option value="chatgpt">ChatGPT (default)</option>
+                <option value="luna">Luna</option>
+                <option value="haiku">Haiku</option>
+              </select>
+            </label>
+            <label>Research depth
+              <select value={prepfileSettings.depth}
+                onChange={event => onPrepfileChange({
+                  ...prepfileSettings, depth: event.currentTarget.value as TaskPrepfileSettings["depth"],
+                })}>
+                <option value="light">Light</option>
+                <option value="medium">Medium (default)</option>
+                <option value="heavy">Heavy</option>
+              </select>
+            </label>
+          </div>}
+        </div>}
       </section>, document.body)}
   </div>;
 }

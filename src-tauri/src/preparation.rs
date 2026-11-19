@@ -11,6 +11,7 @@ const T3_SESSIONS: &str = r"D:\SSDProjects\Tools\t3code\scripts\chatgpt-sessions
 
 fn t3_home() -> Result<PathBuf, String> {
     std::env::var_os("T3CODE_HOME").map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(|root| PathBuf::from(root).join(".t3")))
         .or_else(|| Path::new(T3_SPAWN).parent()?.parent().map(|root| root.join(".t3")))
         .ok_or("The active T3 home cannot be resolved".to_string())
 }
@@ -140,4 +141,72 @@ pub async fn notify_task_preparation_saved(
         })))?;
         Ok(json!({"sessionId": session_id, "delivery": sent}))
     }).await.map_err(|e| format!("Cannot notify preparation agent: {e}"))?
+}
+
+/// Save-time TaskBoard Prepfile. Unlike the older pre-save "Prepare" agent, this
+/// reuses T3's New Prepfile controller and automatic native implementer handoff.
+/// A stable request ID identifies the exact one job across uncertain delivery.
+#[tauri::command]
+pub async fn start_task_prepfile(
+    path: String, id: String, request_id: String, project_name: String,
+) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        Uuid::parse_str(&request_id).map_err(|_| "Invalid Prepfile request UUID")?;
+        if !Path::new(&path).is_absolute() || !Path::new(&path).join("_board.md").is_file() {
+            return Err("TaskBoard project root is unavailable".to_string());
+        }
+        if project_name.trim().is_empty() || project_name.len() > 150 {
+            return Err("A named T3 project is required for the implementer".to_string());
+        }
+        let board = FsTaskStore::default().load(Path::new(&path)).map_err(|e| e.to_string())?;
+        let task = board.tasks.iter().find(|task| task.id == id && !task.archived)
+            .ok_or("Saved TaskBoard task not found")?;
+        if task.column != "draft" || !task.attention.contains(&task_core::TaskAttention::Prepare) ||
+            !task.notes.contains(&format!("<!-- taskboard:prepfile-request:{request_id} -->")) {
+            return Err("The task is not the saved, held Prepfile task for this request".into());
+        }
+        let read_note = |name: &str| -> Option<String> {
+            task.notes.split("<!-- taskboard:prepfile-")
+                .find_map(|piece| piece.strip_prefix(&format!("{name}:"))
+                    .and_then(|s| s.split_once(" -->").map(|(v, _)| v.to_owned())))
+        };
+        let generator = read_note("generator").ok_or("Prepper is missing")?;
+        let depth = read_note("depth").ok_or("Prepfile depth is missing")?;
+        if !["chatgpt", "luna", "haiku"].contains(&generator.as_str()) ||
+            !["light", "medium", "heavy"].contains(&depth.as_str()) {
+            return Err("Invalid saved Prepfile settings".into());
+        }
+        let implementer = task.model_selection.as_ref()
+            .ok_or("Prepfile handoff requires a native implementer model")?;
+        if implementer.provider.trim().is_empty() || implementer.model.trim().is_empty() {
+            return Err("Invalid implementation model".into());
+        }
+        let generator_model = match generator.as_str() {
+            "luna" => Some(json!({"instanceId":"codex","model":"gpt-6-luna"})),
+            "haiku" => Some(json!({"instanceId":"claudeAgent","model":"claude-haiku-5-5"})),
+            _ => None,
+        };
+        // Stable and independent of subsequent task edits: T3 checks the same
+        // request text and exact existing task on an idempotent job re-open.
+        let request = format!(
+            "Implement existing TaskBoard task {id} in {path}. Read its current title, description, acceptance criteria, attachments and user notes before working. Do not create a duplicate task."
+        );
+        let mut options = json!({
+            "id":request_id, "taskRef":{"board":path,"id":id},
+            "request":request, "depth":depth, "generator":generator,
+            "autoHandoff":true, "projectName":project_name,
+            "implementationModel":{
+                "instanceId":implementer.provider,"model":implementer.model,
+                "effort":implementer.effort,
+            }
+        });
+        if let Some(generator_model) = generator_model { options["generatorModel"] = generator_model; }
+        let payload = json!({
+            "action":"task_agent_action",
+            "taskBoardPath":path,"taskId":id,
+            "taskCommand":"prepfile_create",
+            "taskOptionsJson":options.to_string(),
+        });
+        run_node(T3_SESSIONS, &[], Some(&payload))
+    }).await.map_err(|e| format!("Prepfile launch failed: {e}"))?
 }

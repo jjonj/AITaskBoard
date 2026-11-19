@@ -31,6 +31,7 @@ import { StaleBlockerPanel } from "./StaleBlockerPanel";
 import { AgentRecoverySettings } from "./AgentRecoverySettings";
 import { TaskModelPicker } from "./TaskModelPicker";
 import { readDefaultTaskModel, saveDefaultTaskModel } from "./taskModels";
+import { prepfileRequestId, prepfileTargetColumn, readTaskPrepfile, stripTaskPrepfile, writeTaskPrepfile } from "./taskPrepfile";
 import type { TaskModelSelection } from "./types";
 import { TaskAgentPanel } from "./TaskAgentPanel";
 import { TaskFilterPanel, type TaskFilterSelection } from "./TaskFilterPanel";
@@ -53,6 +54,7 @@ import {
   openInObsidian,
   openTaskSession,
   startTaskPreparation,
+  startTaskPrepfile,
   notifyTaskPreparationSaved,
   taskLiveWithMe,
   restoreSnapshot,
@@ -252,6 +254,7 @@ const emptyDraft = (
   kind: "task",
   review_mode: "inbox",
   model_selection: readDefaultTaskModel(),
+  prepfile: null,
   deployable: null,
   repeat_every_days: null,
   next_due: null,
@@ -1485,6 +1488,7 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     kind: task.kind,
     review_mode: task.review_mode ?? "inbox",
     model_selection: task.model_selection ?? null,
+    prepfile: readTaskPrepfile(task.notes),
     deployable: task.deployable ?? null,
     repeat_every_days: task.repeat_every_days ?? null,
     next_due: task.next_due ?? null,
@@ -1591,6 +1595,14 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     })();
   };
 
+  // TaskBoard saves the canonical task first; T3 owns its prepper and handoff.
+  // On an uncertain receipt, the same UUID is reused rather than spawning again.
+  const launchTaskPrepfileAfterSave = (id: string, path: string, requestId: string, projectName: string) => {
+    void startTaskPrepfile(path, id, requestId, projectName).catch((error) => {
+      setError(`Saved ${id} in Draft, but T3 Prepfile launch was not confirmed: ${errorText(error)}. Reopen and Save to reconcile the same request ID.`);
+    });
+  };
+
   // Implicit dismissal and the final restart checkpoint use the same durable
   // Draft save. Explicit Cancel still discards a new task.
   const saveUnfinishedDraft = (): Promise<void> => {
@@ -1601,13 +1613,20 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     setBusy(true);
     const stamp = new Date().toISOString();
     const preparing = editor.draft.attention.includes("prepare") && prepRequestId;
+    const prepfile = editor.draft.prepfile && editor.draft.kind !== "epic" ? editor.draft.prepfile : null;
+    const prepfileId = prepfile ? prepfileRequestId(editor.draft.notes) ?? crypto.randomUUID() : null;
+    const target = editor.draft.column === "draft" ? defaultCreateColumn() ?? "draft" : editor.draft.column;
     const draft = {
       ...editor.draft,
       title: editor.draft.title.trim(),
       column: "draft",
-      notes: [preparing
-        ? preparationNotes(editor.draft.notes, preparing, editor.draft.column, false)
-        : editor.draft.notes, `<!-- taskboard:auto-draft:${stamp} -->`].filter(Boolean).join("\n"),
+      attention: prepfile && !editor.draft.attention.includes("prepare")
+        ? [...editor.draft.attention, "prepare" as const] : editor.draft.attention,
+      notes: [prepfile && prepfileId
+        ? writeTaskPrepfile(editor.draft.notes, prepfileId, target, prepfile)
+        : preparing
+          ? preparationNotes(editor.draft.notes, preparing, editor.draft.column, false)
+          : editor.draft.notes, `<!-- taskboard:auto-draft:${stamp} -->`].filter(Boolean).join("\n"),
       reserved_id: reservedTaskId.id,
       reservation_token: reservedTaskId.token,
     };
@@ -2262,6 +2281,15 @@ Details: ${queueRecoveryWarning}`;
 
       const before = snapshot;
       const prepared = prepareTaskDraftForSave(editor.draft, "", editor.original?.claimed_by);
+      // Explicit Save starts a Prepfile. Auto-saved Drafts only preserve the UUID.
+      const prepfile = (editor.mode === "create" || editor.original?.column === "draft")
+        && (prepared.kind === "task" || prepared.kind === "recurring")
+        ? editor.draft.prepfile ?? null : null;
+      if (prepfile && !prepared.model_selection)
+        throw new Error("Choose a native implementation model for the Prepfile handoff.");
+      const taskPrepfileId = prepfile
+        ? prepfileRequestId(editor.original?.notes ?? prepared.notes) ?? crypto.randomUUID()
+        : null;
       const savedPrepRequest = editor.mode === "edit" && editor.original?.column === "draft" &&
         editor.original.attention.includes("prepare")
         ? editor.original.notes.match(/taskboard:preparation-request:([a-f0-9-]{36})/)?.[1] ?? null : null;
@@ -2269,14 +2297,26 @@ Details: ${queueRecoveryWarning}`;
         ? editor.mode === "create" ? prepRequestId : savedPrepRequest : null;
       const priorTarget = editor.original?.notes.match(/taskboard:preparation-target:([^\s>]+)/)?.[1];
       const preparationTarget = prepared.column === "draft" ? priorTarget ?? defaultCreateColumn() ?? "draft" : prepared.column;
+      const prepfileTarget = prepared.column === "draft"
+        ? prepfileTargetColumn(editor.original?.notes ?? prepared.notes) ?? defaultCreateColumn() ?? "draft"
+        : prepared.column;
+      const disablingExistingPrepfile = !prepfile &&
+        (editor.mode === "create" || editor.original?.column === "draft") &&
+        !!prepfileRequestId(editor.original?.notes ?? prepared.notes);
       let draft = { ...prepared,
-        column: preparing ? "draft" : markDone && editor.mode === "edit" && doneColumn ? doneColumn.id : prepared.column,
-        notes: preparing ? preparationNotes(prepared.notes, preparing, preparationTarget) : prepared.notes,
+        column: preparing || prepfile ? "draft" : markDone && editor.mode === "edit" && doneColumn ? doneColumn.id : prepared.column,
+        notes: prepfile && taskPrepfileId
+          ? writeTaskPrepfile(prepared.notes, taskPrepfileId, prepfileTarget, prepfile)
+          : preparing ? preparationNotes(prepared.notes, preparing, preparationTarget)
+          : disablingExistingPrepfile ? stripTaskPrepfile(prepared.notes) : prepared.notes,
         depends_on: editor.draft.kind === "epic" ? [] : [...editor.draft.depends_on],
         related_to: [...editor.draft.related_to],
         parent: editor.draft.kind === "epic" ? null : editor.draft.parent,
         icon: editor.draft.kind === "epic" ? null : editor.draft.icon,
-        attention: editor.draft.kind === "epic" ? [] : [...prepared.attention],
+        attention: editor.draft.kind === "epic" ? [] :
+          prepfile && !prepared.attention.includes("prepare") ? [...prepared.attention, "prepare" as const] :
+          disablingExistingPrepfile && !prepared.notes.includes("taskboard:preparation-request")
+            ? prepared.attention.filter(flag => flag !== "prepare") : [...prepared.attention],
         question: editor.draft.kind === "epic" ? null : prepared.question,
         acceptance_criteria: editor.draft.kind === "epic" ? [] : prepared.acceptance_criteria,
       };
@@ -2338,6 +2378,8 @@ Details: ${queueRecoveryWarning}`;
         flashTaskActivity([{ id: saved.id, kind: "created" }]);
         undoAction = "create task";
         if (preparing) linkPreparationAfterSave(saved.id, boardPath, preparing);
+        else if (!implicit && prepfile && taskPrepfileId)
+          launchTaskPrepfileAfterSave(saved.id, boardPath, taskPrepfileId, project.name);
       } else if (editor.original) {
         const saved = await updateWithDiskMerge(editor.original, { ...editor.original, ...draft });
         savedTask = saved;
@@ -2359,11 +2401,13 @@ Details: ${queueRecoveryWarning}`;
         if (kind) flashTaskActivity([{ id: saved.id, kind }]);
         undoAction = "edit task";
         if (preparing) linkPreparationAfterSave(saved.id, boardPath, preparing);
+        else if (!implicit && prepfile && taskPrepfileId)
+          launchTaskPrepfileAfterSave(saved.id, boardPath, taskPrepfileId, project.name);
       }
 
       // Persist execution intent only after the task exists. Each write is revision-checked;
       // a pending Start now ID is never retried or replaced after an uncertain result.
-      if (savedTask && !markDone && !preparing && (savedTask.kind === "task" || savedTask.kind === "recurring")) {
+      if (savedTask && !markDone && !preparing && !prepfile && (savedTask.kind === "task" || savedTask.kind === "recurring")) {
         if (withMeSelected !== (savedTask.live?.with_me === true)) {
           savedTask = await taskLiveWithMe(savedTask.id, savedTask.revision, withMeSelected, boardPath);
         }
@@ -2380,7 +2424,7 @@ Details: ${queueRecoveryWarning}`;
       }
       if (savedTask) showLinkedReviewOutcome(before, after, savedTask.id);
       if (undoAction) pushUndo({ kind: "board", label: undoAction, before, after });
-      const syncWarning = savedTask && !startAfterSave && !preparing ? await syncQueueWarning(savedTask.id) : null;
+      const syncWarning = savedTask && !startAfterSave && !preparing && !prepfile ? await syncQueueWarning(savedTask.id) : null;
       // The sync CAS may add a receipt, changing the revision: reload before
       // delivering the local board view, rather than leaving a stale edit draft.
       if (savedTask) after = await loadBoard(boardPath);
@@ -5008,8 +5052,14 @@ Details: ${queueRecoveryWarning}`;
               </label>
               {(editor.draft.kind === "task" || editor.draft.kind === "recurring") &&
                 <TaskModelPicker value={editor.draft.model_selection ?? null}
+                  caption={editor.draft.prepfile ? "Implementer" : "Model"}
                   onChange={model_selection => setEditor(current => current
-                    ? { ...current, draft: { ...current.draft, model_selection } } : current)} />}
+                    ? { ...current, draft: { ...current.draft, model_selection } } : current)}
+                  prepfileSettings={editor.draft.prepfile}
+                  onPrepfileChange={!prepRequestId && (editor.mode === "create" || editor.original?.column === "draft")
+                    ? settings => setEditor(current => current
+                      ? { ...current, draft: { ...current.draft, prepfile: settings } } : current)
+                    : undefined} />}
             </div>
 
             {snapshot.config.releases_enabled && editor.draft.kind === "task" && (
@@ -5079,7 +5129,8 @@ Details: ${queueRecoveryWarning}`;
                 <span>Attention</span>
                 <div className="attention-editor-buttons">
                   {(["question", "blocked", "prepare", "announce", "priority"] as TaskAttention[]).map((flag) => (
-                    (flag !== "prepare" || editor.mode === "create" || editor.draft.attention.includes("prepare")) && (
+                    (flag !== "prepare" || (!editor.draft.prepfile &&
+                      (editor.mode === "create" || editor.draft.attention.includes("prepare")))) && (
                     <button
                       type="button"
                       key={flag}
@@ -5290,7 +5341,7 @@ Details: ${queueRecoveryWarning}`;
             </>)}
 
             <div className="modal-actions">
-              {!isAdvisoryEditor && !!snapshot && queueableColumn(editor.draft.column) && !editor.original?.claimed_by && !editor.original?.completed &&
+              {!editor.draft.prepfile && !isAdvisoryEditor && !!snapshot && queueableColumn(editor.draft.column) && !editor.original?.claimed_by && !editor.original?.completed &&
                 (editor.draft.kind === "task" || editor.draft.kind === "recurring") &&
                 !editor.draft.attention.some(flag => ["blocked", "needs-user", "question"].includes(flag)) &&
                 editor.draft.depends_on.every(id => isComplete(id)) &&
@@ -5306,6 +5357,7 @@ Details: ${queueRecoveryWarning}`;
                     {mode === "start_now" ? "Start now" : mode === "queue" ? "Queue" : "Backlog"}
                   </button>)}
               </div>}
+              {editor.draft.prepfile && <span className="task-prepfile-save-hint">Save starts preparation; T3 starts the implementer after the context file is ready.</span>}
               {editor.mode === "edit" && editor.original?.kind === "epic" && <button type="button"
                 className="button secondary" onClick={() => openCreate(defaultCreateColumn(), editor.original!.id, editor.draft.category)} disabled={busy}>
                 + Task under epic

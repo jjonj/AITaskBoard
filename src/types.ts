@@ -44,6 +44,8 @@ export type TaskLive = {
   later_until?: string | null;
 };
 export type TaskModelSelection = { provider: string; model: string; effort: "low" | "medium" | "high" | "xhigh" };
+/** UI-only prepfile intent. Persisted as a TaskBoard note marker (not task frontmatter). */
+export type TaskPrepfileSettings = { generator: "chatgpt" | "luna" | "haiku"; depth: "light" | "medium" | "heavy" };
 export type Task = {
   kind: TaskKind;
   deployable?: boolean | null;
@@ -96,6 +98,7 @@ export type TaskDraft = {
   kind: TaskKind;
   review_mode?: ReviewMode;
   model_selection?: TaskModelSelection | null;
+  prepfile?: TaskPrepfileSettings | null;
   deployable?: boolean | null;
   repeat_every_days?: number | null;
   next_due?: string | null;

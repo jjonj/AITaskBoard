@@ -255,6 +255,10 @@ export const startTaskPreparation = (path: string, id: string, requestId: string
 export const notifyTaskPreparationSaved = (path: string, id: string, requestId: string) =>
   invoke<{ sessionId: string; delivery: Record<string, unknown> }>("notify_task_preparation_saved", { path, id, requestId });
 
+/** Save-time Prepfile: T3 owns both preparation and eventual implementer handoff. */
+export const startTaskPrepfile = (path: string, id: string, requestId: string, projectName: string) =>
+  invoke<Record<string, unknown>>("start_task_prepfile", { path, id, requestId, projectName });
+
 export const showMainWindow = () =>
   invoke<void>("show_main_window");
 
