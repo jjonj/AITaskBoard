@@ -3,7 +3,7 @@ import type { Task, Column } from "./types";
 import { crossColumnCurve, interveningColumns } from "./dependencyRoutes";
 
 type Rect = { x: number; y: number; width: number; height: number };
-type Edge = { id: string; path: string; sx: number; sy: number };
+type Edge = { id: string; sourceId: string; targetId: string; path: string; sx: number; sy: number };
 type ColumnGeometry = {
   id: string;
   rect: DOMRect;
@@ -39,17 +39,17 @@ const isVisibleCenter = (rect: DOMRect, clip: Rect) => {
 };
 const fmt = (value: number) => value.toFixed(1);
 
-/** Dependency connectors are one independent fixed SVG. It never affects the
- * dimensions of the columns or the cards. Cross-column paths are masked behind
- * intervening (unrelated) columns, leaving the source and destination visible.
+/** Fixed overlay that follows card scrolling without changing board geometry.
+ * Cross-column paths are hidden only where they would cover unrelated cards.
  */
 export function DependencyArrows({
-  boardRef, visibleTasks, columns, layoutKey,
+  boardRef, visibleTasks, columns, layoutKey, focusedTaskId,
 }: {
   boardRef: RefObject<HTMLElement | null>;
   visibleTasks: Task[];
   columns: Column[];
   layoutKey: string;
+  focusedTaskId?: string | null;
 }) {
   const [layout, setLayout] = useState<Layout>(emptyLayout);
 
@@ -125,7 +125,7 @@ export function DependencyArrows({
               `L ${fmt(tx)} ${fmt(ty)}`,
             ].join(" ");
             if (!sameColumn.has(source.id)) sameColumn.set(source.id, []);
-            sameColumn.get(source.id)!.push({ id, path, sx, sy });
+            sameColumn.get(source.id)!.push({ id, sourceId: prerequisiteId, targetId: dependent.id, path, sx, sy });
             continue;
           }
 
@@ -136,11 +136,18 @@ export function DependencyArrows({
           const tx = rightward ? dependentRect.left + 7 : dependentRect.right - 7;
           const path = crossColumnCurve(sx, sy, tx, ty, rightward ? 1 : -1);
 
-          // A white-on-black SVG mask is equivalent to a separate red wire
-          // layer physically behind the unrelated columns: those columns
-          // completely occlude the line, including its glow/shadow.
-          const occluders = interveningColumns(source, destination, [...geometry.values()]);
-          crossEdges.push({ id, path, sx, sy, occluders });
+          // Mask actual card faces, not whole intervening columns: the old
+          // column-wide mask made long dependencies appear disconnected.
+          const between = interveningColumns(source, destination, [...geometry.values()]);
+          const occluders = [...geometry.values()]
+            .filter((geo) => between.some((bounds) =>
+              geo.rect.x + geo.rect.width / 2 > bounds.x &&
+              geo.rect.x + geo.rect.width / 2 < bounds.x + bounds.width))
+            .flatMap((geo) => [...geo.cards.values()].map((card) => {
+              const clip = intersection([geo.clip, card]);
+              return { x: clip.x - 3, y: clip.y - 3, width: clip.width + 6, height: clip.height + 6 };
+            }).filter((rect) => rect.width > 6 && rect.height > 6));
+          crossEdges.push({ id, sourceId: prerequisiteId, targetId: dependent.id, path, sx, sy, occluders });
         }
       }
 
@@ -174,7 +181,9 @@ export function DependencyArrows({
   if (!layout.crossEdges.length && !layout.columns.some((col) => col.edges.length)) return null;
 
   const drawEdge = (edge: Edge) => (
-    <g key={edge.id}>
+    <g key={edge.id} className={focusedTaskId
+      ? edge.sourceId === focusedTaskId || edge.targetId === focusedTaskId ? "dependency-link-focus" : "dependency-link-muted"
+      : undefined}>
       <path className="dependency-line-halo" d={edge.path} />
       <path className="dependency-line" d={edge.path} markerEnd="url(#tb-dependency-arrow)" />
       <circle className="dependency-line-origin" cx={edge.sx} cy={edge.sy} r="3" />

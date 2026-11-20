@@ -10,6 +10,8 @@ import "./App.css";
 import { TASK_ICON_OPTIONS, TaskIconGlyph } from "./TaskIcons";
 import { TitleMarkup } from "./TitleMarkup";
 import { DependencyArrows } from "./DependencyArrows";
+import { humanDependencyStops } from "./humanDependencyStops";
+import "./humanDependencyStops.css";
 import { TaskLinkPicker } from "./TaskLinkPicker";
 import { AutoTextarea, DescriptionTimeline } from "./TaskDescriptionPanel";
 import { MarkdownText, MarkdownPreviewToggle } from "./MarkdownText";
@@ -1253,6 +1255,8 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     () => [...(snapshot?.config.columns ?? [])].sort((a, b) => a.order - b.order),
     [snapshot],
   );
+  const humanStops = useMemo(() => humanDependencyStops(activeTasks, columns), [activeTasks, columns]);
+  const humanBlockedTaskCount = new Set(humanStops.stops.flatMap((stop) => stop.affectedIds)).size;
 
   // Keep the draft's destination column visible beside the editor sheet, not
   // merely somewhere underneath it. Recheck when switching columns or resizing.
@@ -3930,6 +3934,23 @@ Details: ${queueRecoveryWarning}`;
       {!!snapshot.warnings.length && (
         <div className="warning-banner">{snapshot.warnings.join(" • ")}</div>
       )}
+      {!reviewOpen && !editor && humanStops.stops.length > 0 && (
+        <div className="human-dependency-strip" role="status" aria-label="Tasks held by human prerequisites">
+          <strong>Needs you</strong>
+          <span>{humanStops.stops.length} human prerequisite{humanStops.stops.length === 1 ? "" : "s"} hold {humanBlockedTaskCount} task{humanBlockedTaskCount === 1 ? "" : "s"}</span>
+          <div className="human-dependency-roots">
+            {humanStops.stops.slice(0, 4).map((stop) => (
+              <button type="button" key={stop.task.id}
+                title={`${stop.task.title} · ${stop.affectedIds.length} downstream tasks waiting · open prerequisite`}
+                onClick={() => { setQuery(""); setHoverTask(null); openEdit(stop.task); }}>
+                {stop.task.id} <small>{stop.reason === "draft" ? "User Drafts" : stop.reason === "for-user" ? "For user" : "Answer needed"}</small>
+                <b>{stop.affectedIds.length}</b>
+              </button>
+            ))}
+            {humanStops.stops.length > 4 && <small>+{humanStops.stops.length - 4} more</small>}
+          </div>
+        </div>
+      )}
 
       {/* Extra scroll runway lets the final column move left of the editor sheet. */}
       <section
@@ -4257,6 +4278,22 @@ Details: ${queueRecoveryWarning}`;
                         )}
                       </div>
                       <h3><TitleMarkup title={task.title} /></h3>
+                      {humanStops.forTask.has(task.id) && (
+                        <div className="human-dependency-card" aria-label={`Waiting on human prerequisite ${humanStops.forTask.get(task.id)!.join(", ")}`}>
+                          <span>Waiting on you:</span>
+                          {humanStops.forTask.get(task.id)!.slice(0, 3).map((id) => {
+                            const root = taskMap.get(id);
+                            return <button type="button" key={id}
+                              title={`${id}: ${root?.title ?? "Human prerequisite"} · click to open`}
+                              onPointerDown={(event) => event.stopPropagation()}
+                              onMouseDown={(event) => event.stopPropagation()}
+                              onClick={(event) => { event.stopPropagation(); if (root) { setQuery(""); setHoverTask(null); openEdit(root); } }}>
+                              {id}{root?.column === "draft" ? " · Draft" : ""}
+                            </button>;
+                          })}
+                          {humanStops.forTask.get(task.id)!.length > 3 && <small>+{humanStops.forTask.get(task.id)!.length - 3}</small>}
+                        </div>
+                      )}
                       {task.kind === "epic" && (() => {
                         const status = epicProgress(task);
                         return <div className="epic-progress" title={`${status.done}/${status.total} completed  /  ${status.inProgress} in progress  /  ${status.blocked} waiting/blocked`}>
@@ -4302,7 +4339,7 @@ Details: ${queueRecoveryWarning}`;
         </div>}
 
       {!reviewOpen && !editor && <DependencyArrows boardRef={boardRef} visibleTasks={visibleTasks}
-        columns={columns} layoutKey={dependencyLayoutKey} />}
+        columns={columns} layoutKey={dependencyLayoutKey} focusedTaskId={hoverTask?.task.id} />}
 
       {columnDragPreview && (
         <div

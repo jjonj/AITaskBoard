@@ -1,0 +1,61 @@
+/* The board-level summary remains visible even when its draft cards are offscreen. */
+.human-dependency-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 15px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: #e5caaa;
+  background: #30271f;
+  border-bottom: 1px solid #806041;
+}
+.human-dependency-strip > strong { color: #ffdaac; font-size: 12px; white-space: nowrap; }
+.human-dependency-strip > span { color: #d2ad81; white-space: nowrap; }
+.human-dependency-roots { display: flex; flex: 1 1 auto; align-items: center; gap: 6px; flex-wrap: wrap; }
+.human-dependency-roots button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #ffe0b7;
+  background: #493528;
+  border: 1px solid #92633f;
+  border-radius: 5px;
+  padding: 3px 7px;
+  font-weight: 750;
+  font-size: 11px;
+  cursor: pointer;
+}
+.human-dependency-roots button:hover,
+.human-dependency-roots button:focus-visible { background: #65432d; border-color: #d59b60; }
+.human-dependency-roots button small { font-size: 10px; font-weight: 500; color: #d8af88; }
+.human-dependency-roots button b { font-size: 10px; color: #fff1de; background: #75462c; border-radius: 5px; padding: 1px 5px; }
+.human-dependency-roots > small { color: #d2ad81; }
+
+.human-dependency-card {
+  margin-top: 5px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  color: #eeb987;
+  font-size: 10px;
+  line-height: 1.2;
+}
+.human-dependency-card > span { font-weight: 750; }
+.human-dependency-card button {
+  border: 1px solid #85613d;
+  border-radius: 4px;
+  background: #473222;
+  color: #f6d0a2;
+  padding: 2px 5px;
+  font-weight: 700;
+  font-size: 10px;
+  cursor: pointer;
+}
+.human-dependency-card button:hover, .human-dependency-card button:focus-visible {
+  background: #62412a;
+  border-color: #e7ac6d;
+}
+.dependency-link-muted { opacity: .13; }
+.dependency-link-focus .dependency-line { stroke-width: 3; filter: drop-shadow(0 0 4px rgba(255, 89, 104, .9)); }
