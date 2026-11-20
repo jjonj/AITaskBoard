@@ -114,7 +114,53 @@ fn column_auto_queue_applies_to_future_ready_tasks_and_keeps_manual_backlog() {
 }
 
 #[test]
-fn newly_marked_priority_auto_queues_without_rewriting_historical_priority() {
+fn moving_a_task_adopts_column_queue_policy_for_human_and_agent_edits() {
+    use task_core::MutationActor;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let store = FsTaskStore;
+    store.ensure_board(root, "Move Queue").unwrap();
+    let mut config = store.load(root).unwrap().config;
+    let mut auto = config.columns.iter().find(|c| c.id == "ai-ready").unwrap().clone();
+    auto.id = "auto-queued".into();
+    auto.name = "Auto queued".into();
+    auto.auto_queue = true;
+    auto.order += 1;
+    config.columns.push(auto);
+    store.save_config(root, config).unwrap();
+
+    let created = store.create_as(root, serde_json::from_value(serde_json::json!({
+        "title":"New queued", "column":"auto-queued", "parent":null
+    })).unwrap(), MutationActor::Human).unwrap();
+    assert_eq!(store.execution_intent(root, &created.id).unwrap().mode, ExecutionMode::Queue);
+    let mut task = created;
+    task.column = "ai-ready".into();
+    let moved = store.update_as(root, task, MutationActor::Agent).unwrap();
+    assert_eq!(store.execution_intent(root, &moved.id).unwrap().mode, ExecutionMode::Backlog);
+
+    // The destination policy overrides even a prior explicit per-card preference.
+    let manually_queued = store.set_execution_mode(root, &moved.id, &moved.revision, ExecutionMode::Queue).unwrap();
+    let mut task = store.load(root).unwrap().tasks.into_iter().find(|t| t.id == moved.id).unwrap();
+    task.column = "auto-queued".into();
+    let moved = store.update_as(root, task, MutationActor::Human).unwrap();
+    assert_eq!(store.execution_intent(root, &moved.id).unwrap().mode, ExecutionMode::Queue);
+    assert_eq!(store.execution_intent(root, &moved.id).unwrap().queue_request, manually_queued.queue_request);
+
+    let manual = store.set_execution_mode(root, &moved.id, &moved.revision, ExecutionMode::Backlog).unwrap();
+    let mut task = store.load(root).unwrap().tasks.into_iter().find(|t| t.id == moved.id).unwrap();
+    task.column = "ai-ready".into();
+    let moved = store.update_as(root, task, MutationActor::Agent).unwrap();
+    assert_eq!(store.execution_intent(root, &moved.id).unwrap().mode, ExecutionMode::Backlog);
+    let mut task = moved;
+    task.column = "auto-queued".into();
+    let moved = store.update_as(root, task, MutationActor::Human).unwrap();
+    let next = store.execution_intent(root, &moved.id).unwrap();
+    assert_eq!(next.mode, ExecutionMode::Queue);
+    assert_ne!(next.queue_request, manual.queue_request);
+}
+
+#[test]
+fn newly_marked_priority_auto_queues_but_creation_follows_column_default() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let store = FsTaskStore;
@@ -123,14 +169,15 @@ fn newly_marked_priority_auto_queues_without_rewriting_historical_priority() {
         "title":"Already priority", "column":"ai-ready", "parent":null,
         "attention":["priority"]
     })).unwrap()).unwrap();
-    assert_eq!(store.execution_intent(root, &old.id).unwrap().mode, ExecutionMode::Queue);
+    assert_eq!(store.execution_intent(root, &old.id).unwrap().mode, ExecutionMode::Backlog);
     let original = store.create(root, serde_json::from_value(serde_json::json!({
         "title":"New priority", "column":"ai-ready", "parent":null
     })).unwrap()).unwrap();
     let mut task = original;
     task.attention.push(task_core::TaskAttention::Priority);
-    store.update(root, task).unwrap();
-    assert_eq!(store.execution_intent(root, &old.id).unwrap().mode, ExecutionMode::Queue);
+    let updated = store.update(root, task).unwrap();
+    assert_eq!(store.execution_intent(root, &updated.id).unwrap().mode, ExecutionMode::Queue);
+    assert_eq!(store.execution_intent(root, &old.id).unwrap().mode, ExecutionMode::Backlog);
 }
 
 #[test]
@@ -149,7 +196,8 @@ fn waiting_dependencies_do_not_dispatch_until_prerequisite_completes() {
     let dependent = store.create(root, serde_json::from_value(serde_json::json!({
         "title":"Dependent", "column":"ai-ready", "parent":null, "depends_on":[prerequisite.id]
     })).unwrap()).unwrap();
-    assert_eq!(store.execution_intent(root, &dependent.id).unwrap().mode, ExecutionMode::Backlog);
+    // Queue intent follows the column immediately; dispatch still waits for dependencies.
+    assert_eq!(store.execution_intent(root, &dependent.id).unwrap().mode, ExecutionMode::Queue);
     let board = store.load(root).unwrap();
     assert!(!queue_task_ready(&board, board.tasks.iter().find(|t| t.id==dependent.id).unwrap()));
     let mut required = board.tasks.iter().find(|t| t.id == prerequisite.id).unwrap().clone();
@@ -176,7 +224,7 @@ fn foreground_request_rejects_registered_queue_until_terminal_reconciled() {
 }
 
 #[test]
-fn priority_set_in_draft_waits_until_explicitly_moved_to_ai_ready() {
+fn priority_set_in_draft_adopts_destination_column_instead_of_queuing() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let store = FsTaskStore;
@@ -188,7 +236,7 @@ fn priority_set_in_draft_waits_until_explicitly_moved_to_ai_ready() {
     task.column = "ai-ready".into();
     let updated = store.update(root, task).unwrap();
     assert_eq!(updated.column, "ai-ready");
-    assert_eq!(store.execution_intent(root, &updated.id).unwrap().mode, ExecutionMode::Queue);
+    assert_eq!(store.execution_intent(root, &updated.id).unwrap().mode, ExecutionMode::Backlog);
 }
 
 #[test]

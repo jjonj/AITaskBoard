@@ -749,13 +749,16 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     }).finally(() => { if (!cancelled) setExecutionLoading(false); });
     return () => { cancelled = true; };
   }, [boardPath, editor?.mode, editor?.original?.id]);
-  // Creating in an auto-queue column cannot opt out into Backlog. Keep Start now
-  // available, and fall back to Queue if the column changes after a Backlog choice.
-  const creatingInAutoQueueColumn = editor?.mode === "create" &&
-    snapshot?.config.columns.some(col => col.id === editor.draft.column && col.ai_ready && col.auto_queue) === true;
-  const editorQueueChoice = (creatingInAutoQueueColumn && executionChoice === "backlog") ||
-    (!executionTouched && editor && editor.draft.attention.includes("priority") &&
-      !editor.original?.attention.includes("priority")) ? "queue" : executionChoice;
+  // New and moved tasks inherit the destination column's Queue policy.
+  // Only Start now remains an independent choice at that transition.
+  const editorAdoptsColumnQueue = !!editor &&
+    (editor.mode === "create" || editor.original?.column !== editor.draft.column);
+  const destinationAutoQueued = snapshot?.config.columns.some(col =>
+    col.id === editor?.draft.column && col.ai_ready && col.auto_queue) === true;
+  const editorQueueChoice = editorAdoptsColumnQueue && executionChoice !== "start_now"
+    ? destinationAutoQueued ? "queue" : "backlog"
+    : (!executionTouched && editor && editor.draft.attention.includes("priority") &&
+       !editor.original?.attention.includes("priority")) ? "queue" : executionChoice;
   const [releasesOpen, setReleasesOpen] = useState(false);
   const [userQueueReview, setUserQueueReview] = useState<UserQueueReview | null>(null);
   // A full editor opened from Inbox returns to the same feedback queue on Cancel or Save.
@@ -2441,7 +2444,10 @@ Details: ${queueRecoveryWarning}`;
           // The saved task is durable; do not hold the editor open while T3
           // creates/opens a browser session or delivers its prompt.
           if (!implicit) startAfterSave = { id: savedTask.id, implement: !withMeSelected };
-        } else if (executionTouched) {
+        } else if (executionTouched && editor.mode === "edit" &&
+                   editor.original?.column === savedTask.column) {
+          // A newly created or moved card adopts its destination column's
+          // Queue policy, even if the editor previously displayed another mode.
           const current = await taskExecutionIntent(savedTask.id, boardPath);
           if (selectedMode !== current.mode)
             await taskSetExecutionMode(savedTask.id, current.revision, selectedMode, boardPath);
@@ -5409,7 +5415,8 @@ Details: ${queueRecoveryWarning}`;
                 editor.draft.depends_on.every(id => isComplete(id)) &&
                 <div className="execution-mode-picker" role="group" aria-label="Execution mode">
                 {(["backlog", "queue", "start_now"] as const)
-                  .filter(mode => !creatingInAutoQueueColumn || mode !== "backlog")
+                  .filter(mode => !editorAdoptsColumnQueue || mode === "start_now" ||
+                  mode === (destinationAutoQueued ? "queue" : "backlog"))
                   .map((mode) =>
                   <button type="button" key={mode} disabled={busy || executionLoading}
                     aria-pressed={editorQueueChoice === mode}

@@ -3030,10 +3030,14 @@ fn queue_policy_text(
         task.review_status.as_deref() == Some("open") {
         return Ok(text.to_owned());
     }
-    let newly_prioritized = task.attention.contains(&TaskAttention::Priority) &&
-        previous.is_none_or(|before| !before.attention.contains(&TaskAttention::Priority) ||
-            before.column != task.column);
-    if !column.auto_queue && !task.attention.contains(&TaskAttention::Priority) {
+    let moved = previous.is_some_and(|before| before.column != task.column);
+    let newly_prioritized = !moved && previous.is_some_and(|before|
+        task.attention.contains(&TaskAttention::Priority) &&
+        !before.attention.contains(&TaskAttention::Priority));
+    // A new card and any move to a different Todo column adopt that column's
+    // Queue setting. A task-level override applies only while staying put.
+    if !moved && !column.auto_queue && !newly_prioritized &&
+        !task.attention.contains(&TaskAttention::Priority) {
         return Ok(text.to_owned());
     }
     let (yaml, body) = split_frontmatter(text)?;
@@ -3041,6 +3045,21 @@ fn queue_policy_text(
         .map_err(|e| TaskStoreError::Parse(e.to_string()))?;
     let key = |s: &str| serde_yaml::Value::String(s.into());
     let mut changed = false;
+    if moved {
+        changed |= map.remove(key("queue_manual")).is_some();
+        changed |= map.remove(key("queue_inherit")).is_some();
+        if !column.auto_queue {
+            // Preserve any legacy registration receipt for cancellation, but
+            // invalidate the current intent/reservation so it cannot dispatch.
+            map.insert(key("execution_mode"), key("backlog"));
+            map.insert(key("queue_manual"), serde_yaml::Value::Bool(true));
+            for field in ["queue_state", "queue_state_since", "queue_reservation_id",
+                          "queue_reservation_expires_at", "queue_session_id", "queue_error"] {
+                map.remove(key(field));
+            }
+            changed = true;
+        }
+    }
     if newly_prioritized && map.get(key("queue_inherit")) != Some(&serde_yaml::Value::Bool(true)) {
         map.insert(key("queue_inherit"), serde_yaml::Value::Bool(true));
         changed = true;
@@ -3048,14 +3067,30 @@ fn queue_policy_text(
     let inherited = map.get(key("queue_inherit")).and_then(|v| v.as_bool()) == Some(true);
     let manual = map.get(key("queue_manual")).and_then(|v| v.as_bool()) == Some(true);
     let queued = map.get(key("execution_mode")).and_then(|v| v.as_str()) == Some("queue");
-    if (column.auto_queue || inherited) && !manual && !queued &&
-        map.get(key("queue_registration_attempt")).is_none() &&
-        map.get(key("queue_receipt")).is_none() &&
-        ensure_dependencies_complete_for(&snapshot.tasks, &task.depends_on).is_ok() {
-        map.insert(key("execution_mode"), key("queue"));
-        map.insert(key("queue_request"), key(&uuid::Uuid::new_v4().to_string()));
-        map.insert(key("queue_state"), key("queued"));
-        changed = true;
+    if (column.auto_queue || inherited) && !manual && !queued {
+        // An unretired legacy Queue registration cannot safely be replayed.
+        let old_request = map.get(key("queue_request")).and_then(|v| v.as_str());
+        let retired = old_request.is_some_and(|request|
+            map.get(key("queue_retired_receipt")).and_then(|v| v.as_str())
+                == Some(format!("qitem-taskboard-{request}").as_str()));
+        if map.get(key("queue_registration_attempt")).is_some() ||
+           map.get(key("queue_receipt")).is_some() {
+            if !retired {
+                if moved { return Err(TaskStoreError::Conflict(format!(
+                    "{} has an unreconciled Queue registration; cannot adopt destination Queue column", task.id))); }
+            } else {
+                for field in ["queue_registration_attempt", "queue_receipt", "queue_retired_receipt"] {
+                    map.remove(key(field));
+                }
+            }
+        }
+        if map.get(key("queue_registration_attempt")).is_none() &&
+           map.get(key("queue_receipt")).is_none() {
+            map.insert(key("execution_mode"), key("queue"));
+            map.insert(key("queue_request"), key(&uuid::Uuid::new_v4().to_string()));
+            map.insert(key("queue_state"), key("queued"));
+            changed = true;
+        }
     }
     if !changed { return Ok(text.to_owned()); }
     Ok(format!("---\n{}---\n{}", serde_yaml::to_string(&map)
