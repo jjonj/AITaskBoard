@@ -11,6 +11,8 @@ import { TASK_ICON_OPTIONS, TaskIconGlyph } from "./TaskIcons";
 import { TitleMarkup } from "./TitleMarkup";
 import { DependencyArrows } from "./DependencyArrows";
 import { humanDependencyStops } from "./humanDependencyStops";
+import { createDependencyWaitInspector, type DependencyBoardState } from "./dependencyWait";
+import "./dependencyWait.css";
 import "./humanDependencyStops.css";
 import { TaskLinkPicker } from "./TaskLinkPicker";
 import { AutoTextarea, DescriptionTimeline } from "./TaskDescriptionPanel";
@@ -643,14 +645,19 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   const remotePrerequisiteKey = (snapshot?.tasks ?? [])
     .flatMap((task) => task.depends_on).filter((id) => id.includes("#")).sort().join("|");
   const [remotePrerequisites, setRemotePrerequisites] = useState<Map<string, Task>>(() => new Map());
+  const [remoteDependencyBoards, setRemoteDependencyBoards] = useState<Map<string, DependencyBoardState>>(() => new Map());
   useEffect(() => {
     let cancelled = false;
     const references = remotePrerequisiteKey ? remotePrerequisiteKey.split("|") : [];
     const refreshRemote = async () => {
       const paths = [...new Set(references.map((id) => id.slice(0, id.lastIndexOf("#"))))];
       const boards = await Promise.all(paths.map(async (path) => {
-        try { return { path, board: await loadBoard(path) }; }
-        catch { return null; }
+        try {
+          const [board, executionModes] = await Promise.all([
+            loadBoard(path), taskExecutionModes(path).catch(() => null),
+          ]);
+          return { path, board, executionModes };
+        } catch { return null; }
       }));
       if (cancelled) return;
       const next = new Map<string, Task>();
@@ -659,6 +666,9 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
         for (const task of entry.board.tasks) next.set(`${entry.path}#${task.id}`, task);
       }
       setRemotePrerequisites(next);
+      setRemoteDependencyBoards(new Map(boards.filter(entry => !!entry).map(entry => [entry!.path, {
+        columns: entry!.board.config.columns, executionModes: entry!.executionModes,
+      }])));
     };
     void refreshRemote();
     const timer = window.setInterval(() => void refreshRemote(), 15_000);
@@ -1257,6 +1267,17 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   );
   const humanStops = useMemo(() => humanDependencyStops(activeTasks, columns), [activeTasks, columns]);
   const humanBlockedTaskCount = new Set(humanStops.stops.flatMap((stop) => stop.affectedIds)).size;
+  const waitStatusOf = useMemo(() => createDependencyWaitInspector({
+    tasks: snapshot?.tasks ?? [], columns, executionModes, pendingTaskQueue, pendingColumnQueue,
+    remoteTasks: remotePrerequisites, remoteBoards: remoteDependencyBoards, claimStates: claimHealth,
+  }), [snapshot, columns, executionModes, pendingTaskQueue, pendingColumnQueue,
+    remotePrerequisites, remoteDependencyBoards, claimHealth]);
+  const waitExplanation = (task: Task) => {
+    const status = waitStatusOf(task);
+    return status.stalled
+      ? `Automatic progress stopped:\n${status.reasons.map(reason => `• ${reason}`).join("\n")}`
+      : `Waiting for ${waitingFor(task).join(", ")}. Prerequisites are queued or claimed.`;
+  };
 
   // Keep the draft's destination column visible beside the editor sheet, not
   // merely somewhere underneath it. Recheck when switching columns or resizing.
@@ -4234,13 +4255,17 @@ Details: ${queueRecoveryWarning}`;
                             onMouseDown={event => event.stopPropagation()}
                             onClick={event => { event.stopPropagation(); void toggleTaskQueue(task); }}><QueueArrows /></button>;
                         })()}
-                        {task.kind === "task" && !isForUser(task) && readinessOf(task) !== "ready" && (
-                          <span className={`readiness-badge ${readinessOf(task)}`}
-                            title={readinessOf(task) === "waiting" ? awaitingUserAnswer(task) ? "Waiting for your answer" : `Waiting for ${waitingFor(task).join(", ")}` : readinessOf(task) === "ready" ? "Ready to start" : "Blocked"}
-                            aria-label={readinessOf(task) === "ready" ? "Ready to start" : readinessOf(task) === "waiting" ? awaitingUserAnswer(task) ? "Waiting for your answer" : `Waiting for ${waitingFor(task).join(", ")}` : "Blocked"}>
-                            {readinessOf(task) === "waiting" ? awaitingUserAnswer(task) ? "WAITING" : `WAIT ${waitingFor(task).length}` : readinessOf(task) === "blocked" ? "BLOCKED" : "\u25B6"}
-                          </span>
-                        )}
+                        {task.kind === "task" && !isForUser(task) && readinessOf(task) !== "ready" && (() => {
+                          const readiness = readinessOf(task);
+                          const stalled = readiness === "waiting" && waitStatusOf(task).stalled;
+                          const explanation = readiness === "waiting" ? waitExplanation(task)
+                            : `Blocked${task.blocked_reason ? `: ${task.blocked_reason}` : ""}`;
+                          return <span className={`readiness-badge ${readiness}${stalled ? " stalled" : ""}`}
+                            title={explanation} aria-label={explanation}
+                            onMouseEnter={(event) => { event.stopPropagation(); setHoverTask(null); }}>
+                            {readiness === "waiting" ? awaitingUserAnswer(task) ? "WAITING" : `WAIT ${waitingFor(task).length}` : "BLOCKED"}
+                          </span>;
+                        })()}
                         {!!task.attention.length && (
                           <div className="task-attention-icons">
                             {task.attention.includes("question") && (

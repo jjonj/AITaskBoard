@@ -1,0 +1,6 @@
+.readiness-badge.waiting.stalled {
+  background: #752830;
+  color: #ffd0d0;
+  box-shadow: inset 0 0 0 1px #a84852;
+  cursor: help;
+}
