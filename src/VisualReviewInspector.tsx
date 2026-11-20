@@ -147,21 +147,19 @@ export function VisualReviewInspector(props: Props) {
   const [upperHeight, setUpperHeight] = useState(() => {
     try {
       const remembered = Number(localStorage.getItem("taskboard.dashboardReview.controlsHeight"));
-      return Number.isFinite(remembered) && remembered >= 145 ? Math.min(remembered, 650) : defaultUpperHeight;
+      return Number.isFinite(remembered) && remembered >= 145 ? remembered : defaultUpperHeight;
     } catch { return defaultUpperHeight; }
   });
   const bodyRef = useRef<HTMLDivElement>(null);
 
   const dragOrigin = useRef<{ pointer: number; y: number; height: number } | null>(null);
-  // A saved control-strip height from a larger window must not push the
-  // Dashboard captures below the fold in a smaller window or at high DPI.
-  // Reserve most of the available height for the actual evidence gallery.
+  // Keep the evidence gallery visible, but allow the controls to use most of
+  // the window when the user drags the divider downward. clientHeight is
+  // already in CSS pixels, even at high DPI; dividing by devicePixelRatio
+  // again made the divider effectively immovable on scaled displays.
   const maxUpperHeight = () => {
     const height = bodyRef.current?.clientHeight ?? window.innerHeight;
-    // WebView2 can render at monitor DPI > 100% while reporting layout
-    // dimensions in unscaled pixels; only half this height is then visible.
-    const visibleHeight = height / Math.max(1, window.devicePixelRatio || 1);
-    return Math.max(145, Math.min(Math.floor(visibleHeight * 0.4), visibleHeight - 220));
+    return Math.max(145, Math.floor(height - Math.max(170, height * 0.2)));
   };
   const clampUpperHeight = (height: number) =>
     Math.max(145, Math.min(Math.round(height), maxUpperHeight()));
