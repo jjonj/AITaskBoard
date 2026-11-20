@@ -144,6 +144,20 @@ def client_crop(hwnd: int, first: np.ndarray) -> tuple[int, int, int, int]:
     y = max(0, round((point.y - bounds.top) * sy))
     w = min(sw - x, round((rect.right - rect.left) * sx))
     h = min(sh - y, round((rect.bottom - rect.top) * sy))
+    # WGC surfaces use physical GPU pixels. On DPI-virtualized Windows desktops,
+    # GetClientRect can report logical (e.g. 1600x900) coordinates while the
+    # exact same HWND supplies a 3204x1864 physical frame. Without compensating,
+    # recordings show only the top-left quarter of the game, falsely passing
+    # content/motion validation and hiding all on-screen combatants. Detect a
+    # matching per-axis display scale, never enlarge on an ordinary 1:1 frame.
+    horizontal_scale = (sw - x) / max(w, 1)
+    vertical_scale = (sh - y) / max(h, 1)
+    physical_scale = round(min(horizontal_scale, vertical_scale) * 4) / 4
+    if (physical_scale >= 1.25 and physical_scale <= 4.0
+            and abs(horizontal_scale - physical_scale) < 0.16
+            and abs(vertical_scale - physical_scale) < 0.16):
+        w = min(sw - x, round(w * physical_scale))
+        h = min(sh - y, round(h * physical_scale))
     # UE Preview can report its custom caption as client pixels. Inspect
     # the first real WGC frame rather than assuming a constant titlebar size.
     if y < 3 and h >= sh - 3 and sh >= 90:
