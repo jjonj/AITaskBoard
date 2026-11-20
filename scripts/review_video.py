@@ -239,7 +239,7 @@ def trim(args):
         raise ValueError("Output must differ from input")
     output.parent.mkdir(parents=True, exist_ok=True)
     command(["-ss", str(args.start), "-i", str(source), "-t", str(args.seconds),
-             "-c:v", "libx264", "-preset", "veryfast", "-crf", "27",
+             "-c:v", "libx264", "-preset", "veryfast", "-crf", "12",
              "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", str(output)])
     print(str(output))
 
@@ -252,7 +252,7 @@ def main():
         p.add_argument("--raw", type=Path, required=True, help="Raw capture filename (.mkv)")
         p.add_argument("--title", help="Exact visible window title; omitted = entire desktop")
         p.add_argument("--audio-device", default="", help="Explicit opt-in DirectShow audio device, e.g. VB-Audio cable output; default silent")
-        p.add_argument("--fps", type=int, default=20)
+        p.add_argument("--fps", type=int, default=30)
         p.add_argument("--max-seconds", type=int, default=LIMIT)
         if name != "record":
             p.add_argument("--state", type=Path, required=True)
@@ -264,9 +264,9 @@ def main():
     p.add_argument("source", type=Path)
     p.add_argument("output", type=Path)
     p.add_argument("--poster", type=Path)
-    p.add_argument("--fps", type=int, default=20)
-    p.add_argument("--width", type=int, default=1280)
-    p.add_argument("--crf", type=int, default=27)
+    p.add_argument("--fps", type=int, default=30)
+    p.add_argument("--width", type=int, default=1920)
+    p.add_argument("--crf", type=int, default=12)
     p = sub.add_parser("poster")
     p.add_argument("source", type=Path)
     p.add_argument("output", type=Path)
