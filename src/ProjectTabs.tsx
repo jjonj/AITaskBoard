@@ -793,7 +793,8 @@ export function ProjectTabs({ Board }: Props) {
     <div className="project-shell">
       {switchHint && <div className="project-switch-hint" role="status">Switching to {switchHint} · Ctrl+Tab</div>}
       <div className="project-tabs" ref={tabStrip} role="tablist" aria-label="Project task boards">
-        <QueueIntelligence data={globalQueueWorkload} error={queueWorkloadError} />
+        <QueueIntelligence data={globalQueueWorkload} error={queueWorkloadError}
+          onOpenTask={(path, taskId) => setStartupTask({ path, taskId, requestKey: Date.now() })} />
         {catalog?.projects.map((project) => {
           const inboxCount = project.id === catalog.activeId && liveInboxCounts[project.path] !== undefined
             ? liveInboxCounts[project.path] : visibleInboxCount(project);

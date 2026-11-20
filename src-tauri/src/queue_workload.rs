@@ -1,8 +1,10 @@
 //! Global estimate of remaining tasks the T3 Keep Busy dispatcher can eventually pick up.
 //! Dependency gates are evaluated transitively, including cross-board links.
-use std::collections::{HashMap, HashSet};
+use std::{collections::{HashMap, HashSet}, io::Write, path::PathBuf, process::{Command, Stdio}};
 use serde::Serialize;
-use chrono::{DateTime, Duration, Local, NaiveDate};
+use serde_json::{json, Value};
+use chrono::{DateTime, Duration, Local, NaiveDate, Utc};
+use crate::projects::ProjectPriority;
 use task_core::{ExecutionMode, FsTaskStore, QueueState, TaskAttention, TaskKind, TaskStore};
 
 #[derive(Serialize)]
@@ -14,6 +16,24 @@ pub(crate) struct QueueWorkload {
     pub projects: Vec<ProjectWorkload>,
     pub pulse: WorkloadPulse,
     pub unavailable_boards: Vec<String>,
+    pub next_pickups: Vec<NextPickup>,
+    pub pickup_note: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NextPickup {
+    pub board_path: String,
+    pub project: String,
+    pub task_id: String,
+    pub title: String,
+    pub urgent: bool,
+    pub project_priority: ProjectPriority,
+}
+
+struct PickupCandidate {
+    details: NextPickup,
+    created: String,
 }
 
 #[derive(Serialize)]
@@ -83,6 +103,78 @@ struct WorkItem {
     project_index: usize,
 }
 
+fn project_rank(priority: ProjectPriority) -> u8 {
+    match priority { ProjectPriority::High => 0, ProjectPriority::Normal => 1, ProjectPriority::Low => 2 }
+}
+
+fn numeric_id(id: &str) -> u64 {
+    id.rsplit_once('-').and_then(|(_, suffix)| suffix.parse().ok()).unwrap_or(u64::MAX)
+}
+
+// T3 treats both today and yesterday's date-only cards as possibly created in the last 24 hours.
+fn recent_card(created: &str, today: NaiveDate, now: DateTime<Utc>) -> bool {
+    if let Ok(day) = NaiveDate::parse_from_str(created, "%Y-%m-%d") {
+        return day <= today && day >= today - Duration::days(1);
+    }
+    DateTime::parse_from_rfc3339(created).is_ok_and(|date|
+        date.with_timezone(&Utc) <= now && date.with_timezone(&Utc) >= now - Duration::hours(24))
+}
+
+fn t3_read(input: Value) -> Result<Value, String> {
+    let script = r"D:\SSDProjects\Tools\t3code\scripts\chatgpt-sessions.mjs";
+    if !std::path::Path::new(script).is_file() { return Err("T3 session bridge unavailable".into()); }
+    let home = std::env::var_os("T3CODE_HOME").map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(|h| PathBuf::from(h).join(".t3")))
+        .ok_or("T3 home unavailable")?;
+    let mut cmd = Command::new("node.exe");
+    cmd.env("T3CODE_HOME", home).arg(script)
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    #[cfg(windows)] {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("T3 session bridge unavailable: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(input.to_string().as_bytes()).map_err(|e| e.to_string())?;
+    }
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !output.status.success() { return Err("T3 session inventory unavailable".into()); }
+    serde_json::from_slice(&output.stdout).map_err(|_| "Unreadable T3 session inventory".into())
+}
+
+// The same load T3 Keep Busy uses: all green sessions, including manual workers,
+// mapped by exact task binding first and unique project name second.
+fn working_load(projects: &[(String, String, String)]) -> Result<HashMap<String, usize>, String> {
+    let capacity = t3_read(json!({"action":"caffy","op":"capacity"}))?;
+    let inventory = t3_read(json!({"action":"list","which":"all","includeHidden":true}))?;
+    let ids = capacity["workingIds"].as_array().ok_or("T3 working session IDs unavailable")?;
+    let sessions = inventory["sessions"].as_array().ok_or("T3 session inventory missing")?;
+    let mut names: HashMap<String, Option<String>> = HashMap::new();
+    let roots: HashSet<String> = projects.iter().map(|(root, _, _)| root.clone()).collect();
+    for (root, name, id) in projects {
+        for label in [name, id] {
+            let label = label.trim().to_lowercase();
+            if label.is_empty() { continue; }
+            match names.get(&label) {
+                Some(Some(previous)) if previous != root => { names.insert(label, None); }
+                None => { names.insert(label, Some(root.clone())); }
+                _ => {}
+            }
+        }
+    }
+    let mut load = HashMap::new();
+    for working in ids {
+        let Some(id) = working.as_str() else { continue; };
+        let Some(session) = sessions.iter().find(|s| s["id"].as_str() == Some(id)) else { continue; };
+        let bound = session["binding"]["taskRef"]["board"].as_str()
+            .map(|root| key(root, "")).map(|root| root.trim_end_matches('#').to_string());
+        let owner = bound.filter(|root| roots.contains(root)).or_else(||
+            session["project"].as_str().and_then(|name| names.get(&name.trim().to_lowercase()).cloned().flatten()));
+        if let Some(root) = owner { *load.entry(root).or_insert(0) += 1; }
+    }
+    Ok(load)
+}
+
 fn key(root: &str, id: &str) -> String {
     format!("{}#{id}", root.replace('\\', "/").trim_end_matches('/').to_lowercase())
 }
@@ -115,6 +207,11 @@ fn eventually_executable(
 pub(crate) async fn read() -> Result<QueueWorkload, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let projects = super::projects::list_projects_sync()?;
+        let hidden: HashSet<String> = projects.hidden_paths.iter()
+            .map(|path| key(path, "").trim_end_matches('#').to_string()).collect();
+        let mut known_projects = Vec::<(String, String, String)>::new();
+        let mut candidates = HashMap::<String, PickupCandidate>::new();
+        let mut startup_load = HashMap::<String, usize>::new();
         let store = FsTaskStore::default();
         let mut all = HashMap::<String, WorkItem>::new();
         let mut unavailable_boards = Vec::new();
@@ -133,11 +230,16 @@ pub(crate) async fn read() -> Result<QueueWorkload, String> {
 
         for project in projects.projects {
             let root = project.path;
+            let project_name = project.name.clone();
+            let project_priority = project.priority;
+            let project_id = project.id.clone();
+            let board_key = key(&root, "").trim_end_matches('#').to_string();
             if !seen.insert(root.replace('\\', "/").trim_end_matches('/').to_lowercase()) { continue; }
             let snapshot = match store.load(std::path::Path::new(&root)) {
                 Ok(board) => board,
                 Err(_) => { unavailable_boards.push(project.name); continue; }
             };
+            known_projects.push((board_key.clone(), project_name.clone(), project_id));
             let project_index = project_workloads.len();
             project_workloads.push(ProjectWorkload {
                 name: project.name, count: 0, ready_now: 0, dependency_waiting: 0,
@@ -196,6 +298,17 @@ pub(crate) async fn read() -> Result<QueueWorkload, String> {
                     Err(_) => continue,
                 };
                 let phase = intent.queue_state.unwrap_or(QueueState::Queued);
+                if intent.queue_reservation_id.is_some() && match phase {
+                    QueueState::Reserved => intent.queue_reservation_expires_at.as_deref()
+                        .and_then(|stamp| DateTime::parse_from_rfc3339(stamp).ok())
+                        .is_some_and(|until| until.with_timezone(&Utc) > Utc::now()),
+                    QueueState::Starting => intent.queue_state_since.as_deref()
+                        .and_then(|stamp| DateTime::parse_from_rfc3339(stamp).ok())
+                        .is_some_and(|since| Utc::now() - since.with_timezone(&Utc) < Duration::minutes(5)),
+                    _ => false,
+                } {
+                    *startup_load.entry(board_key.clone()).or_insert(0) += 1;
+                }
                 let legacy_pending = (intent.queue_attempt.is_some() || intent.queue_receipt.is_some())
                     && intent.queue_retired_receipt.as_deref() != intent.queue_request.as_ref()
                         .map(|request| format!("qitem-taskboard-{request}")).as_deref();
@@ -216,7 +329,18 @@ pub(crate) async fn read() -> Result<QueueWorkload, String> {
                     phase == QueueState::Queued && eligible_column &&
                     !human_waiting && !technical_block && task_core::recurring_due(task);
                 let dependencies = task.depends_on.iter().map(|dep| prerequisite_key(&root, dep)).collect();
-                if queued { queued_creation_dates.insert(id.clone(), task_day(&task.created)); }
+                if queued {
+                    queued_creation_dates.insert(id.clone(), task_day(&task.created));
+                    if !hidden.contains(&board_key) && uuid::Uuid::parse_str(intent.queue_request.as_deref().unwrap_or("")).is_ok()
+                        && task_core::queue_task_ready(&snapshot, task) {
+                        candidates.insert(id.clone(), PickupCandidate {
+                            details: NextPickup { board_path: root.clone(), project: project_name.clone(),
+                                task_id: task.id.clone(), title: task.title.clone(),
+                                urgent: task.attention.contains(&TaskAttention::Priority), project_priority },
+                            created: task.created.clone(),
+                        });
+                    }
+                }
                 all.insert(id, WorkItem { done: false, queued, in_flight, dependencies, project_index });
             }
         }
@@ -245,10 +369,35 @@ pub(crate) async fn read() -> Result<QueueWorkload, String> {
         for project in &mut project_workloads {
             project.dependency_waiting = project.count - project.ready_now;
         }
+        let (mut board_load, pickup_note) = match working_load(&known_projects) {
+            Ok(load) => (load, None),
+            Err(reason) => (HashMap::new(), Some(format!("T3 live workload unavailable ({reason}); project balancing is approximate."))),
+        };
+        for (board, count) in startup_load {
+            *board_load.entry(board).or_insert(0) += count;
+        }
+        let now = Utc::now();
+        let mut next_pickups = candidates.into_iter()
+            .filter(|(id, _)| all.get(id).is_some_and(|work| work.queued) &&
+                all.get(id).is_some_and(|work| work.dependencies.iter().all(|dep|
+                    all.get(dep).is_some_and(|item| item.done))))
+            .map(|(_, candidate)| candidate).collect::<Vec<_>>();
+        next_pickups.sort_by(|a, b| {
+            let board_a = key(&a.details.board_path, "").trim_end_matches('#').to_string();
+            let board_b = key(&b.details.board_path, "").trim_end_matches('#').to_string();
+            b.details.urgent.cmp(&a.details.urgent)
+                .then_with(|| board_load.get(&board_a).unwrap_or(&0).cmp(board_load.get(&board_b).unwrap_or(&0)))
+                .then_with(|| project_rank(a.details.project_priority).cmp(&project_rank(b.details.project_priority)))
+                .then_with(|| recent_card(&b.created, today, now).cmp(&recent_card(&a.created, today, now)))
+                .then_with(|| numeric_id(&a.details.task_id).cmp(&numeric_id(&b.details.task_id)))
+                .then_with(|| board_a.cmp(&board_b))
+                .then_with(|| a.details.task_id.cmp(&b.details.task_id))
+        });
+        let next_pickups = next_pickups.into_iter().take(10).map(|item| item.details).collect();
         project_workloads.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
         Ok(QueueWorkload {
             count, ready_now, dependency_waiting: count - ready_now,
-            projects: project_workloads, pulse, unavailable_boards,
+            projects: project_workloads, pulse, unavailable_boards, next_pickups, pickup_note,
         })
     }).await.map_err(|error| format!("Global queue scan failed: {error}"))?
 }

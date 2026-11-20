@@ -192,6 +192,20 @@
 .queue-insight-insight b { display: block; color: #d8e8ef; font-size: 11px; }
 .queue-insight-insight p { margin: 4px 0 0; font-size: 10px; color: #9ab0be; }
 .queue-insight-insight strong { color: #aeeed6; font-size: 13px; }
+.queue-insight-next { padding-bottom: 12px; }
+.queue-insight-pickups { display: grid; gap: 3px; margin: 12px 0 0; padding: 0; list-style: none; counter-reset: pickup; }
+.queue-insight-pickups li { counter-increment: pickup; display: flex; align-items: center; gap: 9px; }
+.queue-insight-pickups li::before { content: counter(pickup, decimal-leading-zero); color: #6b8a9c; font-size: 10px; font-variant-numeric: tabular-nums; width: 20px; flex-shrink: 0; }
+.queue-insight-pickups button { flex: 1; min-width: 0; display: flex; gap: 10px; align-items: center; border: 1px solid #354b58; border-radius: 7px; background: #1b2d38; color: #d5e6ef; text-align: left; padding: 8px 9px; }
+.queue-insight-pickups button:hover { background: #254237; border-color: #579e85; }
+.queue-insight-pickup-id { flex: 0 0 76px; color: #8edec2; font-weight: 760; font-variant-numeric: tabular-nums; }
+.queue-insight-pickup-body { flex: 1; min-width: 0; }
+.queue-insight-pickup-body strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 690; }
+.queue-insight-pickup-body small { display: block; font-size: 10px; color: #93adbb; }
+.queue-insight-urgent { white-space: nowrap; color: #f0c17a; font-size: 10px; font-weight: 770; }
+.queue-insight-pickup-arrow { color: #89a9b9; }
+.queue-insight-pickup-note { padding: 8px 10px; margin: 10px 0 0; color: #f0c990; background: #54402a55; border: 1px solid #755e3c; border-radius: 6px; font-size: 10px; }
+.queue-insight-pickup-disclaimer { margin: 9px 0 0; color: #7894a3; font-size: 10px; }
 .queue-insight-project-section { padding-bottom: 15px; }
 .queue-insight-count { display: inline-block; min-width: 22px; padding: 2px 5px; border-radius: 5px; background: #2c414e; color: #b2c9d5; font-size: 10px; text-align: center; margin-left: 4px; vertical-align: 1px; }
 .queue-insight-projects { margin-top: 12px; display: grid; gap: 0; }

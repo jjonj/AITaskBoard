@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import type { ProjectQueueWorkload, QueueWorkload, WorkloadPulse } from "./api";
 import "./QueueIntelligence.css";
 
-type Props = { data: QueueWorkload | null; error: boolean };
+type Props = { data: QueueWorkload | null; error: boolean; onOpenTask: (boardPath: string, taskId: string) => void };
 type SortMode = "queue" | "closed" | "open";
 type WindowDays = 14 | 30;
 
@@ -131,7 +131,7 @@ function ProjectRow({ project, maxQueue }: { project: ProjectQueueWorkload; maxQ
   </div>;
 }
 
-export function QueueIntelligence({ data, error }: Props) {
+export function QueueIntelligence({ data, error, onOpenTask }: Props) {
   const [open, setOpen] = useState(false);
   const [pinned, setPinned] = useState(false);
   const [days, setDays] = useState<WindowDays>(14);
@@ -238,6 +238,27 @@ export function QueueIntelligence({ data, error }: Props) {
                 <div><b className="queue-insight-green">{fmt(data.readyNow)}</b><span>Ready for pickup</span></div>
                 <div><b className="queue-insight-gold">{fmt(data.dependencyWaiting)}</b><span>Waiting on dependencies</span></div>
               </div>
+            </div>
+            <div className="queue-insight-section queue-insight-next">
+              <div className="queue-insight-section-heading">
+                <div><h3>Next 10 likely pickups <span className="queue-insight-count">{data.nextPickups.length}</span></h3>
+                  <p>Estimated T3 Keep Busy order · live priority, project load and task age</p></div>
+              </div>
+              {data.pickupNote && <p className="queue-insight-pickup-note" role="status">{data.pickupNote}</p>}
+              {!!data.unavailableBoards.length && <p className="queue-insight-pickup-note">Some boards could not be scanned; the order is incomplete.</p>}
+              <ol className="queue-insight-pickups">
+                {data.nextPickups.map((task) => <li key={task.boardPath + task.taskId}>
+                  <button type="button" title={`Open ${task.taskId} in ${task.project}`}
+                    onClick={() => { onOpenTask(task.boardPath, task.taskId); setOpen(false); setPinned(false); }}>
+                    <span className="queue-insight-pickup-id">{task.taskId}</span>
+                    <span className="queue-insight-pickup-body"><strong>{task.title}</strong><small>{task.project}{task.projectPriority !== "normal" ? ` · ${task.projectPriority} project` : ""}</small></span>
+                    {task.urgent && <span className="queue-insight-urgent">! Priority</span>}
+                    <span className="queue-insight-pickup-arrow" aria-hidden="true">↗</span>
+                  </button>
+                </li>)}
+              </ol>
+              {!data.nextPickups.length && <p className="queue-insight-empty">No dispatchable queued tasks right now.</p>}
+              <p className="queue-insight-pickup-disclaimer">Prediction only. T3 rechecks readiness, live session load and capacity at pickup time; failed starts may temporarily change this order.</p>
             </div>
             <div className="queue-insight-metrics">
               <div><span>CLOSED · LAST 7D</span><strong>{fmt(pulse?.closed7 ?? 0)}</strong>

@@ -168,9 +168,14 @@ export type WorkloadPulse = {
   closed30: number; created7: number; createdPrev7: number; created30: number;
   daily: { day: string; closed: number; created: number }[];
 };
+export type NextPickup = {
+  boardPath: string; project: string; taskId: string; title: string;
+  urgent: boolean; projectPriority: "high" | "normal" | "low";
+};
 export type QueueWorkload = {
   count: number; readyNow: number; dependencyWaiting: number;
   projects: ProjectQueueWorkload[]; pulse: WorkloadPulse; unavailableBoards: string[];
+  nextPickups: NextPickup[]; pickupNote: string | null;
 };
 /** Global estimate of remaining T3 Keep Busy pickup work, including queued dependency chains. */
 export const taskQueueWorkload = () => invoke<QueueWorkload>("task_queue_workload");
