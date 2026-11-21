@@ -21,7 +21,7 @@ import { TaskImageGallery, type PendingClipboardImage } from "./TaskImageGallery
 import { ReviewView } from "./ReviewView";
 import { useRememberedInbox } from "./useRememberedInbox";
 import { isUserQueueEligible } from "./userQueueEligibility";
-import { isInboxItemSnoozed, readInboxSnoozes } from "./inboxSnoozes";
+import { inboxRequestKey, isInboxItemSnoozed, readInboxSnoozes } from "./inboxSnoozes";
 import { attachImagesToDescription, parseDescriptionTimeline, prepareTaskDraftForSave, updateInitialDescription } from "./descriptionTimeline";
 import { applyCardPlacements, orderCardsByDependencies } from "./dependencyLayout";
 import { withEpicProxyRows } from "./epicProxyRows";
@@ -774,7 +774,9 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     return () => window.removeEventListener("focus", reload);
   }, []);
   useEffect(() => {
-    const nextExpiry = Math.min(...Object.values(inboxSnoozes).filter((until) => Number(until) > Date.now()));
+    const nextExpiry = Math.min(...Object.values(inboxSnoozes)
+      .map((entry) => typeof entry === "number" ? entry : entry.until)
+      .filter((until) => until > Date.now()));
     if (!Number.isFinite(nextExpiry)) return;
     const timer = window.setTimeout(() => setInboxSnoozes(readInboxSnoozes()),
       Math.max(1, Math.min(2147483647, nextExpiry - Date.now() + 20)));
@@ -1371,8 +1373,8 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
   );
   // Match the actual Inbox queue: locally snoozed reviews/requests are not pending.
   const inboxCount = activeTasks.filter((task) => task.review_status === "open" &&
-    !isInboxItemSnoozed(inboxSnoozes, boardPath, task.id)).length +
-    userQueueTasks.filter((task) => !isInboxItemSnoozed(inboxSnoozes, boardPath, task.id)).length;
+    !isInboxItemSnoozed(inboxSnoozes, boardPath, task.id, inboxRequestKey(task))).length +
+    userQueueTasks.filter((task) => !isInboxItemSnoozed(inboxSnoozes, boardPath, task.id, inboxRequestKey(task))).length;
   useEffect(() => {
     if (snapshot) onInboxCount?.(boardPath, inboxCount);
   }, [boardPath, inboxCount, onInboxCount, snapshot]);
@@ -4356,7 +4358,8 @@ Details: ${queueRecoveryWarning}`;
               void loadBoard(boardPath).then(applySnapshot).catch((cause) => setError(String(cause)));
             }}
             onSnoozeUserTask={(task, path, until) => {
-              setInboxSnoozes((current) => ({ ...current, [`${path}|${task.id}`]: until }));
+              setInboxSnoozes((current) => ({ ...current,
+                [`${path}|${task.id}`]: { until, requestKey: inboxRequestKey(task) } }));
               window.dispatchEvent(new Event("taskboard:queue-changed"));
               if (path === boardPath) {
                 setUserQueueSnoozes((current) => ({

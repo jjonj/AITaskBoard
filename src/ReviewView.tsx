@@ -7,6 +7,7 @@ import { reviewAsset, reviewClose, reviewReconsider, reviewResolve, reviewShow,
   type ReviewArtifact, type ReviewManifest, type ReviewPin } from "./reviewApi";
 import type { Task } from "./types";
 import { isUserQueueEligible } from "./userQueueEligibility";
+import { inboxRequestKey, isInboxItemSnoozed, type InboxSnoozes } from "./inboxSnoozes";
 import { VisualReviewInspector } from "./VisualReviewInspector";
 import { InboxQueueSidebar, type InboxQueueItem } from "./InboxQueueSidebar";
 import { InboxResponseFooter, reviewOutcomes } from "./InboxResponseFooter";
@@ -90,7 +91,7 @@ function htmlIndexPath(path: string) {
     ? normalized : normalized.replace(/\/$/, "") + "/index.html";
 }
 const REVIEW_SNOOZES_KEY = "taskboard.inboxSnoozes";
-const loadReviewSnoozes = (): Record<string, number> => {
+const loadReviewSnoozes = (): InboxSnoozes => {
   try {
     const raw = JSON.parse(window.localStorage.getItem(REVIEW_SNOOZES_KEY) || "{}");
     return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
@@ -150,7 +151,7 @@ export function ReviewView({ project, onClose, editorOpen = false, initialTaskId
   const [userAnswer, setUserAnswer] = useState("");
   const [checkboxAnswers, setCheckboxAnswers] = useState<CheckboxAnswers>({});
   const [lastAnswered, setLastAnswered] = useState<AnswerUndo | null>(null);
-  const [snoozedLocally, setSnoozedLocally] = useState<Record<string, number>>(loadReviewSnoozes);
+  const [snoozedLocally, setSnoozedLocally] = useState<InboxSnoozes>(loadReviewSnoozes);
   const [responseOutcome, setResponseOutcome] = useState("");
   const [moreOpen, setMoreOpen] = useState(false);
   const [inboxImages, setInboxImages] = useState<Array<{dataUrl:string;mime:string;name:string}>>([]);
@@ -344,7 +345,7 @@ export function ReviewView({ project, onClose, editorOpen = false, initialTaskId
         .filter((item) => !pendingResponses.current.has(keyOf(item)) &&
           (item.historical || (
             !(Number(locallyHidden.current.get(keyOf(item))) > Date.now()) &&
-            !(Number(snoozedLocally[keyOf(item)]) > Date.now()))));
+            !isInboxItemSnoozed(snoozedLocally, item.path, item.task.id, inboxRequestKey(item.task)))));
       pending.sort((a, b) => Number(!!a.historical) - Number(!!b.historical) ||
         b.task.created.localeCompare(a.task.created) || a.task.id.localeCompare(b.task.id));
       if (pending.length) hasShownFeedback.current = true;
@@ -620,7 +621,7 @@ export function ReviewView({ project, onClose, editorOpen = false, initialTaskId
       !pendingResponses.current.has(keyOf(item)) &&
       !(Number(locallyHidden.current.get(keyOf(item))) > Date.now()) &&
       !skippedThisPass.current.has(keyOf(item)) &&
-      !(Number(snoozedLocally[keyOf(item)]) > Date.now()));
+      !isInboxItemSnoozed(snoozedLocally, item.path, item.task.id, inboxRequestKey(item.task)));
     if (next) setSelectedKey(keyOf(next));
     else if (backgroundSave || showResolved) setSelectedKey("");
     else onClose();
@@ -631,7 +632,7 @@ export function ReviewView({ project, onClose, editorOpen = false, initialTaskId
     const key = keyOf(item);
     locallyHidden.current.set(key, until);
     setSnoozedLocally((current) => {
-      const updated = { ...current, [key]: until };
+      const updated = { ...current, [key]: { until, requestKey: inboxRequestKey(item.task) } };
       if (persist) {
         try { window.localStorage.setItem(REVIEW_SNOOZES_KEY, JSON.stringify(updated)); }
         catch { /* An in-memory snooze still works if browser storage is unavailable. */ }

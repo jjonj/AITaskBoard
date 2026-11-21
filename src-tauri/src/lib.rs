@@ -70,6 +70,7 @@ struct UserQueueProjectIds {
     path: String,
     eligible_ids: Vec<String>,
     review_ids: Vec<String>,
+    request_keys: std::collections::HashMap<String, String>,
     error: Option<String>,
 }
 
@@ -80,33 +81,47 @@ async fn user_queue_project_ids(paths: Vec<String>) -> Vec<UserQueueProjectIds> 
             Ok(board) => {
                 let terminal: std::collections::HashSet<_> = board.config.columns.iter()
                     .filter(|column| column.terminal).map(|column| column.id.as_str()).collect();
-                let ids = board.tasks.iter().filter(|task| {
+                let ids: Vec<String> = board.tasks.iter().filter(|task| {
                     let review = task.review_status.as_deref();
                     if matches!(review, Some("open" | "awaiting_revision")) { return false; }
                     let independent_question = task.question.as_ref()
                         .is_some_and(|q| !q.prompt.trim().is_empty() && q.answer.is_none()) &&
                         task.attention.contains(&task_core::TaskAttention::Question);
                     if review == Some("resolved") && !independent_question { return false; }
-                    ((task.kind == TaskKind::Task &&
-                      task.attention.contains(&task_core::TaskAttention::Question) &&
-                      task.question.as_ref().is_some_and(|q| !q.prompt.trim().is_empty() && q.answer.is_none())) ||
-                     ((task.kind == TaskKind::ForUser ||
-                       (task.kind == TaskKind::Task && task.attention.contains(&task_core::TaskAttention::NeedsUser))) &&
-                      task.completed.is_none() && !terminal.contains(task.column.as_str()))) &&
+                    let pending_question = task.kind == TaskKind::Task && independent_question;
+                    let user_owned = task.kind == TaskKind::ForUser ||
+                        (task.kind == TaskKind::Task &&
+                         task.attention.contains(&task_core::TaskAttention::NeedsUser));
                     !task.archived &&
-                    task.depends_on.iter().all(|id| board.tasks.iter().any(|dep| {
+                    (pending_question || (user_owned && task.completed.is_none() &&
+                        !terminal.contains(task.column.as_str()))) &&
+                    (pending_question || task.depends_on.iter().all(|id| board.tasks.iter().any(|dep| {
                         dep.id == *id &&
                         (dep.archived || dep.completed.is_some() ||
                          terminal.contains(dep.column.as_str()))
-                    }))
+                    })))
                 }).map(|task| task.id.clone()).collect();
-                let review_ids = board.tasks.iter()
+                let review_ids: Vec<String> = board.tasks.iter()
                     .filter(|task| !task.archived && task.review_status.as_deref() == Some("open"))
                     .map(|task| task.id.clone()).collect();
-                UserQueueProjectIds { path, eligible_ids: ids, review_ids, error: None }
+                let requested: std::collections::HashSet<&str> = ids.iter().chain(review_ids.iter())
+                    .map(String::as_str).collect();
+                let request_keys = board.tasks.iter().filter(|task| requested.contains(task.id.as_str()))
+                    .map(|task| {
+                        let key = if task.review_status.as_deref() == Some("open") {
+                            format!("review:{}:{}", task.review_round.unwrap_or(0),
+                                task.question.as_ref().map(|q| q.prompt.as_str()).unwrap_or_default())
+                        } else if task.kind == TaskKind::Task &&
+                            task.attention.contains(&task_core::TaskAttention::Question) &&
+                            task.question.as_ref().is_some_and(|q| !q.prompt.trim().is_empty() && q.answer.is_none()) {
+                            format!("question:{}", task.question.as_ref().unwrap().prompt)
+                        } else { "user".to_string() };
+                        (task.id.clone(), key)
+                    }).collect();
+                UserQueueProjectIds { path, eligible_ids: ids, review_ids, request_keys, error: None }
             }
             Err(err) => UserQueueProjectIds { path, eligible_ids: vec![], review_ids: vec![],
-                error: Some(err.to_string()) },
+                request_keys: Default::default(), error: Some(err.to_string()) },
         }
     }).collect()).await.unwrap_or_default()
 }

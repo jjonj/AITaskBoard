@@ -71,7 +71,7 @@ export const loadBoard = (path?: string) =>
 export const loadQuickBoard = (path: string) =>
   invoke<BoardSnapshot>("load_quick_board", { path });
 
-export type UserQueueProjectIds = { path: string; eligibleIds: string[]; reviewIds: string[]; error: string | null };
+export type UserQueueProjectIds = { path: string; eligibleIds: string[]; reviewIds: string[]; requestKeys: Record<string, string>; error: string | null };
 export const userQueueProjectIds = (paths: string[]) =>
   invoke<UserQueueProjectIds[]>("user_queue_project_ids", { paths });
 

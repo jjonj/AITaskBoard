@@ -35,6 +35,14 @@ test("an unanswered AI question appears in Inbox even when implementation is Don
   assert.equal(isUserQueueEligible({ ...pending, attention: [] }, board(pending), {}), false);
 });
 
+test("unanswered questions bypass unfinished task prerequisites and older queue snoozes", () => {
+  const pending = task("WT-0176", {
+    column: "blocked", depends_on: ["WT-0193"], attention: ["question"],
+    question: { prompt: "Approve this club motion?", options: [], answer: null },
+  });
+  assert.equal(isUserQueueEligible(pending, board(pending), { "WT-0176": Date.now() + 86400000 }), true);
+});
+
 test("ordinary AI questions request feedback without creating For user cards", () => {
   const pending = task("T3-0100", { attention: ["question"],
     question: { prompt: "Choose A or B", options: ["A", "B"], answer: null } });

@@ -221,7 +221,7 @@ export function ProjectTabs({ Board }: Props) {
   const [draggingTab, setDraggingTab] = useState<string | null>(null);
   const [dropTab, setDropTab] = useState<TabDrop | null>(null);
   const [changedProjects, setChangedProjects] = useState<Record<string, boolean>>({});
-  const [inboxIdsByPath, setInboxIdsByPath] = useState<Record<string, { eligibleIds: string[]; reviewIds: string[] }>>({});
+  const [inboxIdsByPath, setInboxIdsByPath] = useState<Record<string, { eligibleIds: string[]; reviewIds: string[]; requestKeys: Record<string, string> }>>({});
   // The mounted board owns the live Inbox count; unmounted tabs use the backend scan.
   const [liveInboxCounts, setLiveInboxCounts] = useState<Record<string, number>>({});
   const rememberInboxCount = (path: string, count: number) => {
@@ -365,7 +365,7 @@ export function ProjectTabs({ Board }: Props) {
           const next = { ...current };
           for (const row of rows) {
             // Offline boards have an unknown count, not an invented zero.
-            if (!row.error) next[row.path] = { eligibleIds: row.eligibleIds, reviewIds: row.reviewIds };
+            if (!row.error) next[row.path] = { eligibleIds: row.eligibleIds, reviewIds: row.reviewIds, requestKeys: row.requestKeys };
             else delete next[row.path];
           }
           return next;
@@ -388,7 +388,7 @@ export function ProjectTabs({ Board }: Props) {
   }, [catalog?.projects]);
 
   const visibleInboxCount = (project: ProjectTab): number => {
-    const { eligibleIds = [], reviewIds = [] } = inboxIdsByPath[project.path] ?? {};
+    const { eligibleIds = [], reviewIds = [], requestKeys = {} } = inboxIdsByPath[project.path] ?? {};
     const key = project.id === "wartribes"
       ? "taskboard.userQueueSnoozes"
       : `taskboard.project.${project.id}.userQueueSnoozes`;
@@ -399,9 +399,10 @@ export function ProjectTabs({ Board }: Props) {
 
 
     const now = Date.now();
-    const notSnoozedInInbox = (id: string) => !isInboxItemSnoozed(inboxSnoozes, project.path, id, now);
+    const notSnoozedInInbox = (id: string) => !isInboxItemSnoozed(inboxSnoozes, project.path, id, requestKeys[id] ?? "user", now);
     return reviewIds.filter(notSnoozedInInbox).length +
-      eligibleIds.filter((id) => notSnoozedInInbox(id) && !(Number(userSnoozes[id]) > now)).length;
+      eligibleIds.filter((id) => notSnoozedInInbox(id) &&
+        (requestKeys[id]?.startsWith("question:") || !(Number(userSnoozes[id]) > now))).length;
   };
 
   // The active board owns its snapshot and mutation locks. Ask it to refresh

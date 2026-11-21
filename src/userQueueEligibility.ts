@@ -1,4 +1,5 @@
 import type { BoardSnapshot, Task } from "./types";
+import { hasPendingQuestion } from "./inboxSnoozes.ts";
 
 export type UserQueueSnoozes = Record<string, number>;
 
@@ -9,7 +10,8 @@ export type UserQueueSnoozes = Record<string, number>;
  * the downstream item enters the human inbox.
  *
  * Missing prerequisite IDs are not silently treated as complete.
- * Attention/question flags do not bypass prerequisites.
+ * Unanswered AI questions are immediate human requests; ordinary For user
+ * work still waits for its prerequisites.
  */
 export const hasCompletedPrerequisites = (task: Task, board: BoardSnapshot): boolean => {
   if (!task.depends_on.length) return true;
@@ -30,8 +32,7 @@ export const isUserQueueEligible = (
 ): boolean => {
   // An unanswered question on an AI task is an Inbox request, not a transfer
   // of ownership. It may remain open even when implementation is Done.
-  const pendingQuestion = task.kind === "task" && task.attention.includes("question") &&
-    !!task.question?.prompt && !task.question.answer;
+  const pendingQuestion = hasPendingQuestion(task);
   // Visual reviews have their own queue. A rejected verdict is finished human
   // work even while the agent is preparing a new round, and an approved
   // review must not reappear simply because the card is still For user.
@@ -41,6 +42,9 @@ export const isUserQueueEligible = (
     (task.kind === "task" && task.attention.includes("needs-user"));
   const terminal = !!task.completed || board.config.columns.some((column) =>
     column.id === task.column && column.terminal);
-  return !task.archived && (pendingQuestion || (userOwned && !terminal)) &&
+  // A direct question is actionable immediately, even if the underlying work
+  // still depends on unfinished tasks or was snoozed before this question.
+  if (pendingQuestion) return !task.archived;
+  return !task.archived && userOwned && !terminal &&
     hasCompletedPrerequisites(task, board) && (snoozes[task.id] ?? 0) <= now;
 };
