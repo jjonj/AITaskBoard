@@ -2,9 +2,6 @@ import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./WindowControls.css";
 
-// The quick-create overlay and browser preview should not gain desktop chrome.
-export const windowTitlebarEnabled = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-
 export function WindowControls() {
   const [maximized, setMaximized] = useState(false);
 
