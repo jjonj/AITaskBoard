@@ -1,16 +1,23 @@
 /* Frameless Windows chrome. Tabs are the first row, with a fixed grip and
    controls outside the horizontally scrollable tab strip. */
 .project-titlebar-drag {
-  flex: 1 1 50px;
-  min-width: 38px;
+  position: absolute;
+  top: 0;
+  right: 135px;
+  width: 50px;
+  height: 42px;
   cursor: grab;
   user-select: none;
 }
 .project-titlebar-drag:active { cursor: grabbing; }
 .project-window-controls {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 5;
   display: flex;
-  flex: 0 0 auto;
   align-items: stretch;
+  background: #0c1118;
 }
 .project-window-controls button {
   display: grid;
