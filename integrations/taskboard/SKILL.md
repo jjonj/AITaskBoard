@@ -23,6 +23,8 @@ For mutations, inspect each command's exit code and JSON before continuing, and 
 
 Use the CLI instead of directly editing TaskBoard frontmatter when a semantic operation exists. For automation, pass `--json`.
 
+**Per-task model (agents):** Without `model_selection`, T3 dispatches the ChatGPT browser; a native model must be explicitly authorized by the user. Set on create or update with `task update TASK-#### --model claudeAgent/claude-opus-5-5 --effort medium --user-approval "<user's exact words>"` (or the same flags on `task create`). The CLI and OMCPT `taskboard` tool reject non-ChatGPT selections without that quote and append it to the task description for audit. `task update TASK-#### --clear-model` returns to ChatGPT without approval; the human desktop model picker is exempt. Provider/model IDs must match the installed T3 provider and model; inspect `task show --json` to confirm. Never invent approval.
+
 ## AI-ready column semantics
 
 Every column has a persistent `ai_ready` boolean. Autonomous agents may select work from **any** column where `ai_ready: true`.

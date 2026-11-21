@@ -3,7 +3,7 @@ mod review_gate_link;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use serde_json::{json, Value};
 use std::{collections::HashSet, fs, path::{Path, PathBuf}, process};
-use task_core::{AI_READY_COLUMN_ID, BoardConfig, BoardSnapshot, Column, FsTaskStore, Task, TaskAttention, TaskDraft, TaskQuestion, TaskStore, TaskStoreError, ReviewInputArtifact, ReviewRequest, ReviewResolution, ReviewPin};
+use task_core::{AI_READY_COLUMN_ID, BoardConfig, BoardSnapshot, Column, FsTaskStore, Task, TaskAttention, TaskDraft, TaskQuestion, TaskModelEffort, TaskModelSelection, TaskStore, TaskStoreError, ReviewInputArtifact, ReviewRequest, ReviewResolution, ReviewPin};
 
 const WARTRIBES_BOARD: &str = r"B:\GDrive\SharedWithPhone\Obsidian\jjj\Wartribes\Tasks";
 const TASK_CREATE_GUIDANCE: &str = r"C:\Users\crovea\.agents\docs\guidance\taskboard.md";
@@ -324,6 +324,12 @@ struct TaskCreateArgs {
     user_notes: String,
     #[arg(long = "attention")]
     attention: Vec<String>,
+    /// provider/model (e.g. claudeAgent/claude-opus-5-5); omitted uses ChatGPT browser.
+    #[arg(long)] model: Option<String>,
+    /// Model reasoning effort (default: medium).
+    #[arg(long, value_parser = ["low", "medium", "high", "xhigh"])] effort: Option<String>,
+    /// Required for non-ChatGPT selections: quote the user's exact approval text.
+    #[arg(long)] user_approval: Option<String>,
     #[arg(long)]
     question: Option<String>,
     #[arg(long = "option")]
@@ -349,6 +355,14 @@ struct TaskUpdateArgs {
     icon: Option<String>,
     #[arg(long)]
     clear_icon: bool,
+    /// provider/model (e.g. claudeAgent/claude-opus-5-5); omitted leaves model unchanged.
+    #[arg(long, conflicts_with = "clear_model")] model: Option<String>,
+    /// Model reasoning effort (default: medium).
+    #[arg(long, value_parser = ["low", "medium", "high", "xhigh"])] effort: Option<String>,
+    /// Clear the selection so the task uses the ChatGPT browser.
+    #[arg(long)] clear_model: bool,
+    /// Required for non-ChatGPT selections: quote the user's exact approval text.
+    #[arg(long)] user_approval: Option<String>,
     #[arg(long)]
     kind: Option<String>,
     #[arg(long)]
@@ -1166,6 +1180,7 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
             Ok(json!({ "tasks": tasks }))
         }
         TaskCommand::Create(args) => {
+            let model_selection = parse_agent_model(args.model.as_deref(), args.effort.as_deref(), args.user_approval.as_deref())?;
             if let Some(question) = &args.question { validate_inbox_question(question)?; }
             let snapshot = load_checked(store, root)?;
             // A question about existing implementation belongs on that task,
@@ -1214,7 +1229,7 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
                 parent,
                 kind,
                 review_mode: parse_review_mode(&args.review_mode)?,
-                model_selection: None,
+                model_selection: model_selection.clone(),
                 deployable: None,
                 repeat_every_days: args.repeat_every_days,
                 next_due: args.next_due.clone(),
@@ -1225,7 +1240,7 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
                 attention,
                 question,
                 blocked_reason: args.blocked_reason.clone(),
-                description: args.description.clone(),
+                description: append_model_approval(args.description.clone(), model_selection.as_ref(), args.user_approval.as_deref()),
                 acceptance_criteria: args.acceptance_criteria.clone(),
                 ai_notes: args.ai_notes.clone(),
                 user_notes: args.user_notes.clone(),
@@ -1239,6 +1254,10 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
             Ok(json!(task))
         }
         TaskCommand::Update(args) => {
+            if args.clear_model && (args.effort.is_some() || args.user_approval.is_some()) {
+                return Err(CliError::new("invalid_model", "--clear-model cannot be combined with --effort or --user-approval"));
+            }
+            let model_selection = parse_agent_model(args.model.as_deref(), args.effort.as_deref(), args.user_approval.as_deref())?;
             let snapshot = load_checked(store, root)?;
             let mut task = resolve_task(&snapshot, &args.target, false)?.clone();
             ensure_task_rewrite_safe(&task)?;
@@ -1250,6 +1269,11 @@ fn run_task(store: &FsTaskStore, root: &Path, command: &TaskCommand) -> Result<V
                 task.kind = new_kind;
             }
             if let Some(mode) = &args.review_mode { task.review_mode = parse_review_mode(mode)?; }
+            if args.clear_model { task.model_selection = None; }
+            else if let Some(model) = model_selection {
+                task.description = append_model_approval(task.description, Some(&model), args.user_approval.as_deref());
+                task.model_selection = Some(model);
+            }
             if args.clear_recurrence { task.repeat_every_days = None; task.next_due = None; }
             if let Some(days) = args.repeat_every_days { task.repeat_every_days = Some(days); }
             if let Some(due) = &args.next_due { task.next_due = Some(due.clone()); }
@@ -1654,6 +1678,57 @@ fn run_column(store: &FsTaskStore, root: &Path, command: &ColumnCommand) -> Resu
             Ok(json!(saved))
         }
     }
+}
+
+/// Agent CLI/OMCPT writes require an auditable user quote for paid/native providers.
+fn parse_agent_model(
+    value: Option<&str>,
+    effort: Option<&str>,
+    approval: Option<&str>,
+) -> Result<Option<TaskModelSelection>, CliError> {
+    let Some(value) = value else {
+        if effort.is_some() || approval.is_some() {
+            return Err(CliError::new("invalid_model", "--effort and --user-approval require --model"));
+        }
+        return Ok(None);
+    };
+    let (provider, model) = value.split_once('/').unwrap_or(("", ""));
+    let supported = provider == "chatgpt" || provider == "claudeAgent"
+        || provider.starts_with("claudeAgent_") || provider == "codex"
+        || provider.starts_with("codex_") || provider == "opencode"
+        || provider.starts_with("opencode_");
+    if !supported || model.trim().is_empty() || model != model.trim() {
+        return Err(CliError::new("invalid_model",
+            "--model must be provider/model using a T3 provider id (e.g. claudeAgent/claude-opus-5-5)"));
+    }
+    let effort = match effort.unwrap_or("medium") {
+        "low" => TaskModelEffort::Low,
+        "medium" => TaskModelEffort::Medium,
+        "high" => TaskModelEffort::High,
+        "xhigh" => TaskModelEffort::Xhigh,
+        _ => return Err(CliError::new("invalid_model", "effort must be low, medium, high or xhigh")),
+    };
+    if provider != "chatgpt" && approval.is_none_or(|text| text.trim().is_empty()) {
+        return Err(CliError::new("user_approval_required",
+            "Non-ChatGPT models require explicit user permission: pass --user-approval \"<the user's exact words>\""));
+    }
+    Ok(Some(TaskModelSelection { provider: provider.into(), model: model.into(), effort }))
+}
+
+fn append_model_approval(
+    mut description: String,
+    selection: Option<&TaskModelSelection>,
+    approval: Option<&str>,
+) -> String {
+    if let (Some(selection), Some(approval)) = (selection, approval) {
+        if selection.provider != "chatgpt" {
+            description.push_str(&format!(
+                "\n\n**Model-selection approval:** {} ({} / {}, {:?})",
+                approval, selection.provider, selection.model, selection.effort
+            ));
+        }
+    }
+    description
 }
 
 fn parse_kind(value: &str) -> Result<task_core::TaskKind, CliError> {
