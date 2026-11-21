@@ -2601,6 +2601,9 @@ Details: ${queueRecoveryWarning}`;
   const chooseDraftKind = (kind: TaskDraft["kind"]) => {
     if (!editor) return;
     if (prepRequestId) { setError("Preparation has started for this task ID. Save or close this draft before changing the task type."); return; }
+    // The For user flag changes ownership, not placement. Preserve the selected
+    // column (including User Drafts) when enabling or disabling it.
+    const togglingForUser = kind === "for_user" || editor.draft.kind === "for_user";
     setEditor({
       ...editor,
       draft: {
@@ -2611,7 +2614,7 @@ Details: ${queueRecoveryWarning}`;
         next_due: kind === "recurring" ? editor.draft.next_due : null,
         parent: kind === "epic" ? null : editor.draft.parent,
         column: editor.mode === "create"
-          ? kind === "epic" ? "draft" : kind === "for_user" ? "in-progress" : defaultCreateColumn() ?? editor.draft.column
+          ? kind === "epic" ? "draft" : togglingForUser ? editor.draft.column : defaultCreateColumn() ?? editor.draft.column
           : editor.draft.column,
         depends_on: kind === "epic" ? [] : editor.draft.depends_on,
         icon: kind === "epic" ? null : editor.draft.icon,
