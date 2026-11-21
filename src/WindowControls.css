@@ -1,0 +1,37 @@
+/* Frameless Windows chrome. Tabs are the first row, with a fixed grip and
+   controls outside the horizontally scrollable tab strip. */
+.project-titlebar-drag {
+  flex: 1 1 50px;
+  min-width: 38px;
+  cursor: grab;
+  user-select: none;
+}
+.project-titlebar-drag:active { cursor: grabbing; }
+.project-window-controls {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: stretch;
+}
+.project-window-controls button {
+  display: grid;
+  place-items: center;
+  width: 45px;
+  min-height: 42px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #b6c1cd;
+  cursor: pointer;
+}
+.project-window-controls button:hover { background: #273749; color: #fff; }
+.project-window-controls button:focus-visible { outline: 2px solid #95c4f0; outline-offset: -3px; }
+.project-window-controls .project-window-close:hover { background: #c42b34; color: #fff; }
+.project-window-controls svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.3;
+  stroke-linecap: square;
+}

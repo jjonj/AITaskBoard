@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import "./ProjectTabs.css";
 import { QueueIntelligence } from "./QueueIntelligence";
+import { WindowControls, windowTitlebarEnabled } from "./WindowControls";
 import { isInboxItemSnoozed, readInboxSnoozes } from "./inboxSnoozes";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
@@ -792,6 +793,7 @@ export function ProjectTabs({ Board }: Props) {
   return (
     <div className="project-shell">
       {switchHint && <div className="project-switch-hint" role="status">Switching to {switchHint} · Ctrl+Tab</div>}
+      <div className="project-titlebar">
       <div className="project-tabs" ref={tabStrip} role="tablist" aria-label="Project task boards">
         <QueueIntelligence data={globalQueueWorkload} error={queueWorkloadError}
           onOpenTask={(path, taskId) => setStartupTask({ path, taskId, requestKey: Date.now() })} />
@@ -854,6 +856,8 @@ export function ProjectTabs({ Board }: Props) {
         )}
         {refreshingAll && <span className="project-switch-note">Refreshing all boards…</span>}
         {locked && <span className="project-switch-note">Close the editor to change project</span>}
+      </div>
+      {windowTitlebarEnabled && !QUICK_CREATE_WINDOW && <WindowControls />}
       </div>
       {(error || catalogError) && !dialogMode && <div className="project-catalog-error" role="alert">{error || catalogError}</div>}
       {active && (!QUICK_CREATE_WINDOW || quickSnapshots[active.path]) && <div className="project-workspace" id="project-board" role="tabpanel">

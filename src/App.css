@@ -2056,18 +2056,27 @@ body.column-dragging * {
   overflow: hidden;
 }
 .project-workspace .app-shell { height: 100%; }
-.project-tabs {
+.project-titlebar {
   display: flex;
   align-items: stretch;
-  flex: 0 0 auto;
-  gap: 3px;
-  min-height: 43px;
-  padding: 7px 11px 0;
-  overflow-x: auto;
-  overflow-y: hidden;
+  flex: 0 0 43px;
+  min-width: 0;
   background: #0c1118;
   border-bottom: 1px solid #384453;
 }
+.project-tabs {
+  display: flex;
+  align-items: stretch;
+  flex: 0 1 auto;
+  min-width: 0;
+  gap: 3px;
+  min-height: 42px;
+  padding: 7px 6px 0 11px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.project-tabs::-webkit-scrollbar { display: none; }
 .project-tab-wrapper {
   display: flex;
   align-items: stretch;

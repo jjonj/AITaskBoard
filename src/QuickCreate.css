@@ -3,6 +3,7 @@
 .quick-create-window,
 .quick-create-window body,
 .quick-create-window #root { width: 100%; height: 100%; overflow: hidden; }
+.quick-create-window .project-titlebar,
 .quick-create-window .project-tabs,
 .quick-create-window .project-switch-hint,
 .quick-create-window .project-catalog-error { display: none !important; }
