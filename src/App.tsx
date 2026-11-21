@@ -1855,7 +1855,6 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
       return;
     }
     if (!editor) {
-      setReviewOpen(false);
       setTaskDumpOpen(false);
       openCreate();
     }
@@ -3540,7 +3539,7 @@ Details: ${queueRecoveryWarning}`;
       const controlTarget = event.target instanceof Element &&
         !!event.target.closest("button, [role='button']");
 
-      if (event.key === "Escape" && !event.defaultPrevented && !reviewOpen) {
+      if (event.key === "Escape" && !event.defaultPrevented && (!reviewOpen || editor)) {
         // Unwind only the topmost TaskBoard surface. The Inbox owns its deeper
         // fullscreen/gallery/focus/item history, so the board never steals Esc.
         const back = (action: () => void) => {
@@ -4344,7 +4343,7 @@ Details: ${queueRecoveryWarning}`;
 
       {reviewOpen && <div className="review-unified-backdrop" role="dialog" aria-modal="false"
           aria-label="Unified human feedback queue">
-          <ReviewView project={project}
+          <ReviewView project={project} editorOpen={!!editor}
             onClose={() => { setReviewOpen(false); setInboxResumeId(undefined); }}
             initialTaskId={inboxResumeId === undefined ? requestedReviewId : inboxResumeId}
             userTasks={userQueueTasks}
@@ -4798,7 +4797,7 @@ Details: ${queueRecoveryWarning}`;
       )}
 
       {editor && (
-        <div className="modal-backdrop task-editor-backdrop" onMouseDown={() => {
+        <div className="modal-backdrop task-editor-backdrop" style={reviewOpen ? { zIndex: 190 } : undefined} onMouseDown={() => {
           if (projectPickerOpen) setProjectPickerOpen(false);
           else if (!busy) closeEditor();
         }}>

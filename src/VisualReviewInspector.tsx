@@ -39,6 +39,7 @@ const reviewModeDetails: Record<ReviewRound["mode"], { label: string; explanatio
   markup: { label: "Markup review", explanation: "Markup review: annotate the proposed work before submitting feedback." },
 };
 type Props = {
+  suspended?: boolean;
   review: Item;
   round: ReviewRound;
   history: ReviewRound[];
@@ -116,7 +117,7 @@ const isDashboard = (artifact: ReviewArtifact | undefined, boardPath: string) =>
  */
 export function VisualReviewInspector(props: Props) {
   const {
-    review, round, history, items, selectedKey, onSelectTask, onBack, onExitInbox, queueThumbnails, queueModes, queueCounts, onOpenTask, onOpenSession, sessionOpening, onTogglePriority, priorityBusy, allBoards, showResolved,
+    suspended = false, review, round, history, items, selectedKey, onSelectTask, onBack, onExitInbox, queueThumbnails, queueModes, queueCounts, onOpenTask, onOpenSession, sessionOpening, onTogglePriority, priorityBusy, allBoards, showResolved,
     onAllBoards, onShowResolved, playable, activeIndex, onFocusArtifact, onChooseArtifact, onClearRanking,
     choice, ranking, pins, setPins, pinning, onTogglePin, addPin, renderArtifact, remoteReviewUrl,
     posterOf, iframeWidth, htmlFrameRef, onIframeWidth, note, setNote, saving,
@@ -309,6 +310,7 @@ export function VisualReviewInspector(props: Props) {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      if (suspended) return;
       if (imageFullscreen) {
         if (event.key === "Escape") {
           event.preventDefault();
@@ -399,7 +401,7 @@ export function VisualReviewInspector(props: Props) {
     // Capture before the shared Inbox Escape handler so Focus only exits Focus.
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [focus, imageFullscreen, dashboardMode, gallerySelectedIndex, galleryCount, onBack, onFocusArtifact, activeIndex, playable, active?.kind, moreOpen, compare, pinning, onTogglePin, copyMenuOpen, previousItem, onSelectTask, onExitInbox, onMoveToDraft, onArchive, saving, onOpenTask, onOpenSession, sessionOpening, review.task.claimed_by, review.task.live?.with_me, priorityBusy, onTogglePriority]);
+  }, [suspended, focus, imageFullscreen, dashboardMode, gallerySelectedIndex, galleryCount, onBack, onFocusArtifact, activeIndex, playable, active?.kind, moreOpen, compare, pinning, onTogglePin, copyMenuOpen, previousItem, onSelectTask, onExitInbox, onMoveToDraft, onArchive, saving, onOpenTask, onOpenSession, sessionOpening, review.task.claimed_by, review.task.live?.with_me, priorityBusy, onTogglePriority]);
 
   const originalAddress = (artifact: ReviewArtifact) => {
     if (artifact.kind === "url") return artifact.path;

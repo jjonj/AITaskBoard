@@ -26,6 +26,7 @@ type InboxDraft = {
 type Props = {
   project: ProjectTab;
   onClose: () => void;
+  editorOpen?: boolean;
   initialTaskId?: string;
   userTasks?: Task[];
   onOpenUserTask?: (task: Task) => void;
@@ -96,7 +97,7 @@ const loadReviewSnoozes = (): Record<string, number> => {
   } catch { return {}; }
 };
 
-export function ReviewView({ project, onClose, initialTaskId, userTasks = [], onOpenUserTask, onUserTaskUpdated, onSnoozeUserTask }: Props) {
+export function ReviewView({ project, onClose, editorOpen = false, initialTaskId, userTasks = [], onOpenUserTask, onUserTaskUpdated, onSnoozeUserTask }: Props) {
   const [allBoards, setAllBoards] = useState(false);
   const [showResolved, setShowResolved] = useState(false);
   const [items, setItems] = useState<QueueItem[]>([]);
@@ -965,6 +966,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
 
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
+      if (editorOpen) return; // Keep Inbox navigation inactive under the task editor.
       if (event.key === "Escape") {
         // The inspector owns its nested stack. Text Inbox closes its menu first,
         // then returns to the board, matching the visual Inbox exit behavior.
@@ -1090,7 +1092,7 @@ export function ReviewView({ project, onClose, initialTaskId, userTasks = [], on
   // Any visual review gets the same maximized inspection workspace. Human
   // text requests continue to use the compact unified Inbox below.
   if (isVisualReview && reviewTask && round) {
-    return <VisualReviewInspector
+    return <VisualReviewInspector suspended={editorOpen}
       review={reviewTask}
       round={round}
       history={manifest?.rounds.slice(0, -1) ?? []}
