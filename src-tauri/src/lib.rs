@@ -1073,6 +1073,7 @@ pub fn run() {
             projects::activate_project,
             projects::reorder_projects,
             projects::remove_project,
+            projects::unarchive_project,
             projects::restore_project,
             projects::move_task_between_projects,
             default_board_path,

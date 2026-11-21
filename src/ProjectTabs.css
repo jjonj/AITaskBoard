@@ -25,3 +25,53 @@
 }
 .project-tab-wrapper.project-tab-insert-before::before { left: -4px; }
 .project-tab-wrapper.project-tab-insert-after::after { right: -4px; }
+
+/* Global TaskBoard settings: reversible project archive management. */
+.global-settings-dialog { width: min(670px, 95vw); }
+.global-settings-dialog h3 {
+  color: #dce7f5;
+  font-size: 13px;
+  font-weight: 700;
+  margin: 21px 0 8px;
+}
+.global-board-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 32vh;
+  overflow-y: auto;
+}
+.global-board-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 9px 11px;
+  border: 1px solid #3a5066;
+  border-radius: 8px;
+  background: #172433;
+}
+.global-board-description {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  color: #e1e9f2;
+  font-size: 13px;
+}
+.global-board-description small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 420px;
+  color: #8ca3b9;
+  font-size: 10px;
+}
+.global-board-actions { display: flex; gap: 6px; flex: none; }
+.global-board-row > .button { flex: none; }
+.global-settings-dialog .global-boards-empty {
+  margin: 0;
+  padding: 12px;
+  color: #93a8bd;
+}
+.global-settings-dialog .project-dialog-actions { margin-top: 20px; }

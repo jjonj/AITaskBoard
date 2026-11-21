@@ -8,7 +8,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { QUICK_CREATE_WINDOW } from "./quickCreate";
-import { activateProject, addProject, boardChangeTokens, listProjects, loadBoard, loadQuickBoard, moveTaskBetweenProjects, removeProject, reorderProjects, restoreProject, saveBoardConfig, setProjectFolders, showMainWindow, userQueueProjectIds, taskQueueWorkload } from "./api";
+import { activateProject, addProject, boardChangeTokens, listProjects, loadBoard, loadQuickBoard, moveTaskBetweenProjects, archiveProject, unarchiveProject, reorderProjects, restoreProject, saveBoardConfig, setProjectFolders, showMainWindow, userQueueProjectIds, taskQueueWorkload } from "./api";
 import type { ProjectCatalog, ProjectPriority, ProjectTab, QueueWorkload } from "./api";
 import type { BoardConfig, BoardSnapshot, TaskDraft } from "./types";
 import type { PendingClipboardImage } from "./TaskImageGallery";
@@ -198,10 +198,36 @@ export function ProjectTabs({ Board }: Props) {
   const [catalogError, setCatalogError] = useState("");
   const catalogLoaded = useRef(false);
   const [dialogMode, setDialogMode] = useState<DialogMode>(null);
+  const [globalSettingsOpen, setGlobalSettingsOpen] = useState(false);
+  const [pendingArchiveId, setPendingArchiveId] = useState<string | null>(null);
+  useEffect(() => {
+    if (QUICK_CREATE_WINDOW) return;
+    const openSettings = () => {
+      if (working || locked || dialogMode) return;
+      setError("");
+      setPendingArchiveId(null);
+      setGlobalSettingsOpen(true);
+    };
+    window.addEventListener("taskboard:global-settings", openSettings);
+    return () => window.removeEventListener("taskboard:global-settings", openSettings);
+  }, [working, locked, dialogMode]);
+  useEffect(() => {
+    if (!globalSettingsOpen) return;
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || working) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setGlobalSettingsOpen(false);
+      setPendingArchiveId(null);
+      setError("");
+    };
+    window.addEventListener("keydown", onEscape, true);
+    return () => window.removeEventListener("keydown", onEscape, true);
+  }, [globalSettingsOpen, working]);
   const [editingId, setEditingId] = useState("");
   const [confirmCloseTab, setConfirmCloseTab] = useState(false);
   const [undoProjectAction, setUndoProjectAction] = useState<
-    { kind: "close"; project: ProjectTab; index: number } |
+    { kind: "archive"; project: ProjectTab; index: number } |
     { kind: "reorder"; ids: string[] } | null
   >(null);
   const [name, setName] = useState("");
@@ -263,7 +289,7 @@ export function ProjectTabs({ Board }: Props) {
   }, []);
 
   useEffect(() => {
-    if (working || locked || dialogMode) return;
+    if (working || locked || dialogMode || globalSettingsOpen) return;
     let mounted = true;
     let pending = false;
     const refresh = async () => {
@@ -301,7 +327,7 @@ export function ProjectTabs({ Board }: Props) {
       window.clearInterval(interval);
       window.removeEventListener("focus", refresh);
     };
-  }, [working, locked, dialogMode]);
+  }, [working, locked, dialogMode, globalSettingsOpen]);
 
   // Agents and CLI tools write Markdown directly. A cheap metadata scan covers
   // every project, not just the mounted tab. A changed inactive board gets a
@@ -409,17 +435,17 @@ export function ProjectTabs({ Board }: Props) {
   // only when its editor/drag is closed; never replace an unsaved draft.
   useEffect(() => {
     const activeId = catalog?.activeId;
-    if (!activeId || !changedProjects[activeId] || locked || working || dialogMode) return;
+    if (!activeId || !changedProjects[activeId] || locked || working || dialogMode || globalSettingsOpen) return;
     window.dispatchEvent(new CustomEvent("taskboard:refresh-board", { detail: { silent: true } }));
     setChangedProjects((current) => {
       const next = { ...current };
       delete next[activeId];
       return next;
     });
-  }, [catalog?.activeId, changedProjects, locked, working, dialogMode]);
+  }, [catalog?.activeId, changedProjects, locked, working, dialogMode, globalSettingsOpen]);
 
   const refreshAllBoards = async () => {
-    if (manualRefreshPending.current || !catalog) return;
+    if (manualRefreshPending.current || !catalog || globalSettingsOpen) return;
     manualRefreshPending.current = true;
     setRefreshingAll(true);
     // Refresh the mounted board through its own concurrency-safe read path.
@@ -473,7 +499,7 @@ export function ProjectTabs({ Board }: Props) {
       window.removeEventListener("taskboard:refresh-all", onRefresh);
       window.removeEventListener("keydown", onKey, true);
     };
-  }, [catalog]);
+  }, [catalog, globalSettingsOpen]);
 
   // Keep an MRU order, like Windows task switching. Windows reserves Alt+Tab
   // globally, so Ctrl+Tab is the reliable in-app equivalent.
@@ -487,7 +513,7 @@ export function ProjectTabs({ Board }: Props) {
   useEffect(() => {
     const onSwitch = (event: KeyboardEvent) => {
       if (event.key !== "Tab" || !(event.ctrlKey !== event.altKey) || event.metaKey ||
-          working || locked || dialogMode || !catalog || catalog.projects.length < 2) return;
+          working || locked || dialogMode || globalSettingsOpen || !catalog || catalog.projects.length < 2) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       const order = recentProjects.current.filter((id) => catalog.projects.some((p) => p.id === id));
@@ -502,13 +528,13 @@ export function ProjectTabs({ Board }: Props) {
     };
     window.addEventListener("keydown", onSwitch, true);
     return () => window.removeEventListener("keydown", onSwitch, true);
-  }, [catalog, working, locked, dialogMode]);
+  }, [catalog, working, locked, dialogMode, globalSettingsOpen]);
   // F1..F12 switch tabs, except F5 which is reserved for Refresh all.
   // Only intercept keys that actually map to a project.
   useEffect(() => {
     const handleFunctionKey = (event: KeyboardEvent) => {
       if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.repeat ||
-          working || locked || dialogMode || !catalog) return;
+          working || locked || dialogMode || globalSettingsOpen || !catalog) return;
       const match = /^F([1-9]|1[0-2])$/.exec(event.key);
       if (!match || event.key === "F5") return;
       const destination = catalog.projects[Number(match[1]) - 1];
@@ -518,17 +544,17 @@ export function ProjectTabs({ Board }: Props) {
     };
     window.addEventListener("keydown", handleFunctionKey);
     return () => window.removeEventListener("keydown", handleFunctionKey);
-  }, [working, locked, dialogMode, catalog]);
+  }, [working, locked, dialogMode, globalSettingsOpen, catalog]);
 
   const switchTo = (id: string) => {
-    if (working || locked || dialogMode || !catalog || catalog.activeId === id) return;
+    if (working || locked || dialogMode || globalSettingsOpen || !catalog || catalog.activeId === id) return;
     setError("");
     // Render immediately; save selection independently and refresh cached data.
     setCatalog((current) => current ? { ...current, activeId: id } : current);
   };
 
   const reorder = async (fromId: string, toId: string, after: boolean) => {
-    if (!catalog || working || locked || dialogMode || fromId === toId) return;
+    if (!catalog || working || locked || dialogMode || globalSettingsOpen || fromId === toId) return;
     const ids = catalog.projects.map((item) => item.id);
     if (!ids.includes(fromId) || !ids.includes(toId)) return;
 
@@ -606,11 +632,11 @@ export function ProjectTabs({ Board }: Props) {
   }, [catalog, working, locked, dialogMode]);
 
   const undoProjectChange = async () => {
-    if (!undoProjectAction || working || locked || dialogMode) return;
+    if (!undoProjectAction || working || locked || dialogMode || globalSettingsOpen) return;
     setWorking(true);
     setError("");
     try {
-      const updated = undoProjectAction.kind === "close"
+      const updated = undoProjectAction.kind === "archive"
         ? await restoreProject(undoProjectAction.project, undoProjectAction.index)
         : await reorderProjects(undoProjectAction.ids);
       setCatalog(updated);
@@ -626,7 +652,7 @@ export function ProjectTabs({ Board }: Props) {
     const onUndo = (event: KeyboardEvent) => {
       if (!event.ctrlKey || event.metaKey || event.altKey || event.shiftKey ||
           event.key.toLowerCase() !== "z" || event.repeat ||
-          locked || working || dialogMode || !undoProjectAction) return;
+          locked || working || dialogMode || globalSettingsOpen || !undoProjectAction) return;
       const target = event.target;
       if (target instanceof Element && target.closest("input,textarea,[contenteditable],.task-modal")) return;
       event.preventDefault();
@@ -635,7 +661,7 @@ export function ProjectTabs({ Board }: Props) {
     };
     window.addEventListener("keydown", onUndo, true);
     return () => window.removeEventListener("keydown", onUndo, true);
-  }, [undoProjectAction, locked, working, dialogMode]);
+  }, [undoProjectAction, locked, working, dialogMode, globalSettingsOpen]);
 
   const startCreate = () => {
     setConfirmCloseTab(false);
@@ -735,21 +761,35 @@ export function ProjectTabs({ Board }: Props) {
     }
   };
 
-  const remove = async (project: ProjectTab) => {
-    if (working || locked || !catalog || catalog.projects.length < 2 || !confirmCloseTab ||
-        dialogMode !== "folders" || editingId !== project.id) return;
+  const archiveBoard = async (project: ProjectTab, fromProjectSettings = false) => {
+    if (working || locked || !catalog || catalog.projects.length < 2) return;
     setWorking(true);
     setError("");
     try {
       const previousIndex = catalog.projects.findIndex((item) => item.id === project.id);
-      const updated = await removeProject(project.id);
-      setUndoProjectAction({ kind: "close", project, index: previousIndex });
-      setLocked(false);
+      const updated = await archiveProject(project.id);
+      setUndoProjectAction({ kind: "archive", project, index: previousIndex });
       setCatalog(updated);
-      setDialogMode(null);
+      setPendingArchiveId(null);
+      if (fromProjectSettings) setDialogMode(null);
       setConfirmCloseTab(false);
     } catch (err) {
       setError(String(err));
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const unarchiveBoard = async (project: ProjectTab) => {
+    if (working || locked) return;
+    setWorking(true);
+    setError("");
+    try {
+      setCatalog(await unarchiveProject(project.id));
+      setUndoProjectAction(null);
+      setGlobalSettingsOpen(false);
+    } catch (err) {
+      setError("Could not unarchive " + project.name + ": " + String(err));
     } finally {
       setWorking(false);
     }
@@ -827,7 +867,7 @@ export function ProjectTabs({ Board }: Props) {
               aria-controls="project-board"
               className="project-tab"
               title={`Drag to reorder · ${catalog.projects.indexOf(project) === 4 ? "F5 refreshes all boards" : `F${catalog.projects.indexOf(project) + 1}`} · Tasks: ${project.path}\nProject folders: ${(project.folders || []).join("; ") || "(none)"}${changedProjects[project.id] ? "\nNew external changes detected" : ""}`}
-              disabled={working || locked || !!dialogMode}
+              disabled={working || locked || !!dialogMode || globalSettingsOpen}
               onClick={() => void switchTo(project.id)}
             >{project.name}
               {inboxCount > 0 && <span className="project-tab-user-count"
@@ -837,7 +877,7 @@ export function ProjectTabs({ Board }: Props) {
             <button type="button" className="project-tab-settings"
               aria-label={`Edit ${project.name} settings`}
               title="Project priority, folders and ID prefixes"
-              disabled={working || locked || !!dialogMode}
+              disabled={working || locked || !!dialogMode || globalSettingsOpen}
               onClick={() => void startEditFolders(project)}>⚙</button>
 
           </div>
@@ -845,14 +885,14 @@ export function ProjectTabs({ Board }: Props) {
         })}
         <button type="button" className="project-tab-add"
           title="Add a project with its own TaskBoard tasks"
-          disabled={working || locked || !!dialogMode || !catalog}
+          disabled={working || locked || !!dialogMode || globalSettingsOpen || !catalog}
           onClick={startCreate}>+ Project</button>
         {undoProjectAction && (
           <button type="button" className="project-undo-button"
-            disabled={working || locked || !!dialogMode}
-            title="Undo the last project tab closure or reorder (Ctrl+Z)"
+            disabled={working || locked || !!dialogMode || globalSettingsOpen}
+            title="Undo the last TaskBoard archive or tab reorder (Ctrl+Z)"
             onClick={() => void undoProjectChange()}>
-            ↶ Undo {undoProjectAction.kind === "close" ? "close" : "order"}
+            ↶ Undo {undoProjectAction.kind === "archive" ? "archive" : "order"}
           </button>
         )}
         {refreshingAll && <span className="project-switch-note">Refreshing all boards…</span>}
@@ -873,6 +913,56 @@ export function ProjectTabs({ Board }: Props) {
               ? { requestedTask: { id: startupTask.taskId, requestKey: startupTask.requestKey } } : {})} />
       </div>}
       {!active && <div className="project-loading">Loading TaskBoard project tabs…</div>}
+      {globalSettingsOpen && catalog && (
+        <div className="modal-backdrop project-add-backdrop"
+          onMouseDown={() => { if (!working) { setGlobalSettingsOpen(false); setPendingArchiveId(null); setError(""); } }}>
+          <section className="project-add-dialog global-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="global-settings-heading"
+            onMouseDown={(event) => event.stopPropagation()}>
+            <h2 id="global-settings-heading">Global settings</h2>
+            <p>Choose which project TaskBoards appear in the tab strip. Archiving only hides a board here;
+              the Obsidian tasks, attachments, project folders and ID prefixes stay unchanged.</p>
+            <h3>Active TaskBoards ({catalog.projects.length})</h3>
+            <div className="global-board-list">
+              {catalog.projects.map((project) => (
+                <div className="global-board-row" key={project.id}>
+                  <div className="global-board-description">
+                    <strong>{project.name}</strong><small title={project.path}>{project.path}</small>
+                  </div>
+                  {pendingArchiveId === project.id ? (
+                    <div className="global-board-actions">
+                      <button type="button" className="button secondary" disabled={working}
+                        onClick={() => setPendingArchiveId(null)}>Cancel</button>
+                      <button type="button" className="button danger" disabled={working}
+                        onClick={() => void archiveBoard(project)}>Confirm archive</button>
+                    </div>
+                  ) : (
+                    <button type="button" className="button secondary" disabled={working || catalog.projects.length < 2}
+                      title={catalog.projects.length < 2 ? "Keep at least one active TaskBoard" : "Hide this TaskBoard without deleting files"}
+                      onClick={() => setPendingArchiveId(project.id)}>Archive…</button>
+                  )}
+                </div>
+              ))}
+            </div>
+            <h3>Archived TaskBoards ({catalog.archivedProjects?.length ?? 0})</h3>
+            <div className="global-board-list">
+              {catalog.archivedProjects?.length ? catalog.archivedProjects.map((project) => (
+                <div className="global-board-row" key={project.id}>
+                  <div className="global-board-description">
+                    <strong>{project.name}</strong><small title={project.path}>{project.path}</small>
+                  </div>
+                  <button type="button" className="button primary" disabled={working}
+                    onClick={() => void unarchiveBoard(project)}>Unarchive</button>
+                </div>
+              )) : <p className="global-boards-empty">No archived TaskBoards.</p>}
+            </div>
+            {error && <div className="project-form-error" role="alert">{error}</div>}
+            <div className="project-dialog-actions">
+              <button type="button" className="button secondary" disabled={working}
+                onClick={() => { setGlobalSettingsOpen(false); setPendingArchiveId(null); setError(""); }}>Close</button>
+            </div>
+          </section>
+        </div>
+      )}
       {dialogMode && (
         <div className="modal-backdrop project-add-backdrop"
           onMouseDown={() => { if (!working) setDialogMode(null); }}>
@@ -940,25 +1030,25 @@ export function ProjectTabs({ Board }: Props) {
             {dialogMode === "folders" && catalog && catalog.projects.length > 1 && (
               <div className="project-close-section">
                 <div>
-                  <strong>Close this project tab</strong>
-                  <p>Removes ${name} from this TaskBoard tab strip. All project folders,
-                    Markdown tasks and project data remain on disk.</p>
+                  <strong>Archive this TaskBoard</strong>
+                  <p>Hides {name} from the tabs. All Markdown tasks, attachments and project
+                    settings stay on disk. Restore it from More → Global settings.</p>
                 </div>
                 {confirmCloseTab ? (
                   <div className="project-close-confirm">
-                    <span>Close ${name}?</span>
+                    <span>Archive {name}?</span>
                     <button type="button" className="button secondary" disabled={working}
                       onClick={() => setConfirmCloseTab(false)}>Keep tab</button>
                     <button type="button" className="button danger" disabled={working}
                       onClick={() => {
                         const project = catalog.projects.find((item) => item.id === editingId);
-                        if (project) void remove(project);
-                      }}>Confirm close</button>
+                        if (project) void archiveBoard(project, true);
+                      }}>Confirm archive</button>
                   </div>
                 ) : (
                   <button type="button" className="button secondary project-settings-close"
                     disabled={working} onClick={() => setConfirmCloseTab(true)}>
-                    Close tab…
+                    Archive TaskBoard…
                   </button>
                 )}
               </div>

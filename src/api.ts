@@ -4,7 +4,7 @@ import type { BoardConfig, BoardSnapshot, Task, TaskDraft } from "./types";
 export const taskModelFavorites = () => invoke<Array<{ provider: string; model: string }>>("task_model_favorites");
 export type ProjectPriority = "high" | "normal" | "low";
 export type ProjectTab = { id: string; name: string; path: string; folders: string[]; priority: ProjectPriority };
-export type ProjectCatalog = { schema: number; activeId: string; projects: ProjectTab[] };
+export type ProjectCatalog = { schema: number; activeId: string; projects: ProjectTab[]; archivedProjects?: ProjectTab[] };
 export const listProjects = () => invoke<ProjectCatalog>("list_projects");
 export const addProject = (name: string, folders: string[], taskPrefix: string, epicPrefix: string) =>
   invoke<ProjectCatalog>("add_project", { name, folders, taskPrefix, epicPrefix });
@@ -14,8 +14,10 @@ export const activateProject = (id: string) =>
   invoke<ProjectCatalog>("activate_project", { id });
 export const reorderProjects = (ids: string[]) =>
   invoke<ProjectCatalog>("reorder_projects", { ids });
-export const removeProject = (id: string) =>
+export const archiveProject = (id: string) =>
   invoke<ProjectCatalog>("remove_project", { id });
+export const unarchiveProject = (id: string) =>
+  invoke<ProjectCatalog>("unarchive_project", { id });
 export const restoreProject = (project: ProjectTab, index: number) =>
   invoke<ProjectCatalog>("restore_project", { project, index });
 export const moveTaskBetweenProjects = (

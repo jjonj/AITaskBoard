@@ -34,6 +34,9 @@ pub struct ProjectCatalog {
     pub schema: u32,
     pub active_id: String,
     pub projects: Vec<Project>,
+    // Archived boards stay on disk, with identity, folders and priority intact.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub archived_projects: Vec<Project>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hidden_paths: Vec<String>,
 }
@@ -43,6 +46,7 @@ fn default_catalog() -> ProjectCatalog {
         schema: 1,
         active_id: "wartribes".into(),
         hidden_paths: Vec::new(),
+        archived_projects: Vec::new(),
         projects: vec![Project {
             id: "wartribes".into(),
             name: "Wartribes".into(),
@@ -89,7 +93,8 @@ fn discover_boards(mut catalog: ProjectCatalog, vault: &Path) -> Result<ProjectC
     roots.extend(catalog.projects.iter().map(|project| PathBuf::from(&project.path)));
     for root in roots {
         let path = root.to_string_lossy().into_owned();
-        if catalog.hidden_paths.iter().any(|hidden| same_path(hidden, &path)) { continue; }
+        if catalog.hidden_paths.iter().any(|hidden| same_path(hidden, &path)) ||
+            catalog.archived_projects.iter().any(|archived| same_path(&archived.path, &path)) { continue; }
         let Ok(markdown) = fs::read_to_string(root.join("_board.md")) else { continue; };
         let mut lines = markdown.lines();
         if lines.next().map(str::trim) != Some("---") { continue; }
@@ -112,6 +117,29 @@ fn discover_boards(mut catalog: ProjectCatalog, vault: &Path) -> Result<ProjectC
                 path, folders: Vec::new(), priority: ProjectPriority::Normal,
             });
         }
+    }
+    // Older versions only remembered closed paths. Make those boards restorable
+    // without losing the exclusion list, even before the next catalog write.
+    for path in catalog.hidden_paths.clone() {
+        if catalog.archived_projects.iter().any(|project| same_path(&project.path, &path)) ||
+            catalog.projects.iter().any(|project| same_path(&project.path, &path)) { continue; }
+        let root = Path::new(&path);
+        let name = fs::read_to_string(root.join("_board.md")).ok()
+            .and_then(|markdown| {
+                let mut lines = markdown.lines();
+                (lines.next().map(str::trim) == Some("---")).then(|| {
+                    lines.take_while(|line| line.trim() != "---").collect::<Vec<_>>().join("\n")
+                })
+            })
+            .and_then(|yaml| serde_yaml::from_str::<serde_yaml::Value>(&yaml).ok())
+            .and_then(|board| board.get("name")?.as_str().map(str::to_owned))
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| root.parent().and_then(|p| p.file_name())
+                .unwrap_or_default().to_string_lossy().into_owned());
+        catalog.archived_projects.push(Project {
+            id: format!("discovered:{}", normalized_path(&path)),
+            name, path, folders: Vec::new(), priority: ProjectPriority::Normal,
+        });
     }
     // Listing never writes projects.json, so polling cannot overwrite another
     // window's folder associations or active tab. Mutations persist as before.
@@ -203,6 +231,9 @@ pub fn add_project(name: String, folders: Vec<String>, task_prefix: String, epic
     let mut catalog = load()?;
     if catalog.projects.iter().any(|p| same_path(&p.path, &root.to_string_lossy())) {
         return Err("This project's TaskBoard already has a tab".into());
+    }
+    if catalog.archived_projects.iter().any(|p| same_path(&p.path, &root.to_string_lossy())) {
+        return Err("This TaskBoard is archived. Unarchive it in Global settings.".into());
     }
     // Creating a project never touches its source directories. An existing
     // Obsidian board is reused, and the store only initializes missing files.
@@ -449,48 +480,109 @@ pub fn move_task_between_projects(
     Ok(new_task)
 }
 
-#[tauri::command]
-pub fn restore_project(project: Project, index: usize) -> Result<ProjectCatalog, String> {
-    let mut catalog = load()?;
+fn restore_archived(mut catalog: ProjectCatalog, id: &str, index: usize) -> Result<ProjectCatalog, String> {
+    let position = catalog.archived_projects.iter().position(|item| item.id == id)
+        .ok_or("This TaskBoard is not archived")?;
+    let project = &catalog.archived_projects[position];
     if catalog.projects.iter().any(|item| item.id == project.id || same_path(&item.path, &project.path)) {
-        return Err("The project is already open".into());
-    }
-    if !catalog.hidden_paths.iter().any(|path| same_path(path, &project.path)) {
-        return Err("This project was not closed or has already been restored".into());
+        return Err("This TaskBoard is already open".into());
     }
     if !Path::new(&project.path).join("_board.md").is_file() {
-        return Err("The original project TaskBoard is not accessible".into());
+        return Err("The archived TaskBoard is not accessible on disk".into());
     }
+    let project = catalog.archived_projects.remove(position);
     catalog.hidden_paths.retain(|path| !same_path(path, &project.path));
     catalog.projects.insert(index.min(catalog.projects.len()), project.clone());
     catalog.active_id = project.id;
-    save(&catalog)?;
     Ok(catalog)
 }
 
 #[tauri::command]
-pub fn remove_project(id: String) -> Result<ProjectCatalog, String> {
-    let mut catalog = load()?;
+pub fn restore_project(project: Project, index: usize) -> Result<ProjectCatalog, String> {
+    let catalog = load()?;
+    // Undo must restore the catalog's saved metadata, not stale client values.
+    let archived = catalog.archived_projects.iter().find(|item| item.id == project.id && same_path(&item.path, &project.path))
+        .ok_or("This TaskBoard is no longer archived")?;
+    let restored = restore_archived(catalog.clone(), &archived.id, index)?;
+    save(&restored)?;
+    Ok(restored)
+}
+
+#[tauri::command]
+pub fn unarchive_project(id: String) -> Result<ProjectCatalog, String> {
+    let catalog = load()?;
+    let index = catalog.projects.len();
+    let restored = restore_archived(catalog, &id, index)?;
+    save(&restored)?;
+    Ok(restored)
+}
+
+fn archive_in_catalog(mut catalog: ProjectCatalog, id: &str) -> Result<ProjectCatalog, String> {
     if catalog.projects.len() == 1 {
         return Err("Keep at least one project tab".into());
     }
     if !catalog.projects.iter().any(|p| p.id == id) {
         return Err("Unknown project tab".into());
     }
-    let removed_path = catalog.projects.iter().find(|p| p.id == id).unwrap().path.clone();
-    if !catalog.hidden_paths.iter().any(|path| same_path(path, &removed_path)) {
-        catalog.hidden_paths.push(removed_path);
+    let index = catalog.projects.iter().position(|p| p.id == id).unwrap();
+    let archived = catalog.projects.remove(index);
+    if !catalog.hidden_paths.iter().any(|path| same_path(path, &archived.path)) {
+        catalog.hidden_paths.push(archived.path.clone());
     }
-    catalog.projects.retain(|p| p.id != id);
+    catalog.archived_projects.push(archived);
     if catalog.active_id == id { catalog.active_id = catalog.projects[0].id.clone(); }
+    // No task, attachment or _board.md files are moved/deleted.
+    Ok(catalog)
+}
+
+#[tauri::command]
+pub fn remove_project(id: String) -> Result<ProjectCatalog, String> {
+    let catalog = archive_in_catalog(load()?, &id)?;
     save(&catalog)?;
-    // Intentionally never touch the on-disk task board or its directory.
     Ok(catalog)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archived_taskboard_round_trip_retains_metadata_without_touching_tasks() {
+        let base = std::env::temp_dir().join(format!("taskboard-archive-{}", uuidless_unique_id()));
+        let vault = base.join("vault");
+        let root = vault.join("Another").join("Tasks");
+        fs::create_dir_all(root.join("Active")).unwrap();
+        fs::write(root.join("_board.md"), "---\nname: Another\n---\n").unwrap();
+        fs::write(root.join("Active").join("ALT-0001.md"), "original task").unwrap();
+
+        let mut catalog = default_catalog();
+        let source = Project {
+            id: "another-board".into(), name: "Another".into(),
+            path: root.to_string_lossy().into_owned(),
+            folders: vec!["D:/Workspace/Another".into()], priority: ProjectPriority::High,
+        };
+        catalog.projects.push(source.clone());
+        catalog.active_id = source.id.clone();
+        assert!(archive_in_catalog(default_catalog(), "wartribes").is_err(),
+            "last active TaskBoard cannot be archived");
+        let archived = archive_in_catalog(catalog, &source.id).unwrap();
+        assert_eq!(archived.active_id, "wartribes");
+        assert_eq!(archived.archived_projects.len(), 1);
+        let saved = base.join("projects.json");
+        save_at(&saved, &archived).unwrap();
+        let discovered = discover_boards(load_at(&saved).unwrap(), &vault).unwrap();
+        assert_eq!(discovered.projects.len(), 1, "archived board must stay out of tabs");
+        assert_eq!(discovered.archived_projects[0].folders, source.folders);
+        assert_eq!(discovered.archived_projects[0].priority, source.priority);
+        let restored = restore_archived(discovered, &source.id, 1).unwrap();
+        assert_eq!(restored.active_id, source.id);
+        assert_eq!(restored.projects[1].folders, source.folders);
+        assert_eq!(restored.projects[1].priority, source.priority);
+        assert!(restored.archived_projects.is_empty());
+        assert!(restored.hidden_paths.is_empty());
+        assert_eq!(fs::read_to_string(root.join("Active").join("ALT-0001.md")).unwrap(), "original task");
+        fs::remove_dir_all(&base).unwrap();
+    }
 
     #[test]
     fn external_boards_are_discovered_live_without_changing_identity_or_selection() {
@@ -530,7 +622,10 @@ mod tests {
         let mut hidden = default_catalog();
         hidden.hidden_paths.push(discovered.path);
         save_at(&catalog_file, &hidden).unwrap();
-        assert_eq!(discover_boards(load_at(&catalog_file).unwrap(), &vault).unwrap().projects.len(), 1);
+        let legacy_archived = discover_boards(load_at(&catalog_file).unwrap(), &vault).unwrap();
+        assert_eq!(legacy_archived.projects.len(), 1);
+        assert_eq!(legacy_archived.archived_projects.len(), 1);
+        assert_eq!(legacy_archived.archived_projects[0].name, "Citizen renamed");
         fs::write(&metadata, "---\nname: [incomplete").unwrap();
         assert_eq!(discover_boards(default_catalog(), &vault).unwrap().projects.len(), 1);
         assert_eq!(discover_boards(registered, &base.join("offline")).unwrap().projects.len(), 2);

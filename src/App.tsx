@@ -3915,6 +3915,12 @@ Details: ${queueRecoveryWarning}`;
                 title="Configure resume window, idle wake, missing-session grace and external leases">
                 <ToolbarIcon name="agents" /><span>Agent recovery settings</span>
               </button>
+              <div className="menu-section">TaskBoard</div>
+              <button type="button" role="menuitem" disabled={busy || !!editor}
+                onClick={() => { setMoreMenuOpen(false); window.dispatchEvent(new Event("taskboard:global-settings")); }}
+                title="Manage active and archived TaskBoards across all projects">
+                <ToolbarIcon name="agents" /><span>Global settings</span>
+              </button>
               <div className="menu-footer" title={boardPath}><ToolbarIcon name="folder" size={13} /><span>{boardPath}</span></div>
             </div>}
           </div>
