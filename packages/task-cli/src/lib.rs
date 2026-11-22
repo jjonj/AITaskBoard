@@ -897,6 +897,7 @@ fn run_task_queue(store: &FsTaskStore, root: &Path, command: &TaskQueueCommand) 
                     },
                     "claimed": task.claimed_by.is_some(),
                     "claimedBy": task.claimed_by,
+                    "modelSelection": task.model_selection,
                     "queueRequest": intent.queue_request,
                     "state": state,
                     "stateSince": intent.queue_state_since,
