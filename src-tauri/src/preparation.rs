@@ -20,7 +20,7 @@ fn run_node(script: &str, args: &[String], input: Option<&Value>) -> Result<Valu
     if !Path::new(script).is_file() { return Err(format!("T3 CLI unavailable: {script}")); }
     let home = t3_home()?;
     let mut cmd = Command::new("node");
-    cmd.arg(script).args(args).env("T3CODE_HOME", &home)
+    cmd.arg("--no-warnings").arg(script).args(args).env("T3CODE_HOME", &home)
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)] cmd.creation_flags(0x08000000);
     let mut process = cmd.spawn().map_err(|e| format!("Cannot start T3 CLI: {e}"))?;
@@ -124,11 +124,16 @@ pub async fn notify_task_preparation_saved(
         }
         let session_id = matching[0].get("id").and_then(Value::as_str)
             .ok_or("T3 session identity unavailable")?;
-        // The message ID is stable: repeated notifications resolve through T3's durable outbox.
+        let conversation_id = matching[0].get("conversationId").and_then(Value::as_str)
+            .filter(|id| Uuid::parse_str(id).is_ok())
+            .ok_or("T3 preparation conversation is not yet registered; retry the saved notification")?;
+        // Persist against the unique spawn request and registered conversation.
+        // The outbox verifies the mounted guest later; it is safe to enqueue before mount.
         let sent = run_node(T3_SESSIONS, &[], Some(&json!({
-            "action": "send",
+            "action": "enqueue",
             "messageId": request_id,
             "sessionId": session_id,
+            "expectedConversationId": conversation_id,
             "message": format!(
                 "TASK SAVED. The canonical TaskBoard task now exists: {id}\nBoard root: {path}\n\
                  Reread its current title, description, acceptance criteria and notes. \
@@ -139,6 +144,12 @@ pub async fn notify_task_preparation_saved(
                  Do not implement or claim the task."
             )
         })))?;
+        if sent.get("messageId").and_then(Value::as_str) != Some(request_id.as_str()) ||
+            sent.get("sessionId").and_then(Value::as_str) != Some(session_id) ||
+            sent.get("conversationId").and_then(Value::as_str) != Some(conversation_id) ||
+            sent.get("status").and_then(Value::as_str).is_none() {
+            return Err("T3 did not acknowledge the exact preparation notification in its durable outbox".into());
+        }
         Ok(json!({"sessionId": session_id, "delivery": sent}))
     }).await.map_err(|e| format!("Cannot notify preparation agent: {e}"))?
 }
