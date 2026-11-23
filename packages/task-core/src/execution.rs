@@ -545,8 +545,10 @@ impl FsTaskStore {
         let mut mapping: serde_yaml::Mapping = serde_yaml::from_str(&yaml)
             .map_err(|e| TaskStoreError::Parse(e.to_string()))?;
         // A parked task must not retain a queue lease that can reactivate it.
-        // AI Ready keeps queue eligibility; every other column stays parked.
-        if task.column == AI_READY_COLUMN_ID && previous.mode == ExecutionMode::Queue {
+        // Any executable Todo column preserves Queue intent after recovery.
+        let auto_queued = snapshot.config.columns.iter().any(|column| column.id == task.column && column.auto_queue);
+        if queue_enabled_column(&snapshot.config, &task.column) && (previous.mode == ExecutionMode::Queue || auto_queued) {
+            mapping.insert(key("execution_mode"), key("queue"));
             mapping.insert(key("queue_request"), key(&uuid::Uuid::new_v4().to_string()));
             mapping.insert(key("queue_state"), key("queued"));
             mapping.insert(key("queue_state_since"), key(&now.to_rfc3339_opts(SecondsFormat::Millis, true)));
@@ -684,6 +686,11 @@ impl FsTaskStore {
     /// A manual Start now preempts only work that has not entered starting.
     pub fn prepare_manual_start(&self, root: &Path, id: &str) -> Result<(), TaskStoreError> {
         let _lock = acquire_lock(root)?;
+        let snapshot = self.load_unlocked(root)?;
+        if snapshot.tasks.iter().any(|task| task.id == id &&
+            snapshot.config.columns.iter().any(|column| column.id == task.column && column.auto_queue)) {
+            return Err(TaskStoreError::Conflict(format!("{id} belongs to an auto-queue column")));
+        }
         let path = find_task_path(root, id)?;
         let (text, mut mapping, body) = load(&path)?;
         let previous = intent(&mapping, &text)?;
@@ -714,6 +721,13 @@ impl FsTaskStore {
     /// re-saving Queue never creates another request or OpenRig side effect.
     pub fn set_execution_mode(&self, root: &Path, id: &str, expected: &str, mode: ExecutionMode) -> Result<ExecutionIntent, TaskStoreError> {
         let _lock = acquire_lock(root)?;
+        if mode == ExecutionMode::Backlog {
+            let snapshot = self.load_unlocked(root)?;
+            if snapshot.tasks.iter().any(|task| task.id == id &&
+                snapshot.config.columns.iter().any(|column| column.id == task.column && column.auto_queue)) {
+                return Err(TaskStoreError::Conflict(format!("{id} belongs to an auto-queue column")));
+            }
+        }
         let path = find_task_path(root, id)?;
         let (text, mut mapping, body) = load(&path)?;
         if revision(&text) != expected { return Err(TaskStoreError::Conflict(format!("{id} changed on disk"))); }
@@ -824,6 +838,11 @@ impl FsTaskStore {
     /// A pending request cannot be silently replaced/replayed.
     pub fn request_start_now(&self, root: &Path, id: &str, expected: &str) -> Result<ExecutionIntent, TaskStoreError> {
         let _lock = acquire_lock(root)?;
+        let snapshot = self.load_unlocked(root)?;
+        if snapshot.tasks.iter().any(|task| task.id == id &&
+            snapshot.config.columns.iter().any(|column| column.id == task.column && column.auto_queue)) {
+            return Err(TaskStoreError::Conflict(format!("{id} belongs to an auto-queue column")));
+        }
         let path = find_task_path(root, id)?;
         let (text, mut mapping, body) = load(&path)?;
         if revision(&text) != expected { return Err(TaskStoreError::Conflict(format!("{id} changed on disk"))); }

@@ -749,14 +749,10 @@ function ProjectBoard({ project, onInteractionChange, requestedReviewId, request
     }).finally(() => { if (!cancelled) setExecutionLoading(false); });
     return () => { cancelled = true; };
   }, [boardPath, editor?.mode, editor?.original?.id]);
-  // New and moved tasks inherit the destination column's Queue policy.
-  // Only Start now remains an independent choice at that transition.
-  const editorAdoptsColumnQueue = !!editor &&
-    (editor.mode === "create" || editor.original?.column !== editor.draft.column);
+  // Queue-enabled columns require Queue; other columns leave task-level choices intact.
   const destinationAutoQueued = snapshot?.config.columns.some(col =>
     col.id === editor?.draft.column && col.ai_ready && col.auto_queue) === true;
-  const editorQueueChoice = editorAdoptsColumnQueue && executionChoice !== "start_now"
-    ? destinationAutoQueued ? "queue" : "backlog"
+  const editorQueueChoice = destinationAutoQueued ? "queue"
     : (!executionTouched && editor && editor.draft.attention.includes("priority") &&
        !editor.original?.attention.includes("priority")) ? "queue" : executionChoice;
   const [releasesOpen, setReleasesOpen] = useState(false);
@@ -2191,12 +2187,17 @@ Details: ${queueRecoveryWarning}`;
   // Displayed queue state = in-flight optimistic value, else persisted state.
   const columnAutoQueued = (column: BoardConfig["columns"][number]) =>
     pendingColumnQueue[column.id] ?? !!column.auto_queue;
+  const columnEnforcesQueue = (columnId: string) => {
+    const column = snapshot?.config.columns.find(item => item.id === columnId);
+    return !!column && columnAutoQueued(column);
+  };
   const taskQueued = (task: Task) =>
-    pendingTaskQueue[task.id] ?? pendingColumnQueue[task.column] ?? executionModes[task.id]?.mode === "queue";
+    columnEnforcesQueue(task.column) ||
+    (pendingTaskQueue[task.id] ?? executionModes[task.id]?.mode === "queue");
 
   // Card queue toggle. Ignores repeat clicks while its own write is in flight.
   const toggleTaskQueue = async (task: Task) => {
-    if (task.id in pendingTaskQueue || !queueEligible(task)) return;
+    if (task.id in pendingTaskQueue || !queueEligible(task) || columnEnforcesQueue(task.column)) return;
     const next = !taskQueued(task);
     setPendingTaskQueue(current => ({ ...current, [task.id]: next }));
     setError("");
@@ -2216,8 +2217,7 @@ Details: ${queueRecoveryWarning}`;
     }
   };
 
-  // Column auto-queue toggle: saves the column policy, then aligns every
-  // currently eligible task in the column with it.
+  // Turning a column on enforces Queue; turning it off leaves task intents alone.
   const toggleColumnQueue = async (columnId: string) => {
     if (!snapshot || columnId in pendingColumnQueue) return;
     const shown = snapshot.config.columns.find(item => item.id === columnId);
@@ -2233,12 +2233,12 @@ Details: ${queueRecoveryWarning}`;
       // even if a later individual queue CAS encounters an uncertain receipt.
       const afterPolicy = await loadBoard(boardPath);
       const conflicts: string[] = [];
-      for (const task of afterPolicy.tasks.filter(task =>
-        task.column === columnId && queueEligible(task))) {
+      for (const task of next ? afterPolicy.tasks.filter(task =>
+        task.column === columnId && queueEligible(task)) : []) {
         try {
           const mode = await taskExecutionIntent(task.id, boardPath);
-          if (mode.mode !== (next ? "queue" : "backlog")) {
-            await taskSetExecutionMode(task.id, mode.revision, next ? "queue" : "backlog", boardPath);
+          if (mode.mode !== "queue") {
+            await taskSetExecutionMode(task.id, mode.revision, "queue", boardPath);
           }
         } catch (err) { conflicts.push(`${task.id}: ${errorText(err)}`); }
       }
@@ -2440,15 +2440,15 @@ Details: ${queueRecoveryWarning}`;
         if (withMeSelected !== (savedTask.live?.with_me === true)) {
           savedTask = await taskLiveWithMe(savedTask.id, savedTask.revision, withMeSelected, boardPath);
         }
-        const selectedMode = editor.mode === "create" ? editorQueueChoice : executionChoice;
+        const selectedMode = destinationAutoQueued ? "queue" : editor.mode === "create" ? editorQueueChoice : executionChoice;
         if (selectedMode === "start_now") {
           // The saved task is durable; do not hold the editor open while T3
           // creates/opens a browser session or delivers its prompt.
           if (!implicit) startAfterSave = { id: savedTask.id, implement: !withMeSelected };
-        } else if (executionTouched && editor.mode === "edit" &&
-                   editor.original?.column === savedTask.column) {
-          // A newly created or moved card adopts its destination column's
-          // Queue policy, even if the editor previously displayed another mode.
+        } else if ((editor.mode === "create" && selectedMode === "queue") ||
+                   (editor.mode === "edit" && executionTouched)) {
+          // An auto-queue column is enforced by the store; otherwise honor the
+          // user's explicit choice, even when creating or moving a card.
           const current = await taskExecutionIntent(savedTask.id, boardPath);
           if (selectedMode !== current.mode)
             await taskSetExecutionMode(savedTask.id, current.revision, selectedMode, boardPath);
@@ -4103,7 +4103,7 @@ Details: ${queueRecoveryWarning}`;
                     const autoQueued = columnAutoQueued(column);
                     return <button type="button"
                       className={`queue-intent-toggle column-queue-toggle${autoQueued ? " queued" : ""}${columnQueueMixed ? " mixed" : ""}${column.id in pendingColumnQueue ? " pending" : ""}`}
-                      title={`Auto-queue ${autoQueued ? "ON" : "OFF"} · ${queuedColumnCount}/${eligibleColumnQueue.length} eligible tasks queued\nClick to turn ${autoQueued ? "off" : "on"} for current and future tasks`}
+                      title={`Auto-queue ${autoQueued ? "ON" : "OFF"} · ${queuedColumnCount}/${eligibleColumnQueue.length} eligible tasks queued\n${autoQueued ? "Turn off enforcement (existing queued tasks stay queued)" : "Turn on to require Queue for every task in this column"}`}
                       aria-label={`${column.name} auto-queue`}
                       aria-pressed={autoQueued}
                       onClick={() => void toggleColumnQueue(column.id)}><QueueArrows /></button>;
@@ -4259,14 +4259,14 @@ Details: ${queueRecoveryWarning}`;
                           const queued = taskQueued(task);
                           return <button type="button"
                             className={`queue-intent-toggle card-queue-toggle${queued ? " queued" : ""}${task.id in pendingTaskQueue ? " pending" : ""}`}
-                            title={queued
+                            title={columnEnforcesQueue(task.column) ? "Queue required by column policy" : queued
                               ? `Queued · ${queueReconciliationOffline ? "OpenRig unavailable, pending sync" :
                                   queueSyncStatuses[task.id] ? `${queueSyncStatuses[task.id].status}: ${queueSyncStatuses[task.id].reason ?? "exact receipt tracked"}` :
                                     "durable intent, awaiting reconciliation"} · click to return to Backlog`
                               : "Backlog · click to Queue"}
                             aria-label={`${queued ? "Unqueue" : "Queue"} ${task.id}`}
                             aria-pressed={queued}
-                            disabled={!executionModes[task.id] && !(task.id in pendingTaskQueue)}
+                            disabled={columnEnforcesQueue(task.column) || (!executionModes[task.id] && !(task.id in pendingTaskQueue))}
                             onPointerDown={event => event.stopPropagation()}
                             onMouseDown={event => event.stopPropagation()}
                             onClick={event => { event.stopPropagation(); void toggleTaskQueue(task); }}><QueueArrows /></button>;
@@ -5426,8 +5426,7 @@ Details: ${queueRecoveryWarning}`;
                 editor.draft.depends_on.every(id => isComplete(id)) &&
                 <div className="execution-mode-picker" role="group" aria-label="Execution mode">
                 {(["backlog", "queue", "start_now"] as const)
-                  .filter(mode => !editorAdoptsColumnQueue || mode === "start_now" ||
-                  mode === (destinationAutoQueued ? "queue" : "backlog"))
+                  .filter(mode => !destinationAutoQueued || mode === "queue")
                   .map((mode) =>
                   <button type="button" key={mode} disabled={busy || executionLoading}
                     aria-pressed={editorQueueChoice === mode}

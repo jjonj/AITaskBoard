@@ -483,9 +483,8 @@ impl FsTaskStore {
         Ok(changed)
     }
 
-    /// Inherit a column Queue default only when prerequisites have become ready.
-    /// No polling or dispatch occurs here; repeated loads are no-ops after the
-    /// first durable mode/request transition.
+    /// Enforce Queue intent for every unclaimed task in an auto-queue column.
+    /// Readiness still gates dispatch; repeated loads preserve the request ID.
     fn maintain_auto_queue(&self, snapshot: &BoardSnapshot) -> Result<bool, TaskStoreError> {
         let mut changed = false;
         for task in snapshot.tasks.iter().filter(|task| {
@@ -874,6 +873,7 @@ impl FsTaskStore {
         let text = render_board(&config, Some(&original))?;
         write_text_atomic(&path, &text)?;
         config.revision = revision(&text);
+        self.maintain_auto_queue(&self.load_unlocked(root)?)?;
         Ok(config)
     }
 
@@ -1942,6 +1942,7 @@ impl TaskStore for FsTaskStore {
         let text = render_board(&config, Some(&existing))?;
         write_text_atomic(&path, &text)?;
         config.revision = revision(&text);
+        self.maintain_auto_queue(&self.load_unlocked(root)?)?;
         Ok(config)
     }
 
@@ -3025,17 +3026,16 @@ fn queue_policy_text(
     if task.archived || task.completed.is_some() || task.claimed_by.is_some() ||
         !matches!(task.kind, TaskKind::Task | TaskKind::Recurring) ||
         !queue_enabled_column(&snapshot.config, &task.column) ||
-        task.attention.iter().any(|a| matches!(a, TaskAttention::Blocked | TaskAttention::NeedsUser | TaskAttention::Question)) ||
+        (!column.auto_queue && (task.attention.iter().any(|a| matches!(a, TaskAttention::Blocked | TaskAttention::NeedsUser | TaskAttention::Question)) ||
         task.question.as_ref().is_some_and(|q| q.answer.is_none()) ||
-        task.review_status.as_deref() == Some("open") {
+        task.review_status.as_deref() == Some("open"))) {
         return Ok(text.to_owned());
     }
     let moved = previous.is_some_and(|before| before.column != task.column);
     let newly_prioritized = !moved && previous.is_some_and(|before|
         task.attention.contains(&TaskAttention::Priority) &&
         !before.attention.contains(&TaskAttention::Priority));
-    // A new card and any move to a different Todo column adopt that column's
-    // Queue setting. A task-level override applies only while staying put.
+    // Auto-queue columns require Queue; other columns preserve individual intent.
     if !moved && !column.auto_queue && !newly_prioritized &&
         !task.attention.contains(&TaskAttention::Priority) {
         return Ok(text.to_owned());
@@ -3046,19 +3046,7 @@ fn queue_policy_text(
     let key = |s: &str| serde_yaml::Value::String(s.into());
     let mut changed = false;
     if moved {
-        changed |= map.remove(key("queue_manual")).is_some();
         changed |= map.remove(key("queue_inherit")).is_some();
-        if !column.auto_queue {
-            // Preserve any legacy registration receipt for cancellation, but
-            // invalidate the current intent/reservation so it cannot dispatch.
-            map.insert(key("execution_mode"), key("backlog"));
-            map.insert(key("queue_manual"), serde_yaml::Value::Bool(true));
-            for field in ["queue_state", "queue_state_since", "queue_reservation_id",
-                          "queue_reservation_expires_at", "queue_session_id", "queue_error"] {
-                map.remove(key(field));
-            }
-            changed = true;
-        }
     }
     if newly_prioritized && map.get(key("queue_inherit")) != Some(&serde_yaml::Value::Bool(true)) {
         map.insert(key("queue_inherit"), serde_yaml::Value::Bool(true));
@@ -3067,7 +3055,7 @@ fn queue_policy_text(
     let inherited = map.get(key("queue_inherit")).and_then(|v| v.as_bool()) == Some(true);
     let manual = map.get(key("queue_manual")).and_then(|v| v.as_bool()) == Some(true);
     let queued = map.get(key("execution_mode")).and_then(|v| v.as_str()) == Some("queue");
-    if (column.auto_queue || inherited) && !manual && !queued {
+    if (column.auto_queue || (inherited && !manual)) && !queued {
         // An unretired legacy Queue registration cannot safely be replayed.
         let old_request = map.get(key("queue_request")).and_then(|v| v.as_str());
         let retired = old_request.is_some_and(|request|

@@ -90,15 +90,20 @@ fn start_now_request_is_one_shot_and_unknown_receipt_blocks_replay() {
 }
 
 #[test]
-fn column_auto_queue_applies_to_future_ready_tasks_and_keeps_manual_backlog() {
+fn column_auto_queue_is_mandatory_but_disabling_it_preserves_queued_tasks() {
     use task_core::queue_task_ready;
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let store = FsTaskStore;
     store.ensure_board(root, "Column Queue").unwrap();
+    let preexisting = store.create(root, serde_json::from_value(serde_json::json!({
+        "title":"Already here", "column":"ai-ready", "parent":null
+    })).unwrap()).unwrap();
+    assert_eq!(store.execution_intent(root, &preexisting.id).unwrap().mode, ExecutionMode::Backlog);
     let mut board = store.load(root).unwrap().config;
     board.columns.iter_mut().find(|c| c.id == "ai-ready").unwrap().auto_queue = true;
     store.save_config(root, board).unwrap();
+    assert_eq!(store.execution_intent(root, &preexisting.id).unwrap().mode, ExecutionMode::Queue);
     let created = store.create(root, serde_json::from_value(serde_json::json!({
         "title":"New ready", "column":"ai-ready", "parent":null
     })).unwrap()).unwrap();
@@ -107,9 +112,17 @@ fn column_auto_queue_applies_to_future_ready_tasks_and_keeps_manual_backlog() {
     let same = store.load(root).unwrap();
     assert!(queue_task_ready(&same, same.tasks.iter().find(|t| t.id == created.id).unwrap()));
     assert_eq!(store.execution_intent(root, &created.id).unwrap().queue_request, queued.queue_request);
+    assert!(store.set_execution_mode(root, &created.id, &queued.revision, ExecutionMode::Backlog).is_err());
+    assert!(store.request_start_now(root, &created.id, &queued.revision).is_err());
+    assert_eq!(store.execution_intent(root, &created.id).unwrap().mode, ExecutionMode::Queue);
+    let mut config = store.load(root).unwrap().config;
+    config.columns.iter_mut().find(|c| c.id == "ai-ready").unwrap().auto_queue = false;
+    store.save_config(root, config).unwrap();
+    assert_eq!(store.execution_intent(root, &created.id).unwrap().queue_request, queued.queue_request);
+    assert_eq!(store.execution_intent(root, &created.id).unwrap().mode, ExecutionMode::Queue);
     let manual = store.set_execution_mode(root, &created.id, &queued.revision, ExecutionMode::Backlog).unwrap();
     assert_eq!(manual.mode, ExecutionMode::Backlog);
-    assert_eq!(store.load(root).unwrap().tasks.len(), 1);
+    store.load(root).unwrap();
     assert_eq!(store.execution_intent(root, &created.id).unwrap().mode, ExecutionMode::Backlog);
 }
 
@@ -136,22 +149,24 @@ fn moving_a_task_adopts_column_queue_policy_for_human_and_agent_edits() {
     let mut task = created;
     task.column = "ai-ready".into();
     let moved = store.update_as(root, task, MutationActor::Agent).unwrap();
-    assert_eq!(store.execution_intent(root, &moved.id).unwrap().mode, ExecutionMode::Backlog);
+    assert_eq!(store.execution_intent(root, &moved.id).unwrap().mode, ExecutionMode::Queue);
 
-    // The destination policy overrides even a prior explicit per-card preference.
-    let manually_queued = store.set_execution_mode(root, &moved.id, &moved.revision, ExecutionMode::Queue).unwrap();
+    // A non-auto-queue destination preserves the task's explicit Queue intent.
+    let manually_queued = store.execution_intent(root, &moved.id).unwrap();
     let mut task = store.load(root).unwrap().tasks.into_iter().find(|t| t.id == moved.id).unwrap();
     task.column = "auto-queued".into();
     let moved = store.update_as(root, task, MutationActor::Human).unwrap();
     assert_eq!(store.execution_intent(root, &moved.id).unwrap().mode, ExecutionMode::Queue);
     assert_eq!(store.execution_intent(root, &moved.id).unwrap().queue_request, manually_queued.queue_request);
 
-    let manual = store.set_execution_mode(root, &moved.id, &moved.revision, ExecutionMode::Backlog).unwrap();
+    assert!(store.set_execution_mode(root, &moved.id, &store.execution_intent(root, &moved.id).unwrap().revision, ExecutionMode::Backlog).is_err());
     let mut task = store.load(root).unwrap().tasks.into_iter().find(|t| t.id == moved.id).unwrap();
     task.column = "ai-ready".into();
     let moved = store.update_as(root, task, MutationActor::Agent).unwrap();
-    assert_eq!(store.execution_intent(root, &moved.id).unwrap().mode, ExecutionMode::Backlog);
-    let mut task = moved;
+    assert_eq!(store.execution_intent(root, &moved.id).unwrap().mode, ExecutionMode::Queue);
+    let old = store.execution_intent(root, &moved.id).unwrap();
+    let manual = store.set_execution_mode(root, &moved.id, &old.revision, ExecutionMode::Backlog).unwrap();
+    let mut task = store.load(root).unwrap().tasks.into_iter().find(|t| t.id == moved.id).unwrap();
     task.column = "auto-queued".into();
     let moved = store.update_as(root, task, MutationActor::Human).unwrap();
     let next = store.execution_intent(root, &moved.id).unwrap();
