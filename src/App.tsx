@@ -4008,13 +4008,14 @@ Details: ${queueRecoveryWarning}`;
           const eligibleColumnQueue = activeTasks.filter(task => task.column === column.id && queueEligible(task));
           const queuedColumnCount = eligibleColumnQueue.filter(taskQueued).length;
           const columnQueueMixed = queuedColumnCount > 0 && queuedColumnCount < eligibleColumnQueue.length;
-          const columnTasks = orderCardsByDependencies(applyCardPlacements(allColumnTasks
+          const sortedColumnTasks = allColumnTasks
             .filter((task) => !(column.id === "blocked" && hideBlockedInboxTasks && isInReviewInbox(task)))
             .filter((task) => todaysWork || !hideWaitingTasks || !!recentTaskActivity[task.id] || taskFilters.readiness.includes("waiting") || isComplete(task.id) || task.column === "in-progress" || readinessOf(task) !== "waiting")
             .sort((a, b) => column.terminal
               ? completedSortTime(b) - completedSortTime(a) || b.id.localeCompare(a.id)
               : attentionRank(a) - attentionRank(b) ||
-                hierarchyKey(a).localeCompare(hierarchyKey(b)))));
+                hierarchyKey(a).localeCompare(hierarchyKey(b)));
+          const columnTasks = column.terminal ? sortedColumnTasks : orderCardsByDependencies(applyCardPlacements(sortedColumnTasks));
           const columnStyle = {
             "--column-color": column.color || "#77828f",
           } as CSSProperties;
